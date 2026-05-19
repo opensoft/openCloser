@@ -28,13 +28,13 @@ Slice 1 introduces the first Python package layout for openCloser and implements
 
 ## Phase 1: Setup
 
-- [ ] T001 Create `pyproject.toml` with PEP 621 metadata, `>=3.12,<3.14` Python constraint, deps (`typer`, `pydantic>=2.7`, `pytest`, `pytest-cov`, `ruff`), and `[tool.ruff]` + `[tool.pytest.ini_options]` config sections per research.md §Tooling
-- [ ] T002 Create empty package skeleton: `src/opencloser/__init__.py`, `src/opencloser/core/__init__.py`, `src/opencloser/eligibility/__init__.py`, `src/opencloser/transport/__init__.py`, `src/opencloser/persona/__init__.py`, `src/opencloser/crm/__init__.py`, `src/opencloser/state/__init__.py`, `src/opencloser/artifacts/__init__.py`
-- [ ] T003 [P] Create `.gitignore` excluding `artifacts/`, `state/*.db`, `.venv/`, `__pycache__/`, `.pytest_cache/`, `config/slice1.local.toml`
-- [ ] T004 [P] Create `config/slice1.toml` with the default Slice 1 configuration per research.md §Configuration surface (`[call_window]`, `[eligibility]`, `[artifacts]`, `[persona]` sections)
-- [ ] T005 [P] Create empty `tests/__init__.py`, `tests/unit/__init__.py`, `tests/integration/__init__.py`, and `tests/fixtures/__init__.py`
-- [ ] T006 [P] Create fixture sub-directories: `tests/fixtures/queue_items/`, `tests/fixtures/conversations/`, `tests/fixtures/transport_events/` (one `.gitkeep` per dir)
-- [ ] T007 [P] Create a minimal `README.md` linking to `specs/001-mock-call-mock-crm/quickstart.md` and naming Slice 1 as the active feature
+- [x] T001 Create `pyproject.toml` with PEP 621 metadata, `>=3.12,<3.14` Python constraint, deps (`typer`, `pydantic>=2.7`, `pytest`, `pytest-cov`, `ruff`), and `[tool.ruff]` + `[tool.pytest.ini_options]` config sections per research.md §Tooling
+- [x] T002 Create empty package skeleton: `src/opencloser/__init__.py`, `src/opencloser/core/__init__.py`, `src/opencloser/eligibility/__init__.py`, `src/opencloser/transport/__init__.py`, `src/opencloser/persona/__init__.py`, `src/opencloser/crm/__init__.py`, `src/opencloser/state/__init__.py`, `src/opencloser/artifacts/__init__.py`
+- [x] T003 [P] Create `.gitignore` excluding `artifacts/`, `state/*.db`, `.venv/`, `__pycache__/`, `.pytest_cache/`, `config/slice1.local.toml`
+- [x] T004 [P] Create `config/slice1.toml` with the default Slice 1 configuration per research.md §Configuration surface (`[call_window]`, `[eligibility]`, `[artifacts]`, `[persona]` sections)
+- [x] T005 [P] Create empty `tests/__init__.py`, `tests/unit/__init__.py`, `tests/integration/__init__.py`, and `tests/fixtures/__init__.py`
+- [x] T006 [P] Create fixture sub-directories: `tests/fixtures/queue_items/`, `tests/fixtures/conversations/`, `tests/fixtures/transport_events/` (one `.gitkeep` per dir)
+- [x] T007 [P] Create a minimal `README.md` linking to `specs/001-mock-call-mock-crm/quickstart.md` and naming Slice 1 as the active feature
 
 **Checkpoint**: `uv sync` succeeds, `uv run pytest` runs (zero tests yet, exits 5 = no tests collected).
 

@@ -1,0 +1,33 @@
+# openCloser Slice 1 — default configuration
+# See research.md §Configuration surface for the loader semantics.
+# Override any key via env vars: OPENCLOSER_<SECTION>_<KEY>=value
+# Local-only overrides may live in config/slice1.local.toml (gitignored).
+
+[call_window]
+# Per Clarifications Round 2 Q12: [start, end] both ends inclusive, minute resolution.
+# Per Clarifications Round 2 Q11: applies all 7 days of the week in Slice 1.
+start = "09:00"
+end = "20:00"
+
+[eligibility]
+# Per spec §Assumptions: configured maximum-attempts limit; eligibility blocks when attempt_count >= max_attempts.
+max_attempts = 5
+# IANA timezone used when a queue record's timezone field is missing or unparseable.
+default_timezone = "America/Los_Angeles"
+
+[artifacts]
+# Per research.md §Artifact directory & filenames: per-session subdirectories.
+# {dir}/{session_id}/session-result.json (+ writeback.json, task.json, transcript.txt, eligibility-decision.json, conflicting-events.json)
+dir = "./artifacts"
+schema_version = "slice1-v1"
+
+[persona]
+# Per research.md §persona_version format: semver-prefixed with persona name.
+# MAJOR bumps on FR-036 disposition-rule precedence changes;
+# MINOR bumps on FR-010 disclosure / FR-009 allowed-claim language changes;
+# PATCH bumps on bug fixes that preserve observable behavior.
+version = "alf-appointment-setter@0.1.0"
+
+[state]
+# SQLite database path (FR-022 + research.md §State store).
+db = "./state/slice1.db"
