@@ -2,6 +2,8 @@
 Before changing this repository, read `.specify/memory/constitution.md` when present.
 For feature-specific technologies, project structure, shell commands, and
 other implementation details, read the current plan.
+
+**Active plan**: [specs/001-mock-call-mock-crm/plan.md](specs/001-mock-call-mock-crm/plan.md)
 <!-- SPECKIT END -->
 
 # openCloser Agent Context
