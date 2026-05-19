@@ -1,0 +1,17 @@
+{
+  "fixture_id": "connected",
+  "events": [
+    {
+      "event_id": "evt_connected_001",
+      "type": "connected",
+      "timestamp": "2026-05-19T17:00:01.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_completed_001",
+      "type": "completed",
+      "timestamp": "2026-05-19T17:00:45.000Z",
+      "payload": {}
+    }
+  ]
+}
