@@ -171,6 +171,15 @@ The next command (`/speckit.tasks`) will derive an ordered task list from this p
 
 No constitutional gate violations to justify.
 
+## Forward-looking carry-overs to Slice 2
+
+These are not Slice 1 deliverables; they are recorded here so the Slice 2 plan can pick them up cleanly.
+
+- **Transcript `RedactionLayer`**: A new module on the transcript pipeline that runs before disk-write. Default policy: regex + named-entity strip on the PHI keyword set enumerated in FR-010, replaced with `[REDACTED]`. OFF in Slice 1 (no real conversation); ON by default in Slice 2 once real persona output may contain incidental PHI. Per-deployment configurable. Tracked as a Slice 2 backlog item.
+- **E.164 phone validation**: Slice 1 accepts "non-null + non-empty after trim" for FR-004(a); Slice 2 tightens to E.164 format validation when real telephony arrives (SignalWire mandates it).
+- **Weekday-aware call window**: Slice 1 applies the configured window all 7 days; Slice 2 may add weekday filtering via configuration.
+- **`preferred_callback_window` structured parsing**: Slice 1 stores the field verbatim as a free-form string; Slice 2 (scheduling integration) parses to a structured timestamp range.
+
 ## Out-of-Scope (Explicit, for reviewer reassurance)
 
 Repeated from spec.md `## Assumptions` and `## Deferred to Implementation Plan` for plan-reviewer convenience:

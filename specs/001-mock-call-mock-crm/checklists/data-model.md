@@ -7,76 +7,76 @@
 
 ## Requirement Completeness
 
-- [ ] CHK001 - Are all attributes of the Queue Item entity enumerated with explicit types (string / number / boolean / enum / timestamp / nullable)? [Completeness, Spec §Key Entities]
-- [ ] CHK002 - Are all attributes of the Session entity enumerated, including which are required vs. optional and which are mutable vs. write-once? [Completeness, Spec §Key Entities]
-- [ ] CHK003 - Are all attributes of the Mock Call Event entity, including the payload sub-schema for each event type (`connected`, `no_answer`, `voicemail`, `failed`, `completed`, `callback_requested`), specified? [Completeness, Spec §Key Entities + §FR-006]
-- [ ] CHK004 - Are all attributes of the Eligibility Decision entity enumerated (rule names, pass/fail markers per rule, blocking-rule list when blocked, decision timestamp, references to queue item and session)? [Completeness, Spec §Key Entities + §FR-004]
-- [ ] CHK005 - Are the fields of the Normalized Result fully enumerated with types and optionality rules per FR-014, including the optional-when-present semantics for `captured_email`, `preferred_callback_window`, and `human_review_reason`? [Completeness, Spec §FR-014]
-- [ ] CHK006 - Is the Idempotency Key's exact composition (which fields make up the key — provider event identity, session ID, write-back kind, anything else) specified beyond the prose "scoped to provider event identity, session, and write-back kind"? [Gap, Spec §Assumptions] → **RESOLVED-BY-FR-019 (tuple) + Key Entities (Idempotency Key)**
-- [ ] CHK007 - Is the Task Payload's full field set (subject, due date, preferred callback window, reason, references, embedded captured email when present, persona version) enumerated? [Completeness, Spec §Key Entities + §Clarifications]
-- [ ] CHK008 - Are the attributes of the Mock CRM Write-back entity enumerated, including how the three sub-payloads (Phone Call-like activity / queue-status update / Task) are grouped per session and how each is referenced? [Completeness, Spec §Key Entities]
-- [ ] CHK009 - Is the relationship between Session and Mock Call Event (one-to-many, ordering, write-once) specified? [Gap, Spec §Key Entities]
-- [ ] CHK010 - Is the relationship between Queue Item and Session (one-to-many across attempts, or one-to-one per attempt) specified? [Gap]
+- [x] CHK001 - Are all attributes of the Queue Item entity enumerated with explicit types (string / number / boolean / enum / timestamp / nullable)? [Completeness, Spec §Key Entities]
+- [x] CHK002 - Are all attributes of the Session entity enumerated, including which are required vs. optional and which are mutable vs. write-once? [Completeness, Spec §Key Entities]
+- [x] CHK003 - Are all attributes of the Mock Call Event entity, including the payload sub-schema for each event type (`connected`, `no_answer`, `voicemail`, `failed`, `completed`, `callback_requested`), specified? [Completeness, Spec §Key Entities + §FR-006]
+- [x] CHK004 - Are all attributes of the Eligibility Decision entity enumerated (rule names, pass/fail markers per rule, blocking-rule list when blocked, decision timestamp, references to queue item and session)? [Completeness, Spec §Key Entities + §FR-004]
+- [x] CHK005 - Are the fields of the Normalized Result fully enumerated with types and optionality rules per FR-014, including the optional-when-present semantics for `captured_email`, `preferred_callback_window`, and `human_review_reason`? [Completeness, Spec §FR-014]
+- [x] CHK006 - Is the Idempotency Key's exact composition (which fields make up the key — provider event identity, session ID, write-back kind, anything else) specified beyond the prose "scoped to provider event identity, session, and write-back kind"? [Gap, Spec §Assumptions] → **RESOLVED-BY-FR-019 (tuple) + Key Entities (Idempotency Key)**
+- [x] CHK007 - Is the Task Payload's full field set (subject, due date, preferred callback window, reason, references, embedded captured email when present, persona version) enumerated? [Completeness, Spec §Key Entities + §Clarifications]
+- [x] CHK008 - Are the attributes of the Mock CRM Write-back entity enumerated, including how the three sub-payloads (Phone Call-like activity / queue-status update / Task) are grouped per session and how each is referenced? [Completeness, Spec §Key Entities]
+- [x] CHK009 - Is the relationship between Session and Mock Call Event (one-to-many, ordering, write-once) specified? [Gap, Spec §Key Entities]
+- [x] CHK010 - Is the relationship between Queue Item and Session (one-to-many across attempts, or one-to-one per attempt) specified? [Gap]
 
 ## Requirement Clarity
 
-- [ ] CHK011 - Is the data type and value range of `attempt_count` specified (non-negative integer, configured upper bound, what happens at overflow)? [Clarity, Spec §FR-002 + §FR-021]
-- [ ] CHK012 - Is the representation of `preferred_callback_window` specified (single timestamp, start+end range, weekday + hour, free-form string)? [Ambiguity, Spec §FR-014]
-- [ ] CHK013 - Is the format of `transcript_pointer` specified (relative path, URI, opaque token; resolution base)? [Clarity, Spec §Clarifications + §FR-014]
-- [ ] CHK014 - Is the timezone field's representation specified (IANA tz database name, UTC offset, or other) and is the "default applied" indicator a distinct field or a marker on the timezone value? [Ambiguity, Spec §FR-002]
-- [ ] CHK015 - Is the format of `mock_provider_call_id` specified, including whether it must be unique across sessions and how it is generated by the mock transport? [Clarity, Spec §FR-007]
-- [ ] CHK016 - Is `persona_version`'s format specified (semver, ISO date, content hash, opaque string)? [Clarity, Spec §FR-011]
-- [ ] CHK017 - Is the precise meaning of "summary" in FR-014 defined (one-sentence outcome, bullet list of key facts, free-form prose)? [Ambiguity, Spec §FR-014]
+- [x] CHK011 - Is the data type and value range of `attempt_count` specified (non-negative integer, configured upper bound, what happens at overflow)? [Clarity, Spec §FR-002 + §FR-021]
+- [x] CHK012 - Is the representation of `preferred_callback_window` specified (single timestamp, start+end range, weekday + hour, free-form string)? [Ambiguity, Spec §FR-014]
+- [x] CHK013 - Is the format of `transcript_pointer` specified (relative path, URI, opaque token; resolution base)? [Clarity, Spec §Clarifications + §FR-014]
+- [x] CHK014 - Is the timezone field's representation specified (IANA tz database name, UTC offset, or other) and is the "default applied" indicator a distinct field or a marker on the timezone value? [Ambiguity, Spec §FR-002]
+- [x] CHK015 - Is the format of `mock_provider_call_id` specified, including whether it must be unique across sessions and how it is generated by the mock transport? [Clarity, Spec §FR-007]
+- [x] CHK016 - Is `persona_version`'s format specified (semver, ISO date, content hash, opaque string)? [Clarity, Spec §FR-011]
+- [x] CHK017 - Is the precise meaning of "summary" in FR-014 defined (one-sentence outcome, bullet list of key facts, free-form prose)? [Ambiguity, Spec §FR-014]
 
 ## Requirement Consistency
 
-- [ ] CHK018 - Does the term `callable_status` appear consistently with the same enum values (`ready` / `in_progress` / `completed` / `blocked` / `dnc`) across FR-002, FR-004, the DNC mid-call edge case, the Queue Item entity, and the Clarifications log? [Consistency, Spec §Clarifications]
-- [ ] CHK019 - Does the disposition enum in FR-013 cover every disposition value referenced anywhere else (user stories, edge cases, success criteria, clarifications) with no orphans? [Consistency, Spec §FR-013]
-- [ ] CHK020 - Are the same field names used to refer to the same concept across Normalized Result (FR-014), the Session entity, the CLI output surface (FR-027), and exported artifact JSON (FR-023)? [Consistency, Gap]
-- [ ] CHK021 - Is the "human-review reason" terminology consistent across FR-010 ("stated reason"), FR-014 ("human-review reason"), and Story 4 acceptance ("human-review reason is present")? [Consistency, Spec §FR-010 + §FR-014]
+- [x] CHK018 - Does the term `callable_status` appear consistently with the same enum values (`ready` / `in_progress` / `completed` / `blocked` / `dnc`) across FR-002, FR-004, the DNC mid-call edge case, the Queue Item entity, and the Clarifications log? [Consistency, Spec §Clarifications]
+- [x] CHK019 - Does the disposition enum in FR-013 cover every disposition value referenced anywhere else (user stories, edge cases, success criteria, clarifications) with no orphans? [Consistency, Spec §FR-013]
+- [x] CHK020 - Are the same field names used to refer to the same concept across Normalized Result (FR-014), the Session entity, the CLI output surface (FR-027), and exported artifact JSON (FR-023)? [Consistency, Gap]
+- [x] CHK021 - Is the "human-review reason" terminology consistent across FR-010 ("stated reason"), FR-014 ("human-review reason"), and Story 4 acceptance ("human-review reason is present")? [Consistency, Spec §FR-010 + §FR-014]
 
 ## Acceptance Criteria Quality
 
-- [ ] CHK022 - Are the "when present" / "when applicable" conditions in FR-014 stated in objectively testable terms (e.g., "when disposition ∈ {…}")? [Measurability, Spec §FR-014]
-- [ ] CHK023 - Is the Eligibility Decision's "rule set + pass/fail" persistence requirement specified precisely enough to write a fixture-driven assertion against the persisted record? [Measurability, Spec §FR-004]
-- [ ] CHK024 - Can the Mock CRM Write-back entity's "three sub-payload" structure be validated by schema inspection of the exported JSON alone? [Measurability, Spec §FR-015 + §FR-023]
+- [x] CHK022 - Are the "when present" / "when applicable" conditions in FR-014 stated in objectively testable terms (e.g., "when disposition ∈ {…}")? [Measurability, Spec §FR-014]
+- [x] CHK023 - Is the Eligibility Decision's "rule set + pass/fail" persistence requirement specified precisely enough to write a fixture-driven assertion against the persisted record? [Measurability, Spec §FR-004]
+- [x] CHK024 - Can the Mock CRM Write-back entity's "three sub-payload" structure be validated by schema inspection of the exported JSON alone? [Measurability, Spec §FR-015 + §FR-023]
 
 ## Scenario Coverage
 
-- [ ] CHK025 - Are the valid transitions of `callable_status` (which value can transition to which) specified, including the auto-transition from `ready` to `dnc` clarified in Q3? [Coverage, Gap]
-- [ ] CHK026 - Is the lifecycle of a Session (initial state, in-flight states, finalized states) specified, and are the entry/exit predicates for each state named? [Coverage, Gap]
-- [ ] CHK027 - Are the relationships between Eligibility Decision and Session specified for both outcomes (allowed → session created; blocked → session created in blocked state OR no session, per Story 2's "or")? [Coverage, Spec §Story 2]
-- [ ] CHK028 - Are requirements specified for how the Eligibility Decision references a Session that is created in a "blocked" terminal state vs. one that is never created? [Gap, Spec §Story 2]
+- [x] CHK025 - Are the valid transitions of `callable_status` (which value can transition to which) specified, including the auto-transition from `ready` to `dnc` clarified in Q3? [Coverage, Gap]
+- [x] CHK026 - Is the lifecycle of a Session (initial state, in-flight states, finalized states) specified, and are the entry/exit predicates for each state named? [Coverage, Gap]
+- [x] CHK027 - Are the relationships between Eligibility Decision and Session specified for both outcomes (allowed → session created; blocked → session created in blocked state OR no session, per Story 2's "or")? [Coverage, Spec §Story 2]
+- [x] CHK028 - Are requirements specified for how the Eligibility Decision references a Session that is created in a "blocked" terminal state vs. one that is never created? [Gap, Spec §Story 2]
 
 ## Edge Case Coverage
 
-- [ ] CHK029 - Is the default-timezone fallback's representation in the persisted Eligibility Decision specified (does the decision record both the original record value and the default that was substituted)? [Edge Case, Spec §Edge Cases]
-- [ ] CHK030 - Are requirements specified for what `captured_email` holds when an email is captured but not verified (raw string, validation flag, null with separate "captured_unverified" field)? [Edge Case, Spec §Assumptions]
-- [ ] CHK031 - Are requirements specified for the data shape of a "conflicting late event" audit record (the event payload that was rejected after finalization)? [Edge Case, Spec §FR-020]
-- [ ] CHK032 - Is the data shape of a `callable_status='in_progress'` snapshot — captured while a call is mid-flight — specified, including whether it is persisted or only in-memory? [Edge Case, Gap]
+- [x] CHK029 - Is the default-timezone fallback's representation in the persisted Eligibility Decision specified (does the decision record both the original record value and the default that was substituted)? [Edge Case, Spec §Edge Cases]
+- [x] CHK030 - Are requirements specified for what `captured_email` holds when an email is captured but not verified (raw string, validation flag, null with separate "captured_unverified" field)? [Edge Case, Spec §Assumptions]
+- [x] CHK031 - Are requirements specified for the data shape of a "conflicting late event" audit record (the event payload that was rejected after finalization)? [Edge Case, Spec §FR-020]
+- [x] CHK032 - Is the data shape of a `callable_status='in_progress'` snapshot — captured while a call is mid-flight — specified, including whether it is persisted or only in-memory? [Edge Case, Gap]
 
 ## Non-Functional Requirements
 
-- [ ] CHK033 - Are requirements specified for sensitive-data minimization at the data-model layer (e.g., is `captured_email` always lowercase, is the transcript file's content subject to redaction rules)? [Coverage, Spec §FR-024]
-- [ ] CHK034 - Are requirements specified for timestamp representation (timezone-aware ISO 8601, epoch millis, both) to support cross-platform readability of artifacts? [Gap, Spec §FR-023] → **RESOLVED-BY-FR-014 (ISO 8601 UTC ms)**
+- [x] CHK033 - Are requirements specified for sensitive-data minimization at the data-model layer (e.g., is `captured_email` always lowercase, is the transcript file's content subject to redaction rules)? [Coverage, Spec §FR-024]
+- [x] CHK034 - Are requirements specified for timestamp representation (timezone-aware ISO 8601, epoch millis, both) to support cross-platform readability of artifacts? [Gap, Spec §FR-023] → **RESOLVED-BY-FR-014 (ISO 8601 UTC ms)**
 
 ## Dependencies & Assumptions
 
-- [ ] CHK035 - Is the assumption that the local state store is SQLite documented as an architectural constraint rather than a hard feature requirement? [Assumption, Spec §Assumptions]
-- [ ] CHK036 - Is the assumption that idempotency-key scope is per-session and per-write-back-kind (no cross-session dedup) explicit in the entity definition? [Assumption, Spec §Assumptions]
+- [x] CHK035 - Is the assumption that the local state store is SQLite documented as an architectural constraint rather than a hard feature requirement? [Assumption, Spec §Assumptions]
+- [x] CHK036 - Is the assumption that idempotency-key scope is per-session and per-write-back-kind (no cross-session dedup) explicit in the entity definition? [Assumption, Spec §Assumptions]
 
 ## Ambiguities & Conflicts
 
-- [ ] CHK037 - Is "last-decision timestamp" on the Queue Item defined unambiguously — is it the eligibility decision, the session finalization, or the most recent of either? [Ambiguity, Spec §Key Entities]
-- [ ] CHK038 - Is there a defined precedence rule when FR-014 says `transcript_pointer` is part of the result, FR-024 says summary-only retention is allowed, and the Clarifications default writes a separate transcript file — what does the field hold under summary-only mode? [Conflict, Spec §FR-014 + §FR-024 + §Clarifications]
+- [x] CHK037 - Is "last-decision timestamp" on the Queue Item defined unambiguously — is it the eligibility decision, the session finalization, or the most recent of either? [Ambiguity, Spec §Key Entities]
+- [x] CHK038 - Is there a defined precedence rule when FR-014 says `transcript_pointer` is part of the result, FR-024 says summary-only retention is allowed, and the Clarifications default writes a separate transcript file — what does the field hold under summary-only mode? [Conflict, Spec §FR-014 + §FR-024 + §Clarifications]
 
 ---
 
 ## Addendum 2026-05-19 — Post-Remediation Coverage (new fields + timestamp pin)
 
-- [ ] CHK039 - Is the new `captured_email_unverified` field's mutual-exclusivity with `captured_email` (Spec §FR-014) enforceable by both Pydantic-level validation AND SQLite CHECK constraint? [Measurability, Spec §FR-014]
-- [ ] CHK040 - Is the new `blocked_reason` field's type precise (JSON array of single-letter rule codes `a`–`f` per FR-004)? [Clarity, Spec §FR-014 + §FR-004]
-- [ ] CHK041 - Is the new `blocked_reason` field's presence requirement clear — present only when `final_disposition='blocked'` and absent otherwise (not null vs. empty array vs. omitted key)? [Ambiguity, Spec §FR-014]
-- [ ] CHK042 - Is FR-014's pinned timestamp format (`ISO 8601 in UTC with millisecond precision`) consistent across every entity that has timestamp fields (Session, Eligibility Decision, Mock Call Event, all three write-back payload tables, Conflicting Event Audit Record)? [Consistency, Spec §FR-014 + §Key Entities]
-- [ ] CHK043 - Is the new Conflicting Event Audit Record entity's relationship to Mock Call Event clear — is a conflicting late event ALSO stored in `mock_call_events`, or only in `conflicting_event_audit_records`? [Ambiguity, Spec §Key Entities + Plan §data-model.md]
-- [ ] CHK044 - Is the field-level optionality matrix in FR-014 reconciled with the schema's NULL columns — every "when present" rule maps to a nullable column with a clear non-null trigger? [Consistency, Spec §FR-014 + Plan §data-model.md]
+- [x] CHK039 - Is the new `captured_email_unverified` field's mutual-exclusivity with `captured_email` (Spec §FR-014) enforceable by both Pydantic-level validation AND SQLite CHECK constraint? [Measurability, Spec §FR-014]
+- [x] CHK040 - Is the new `blocked_reason` field's type precise (JSON array of single-letter rule codes `a`–`f` per FR-004)? [Clarity, Spec §FR-014 + §FR-004]
+- [x] CHK041 - Is the new `blocked_reason` field's presence requirement clear — present only when `final_disposition='blocked'` and absent otherwise (not null vs. empty array vs. omitted key)? [Ambiguity, Spec §FR-014]
+- [x] CHK042 - Is FR-014's pinned timestamp format (`ISO 8601 in UTC with millisecond precision`) consistent across every entity that has timestamp fields (Session, Eligibility Decision, Mock Call Event, all three write-back payload tables, Conflicting Event Audit Record)? [Consistency, Spec §FR-014 + §Key Entities]
+- [x] CHK043 - Is the new Conflicting Event Audit Record entity's relationship to Mock Call Event clear — is a conflicting late event ALSO stored in `mock_call_events`, or only in `conflicting_event_audit_records`? [Ambiguity, Spec §Key Entities + Plan §data-model.md]
+- [x] CHK044 - Is the field-level optionality matrix in FR-014 reconciled with the schema's NULL columns — every "when present" rule maps to a nullable column with a clear non-null trigger? [Consistency, Spec §FR-014 + Plan §data-model.md]

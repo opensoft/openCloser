@@ -1,5 +1,7 @@
 # Contract: ALF Appointment-Setter Persona
 
+> **Note on syntax**: Python-flavored pseudo-code (`name: Type`) is used for readability across the team. Type-hint syntax is decorative; the authoritative contract is the prose description of operations, inputs, and outputs.
+
 **Module boundary**: FR-033, principle #4
 **Implementation**: `src/opencloser/persona/base.py` (interface) + `src/opencloser/persona/alf_appointment_setter.py` (Slice 1 persona)
 **Owns** (per Constitution Alignment + FR-009): disclosure language, allowed claims, extraction schema, disposition rules, escalation rules, persona version
@@ -92,21 +94,33 @@ The mapping MUST be deterministic — the persona MUST NOT use randomness, the c
 
 ## Escalation reasons (FR-035)
 
-`human_review_reason` MUST be drawn from this enumerated set when the disposition is `needs_human_review`:
+`human_review_reason` MUST be drawn from this enumerated set when the disposition is `needs_human_review`. Each code has a pinned trigger condition (implemented in `persona/escalation.py`):
 
-`uncertain_role`, `uncertain_intent`, `ambiguous_dnc`, `captured_email_invalid_no_callback`, `phi_collection_risk`, `legal_request`, `non_clinical_topic_escalation`, `outside_allowed_claims`, `script_truncated`.
+| Reason code | Trigger condition |
+|---|---|
+| `uncertain_role` | `role_confidence == 'uncertain'` |
+| `uncertain_intent` | `intent_classification == 'uncertain'` AND `role_confidence != 'uncertain'` |
+| `ambiguous_dnc` | Contact uses DNC-adjacent phrasing the persona can't disambiguate from "not interested right now" |
+| `captured_email_invalid_no_callback` | FR-036 rule #7 (unverified email + no callback) |
+| `phi_collection_risk` | Contact volunteers (or persona detects) any PHI data class enumerated in FR-010 |
+| `legal_request` | Contact requests recording deletion, GDPR-style data access, or legal escalation |
+| `non_clinical_topic_escalation` | Contact asks for clinical / legal / regulatory / insurance advice the persona can't answer |
+| `outside_allowed_claims` | Contact asks for info outside FR-009's allowed-claim categories |
+| `script_truncated` | Fixture ended without producing a disposition (FR-036 rule #10) |
 
-Free-form reasons are forbidden in Slice 1.
+Free-form reasons are forbidden in Slice 1. Future slices may extend the enumeration ONLY by appending new codes — existing codes MUST NOT be replaced or repurposed.
 
 ---
 
 ## Disclosure validator
 
-The persona MUST verify that its FIRST turn (the first `role="persona"` entry in the fixture) contains BOTH:
-- a phrase identifying itself as an AI assistant
-- a phrase identifying Medx as the calling party
+The persona MUST verify that its FIRST turn (the first `role="persona"` entry in the fixture) is the exact canonical Slice 1 disclosure string:
 
-If both checks pass, `disclosure_completed=True`. If either fails, `disclosure_completed=False` AND the persona MUST emit disposition `needs_human_review` with `human_review_reason='outside_allowed_claims'` (the disclosure failure is treated as an out-of-bounds persona behavior).
+```text
+Hi, this is an AI assistant calling on behalf of Medx, the senior-living placement service. Is this a good time to chat for two minutes?
+```
+
+Match is exact-string (no paraphrases in Slice 1). If the first turn matches, `disclosure_completed=True`. If the first turn deviates from the canonical string, `disclosure_completed=False` AND the persona MUST emit disposition `needs_human_review` with `human_review_reason='outside_allowed_claims'` (the disclosure failure is treated as an out-of-bounds persona behavior). Future slices may introduce variants behind this same validator.
 
 ---
 

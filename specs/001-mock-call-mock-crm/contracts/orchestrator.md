@@ -1,5 +1,7 @@
 # Contract: Interaction Core / Orchestrator
 
+> **Note on syntax**: Python-flavored pseudo-code (`name: Type`) is used for readability across the team. Type-hint syntax is decorative; the authoritative contract is the prose description of operations, inputs, and outputs.
+
 **Module boundary**: FR-033, principle #5
 **Implementation**: `src/opencloser/core/orchestrator.py`
 **Owns**: session lifecycle, idempotency-key application (FR-019), attempt-count increments (FR-021), call sequencing into the four boundary modules

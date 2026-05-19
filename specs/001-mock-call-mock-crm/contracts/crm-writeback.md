@@ -1,5 +1,7 @@
 # Contract: Mock CRM Write-back Adapter
 
+> **Note on syntax**: Python-flavored pseudo-code (`name: Type`) is used for readability across the team. Type-hint syntax is decorative; the authoritative contract is the prose description of operations, inputs, and outputs.
+
 **Module boundary**: FR-033, principle #5 (write-back side)
 **Implementation**: `src/opencloser/crm/base.py` (interface) + `src/opencloser/crm/mock.py` (Slice 1 mock)
 **Owns**: payload assembly per FR-028 / FR-029 / FR-030, FR-031 per-disposition mapping, FR-032 queue-status mapping

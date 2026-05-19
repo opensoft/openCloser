@@ -314,6 +314,22 @@ A single `now_utc_ms()` helper in `core/orchestrator.py` is the only source of t
 
 ---
 
+## FR-033 contract-surface format
+
+**Decision**: Markdown pseudo-code in `contracts/*.md` is the canonical Slice 1 format for the FR-033 "language-neutral interface". Python ABCs in `src/opencloser/<module>/base.py` provide runtime enforcement. The Slice 2 plan-time review (task T075) verifies the markdown pseudo-code against real SDK shapes. No separate `.pyi` interface files are required in Slice 1.
+
+**Rationale**:
+- The pseudo-code's authority is the prose description of operations + inputs + outputs; the Python-style type-hint syntax is decorative and widely-readable across languages.
+- Each `contracts/*.md` carries a header note stating this stance so a TypeScript or Kotlin reviewer is not confused.
+- ABCs (Abstract Base Classes) give compile-time enforcement in Python without committing to a heavier tool like Protocol classes or runtime contract validators.
+
+**Alternatives considered**:
+- **Pydantic class names only**: Loses the method-signature surface; rejected.
+- **`.pyi` stub files**: Adds a parallel artifact to maintain; rejected for Slice 1, may revisit if cross-language port is planned.
+- **OpenAPI / JSON Schema**: Designed for HTTP APIs, awkward for in-process module boundaries; rejected.
+
+---
+
 ## Resolved-spec-deferrals checklist
 
 Every item from spec.md `## Deferred to Implementation Plan` has a corresponding decision above. Cross-reference:

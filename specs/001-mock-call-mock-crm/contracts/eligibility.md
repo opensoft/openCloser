@@ -1,5 +1,7 @@
 # Contract: Eligibility Evaluator
 
+> **Note on syntax**: Python-flavored pseudo-code (`name: Type`) is used for readability across the team. Type-hint syntax is decorative; the authoritative contract is the prose description of operations, inputs, and outputs.
+
 **Module boundary**: FR-033, principle #2
 **Implementation**: `src/opencloser/eligibility/evaluator.py`
 **Owns**: the six FR-004 rules, the default-timezone fallback, and the persisted EligibilityDecision shape

@@ -1,5 +1,7 @@
 # Contract: Mock Call Transport
 
+> **Note on syntax**: Python-flavored pseudo-code (`name: Type`) is used for readability across the team. Type-hint syntax is decorative; the authoritative contract is the prose description of operations, inputs, and outputs.
+
 **Module boundary**: FR-033, principle #3
 **Implementation**: `src/opencloser/transport/base.py` (interface) + `src/opencloser/transport/mock.py` (Slice 1 mock)
 **Owns**: call-attempt initiation, event emission, `mock_provider_call_id` assignment, fixture-driven event sequencing
