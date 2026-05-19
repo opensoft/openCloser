@@ -1,0 +1,239 @@
+"""Unit tests for the SQLite state-store DAO (FR-022 + data-model.md)."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from opencloser.models import (
+    CallableStatus,
+    ConflictingEventAuditRecord,
+    Disposition,
+    EligibilityDecision,
+    EventType,
+    MockCallEvent,
+    QueueItem,
+    Session,
+    SessionState,
+)
+from opencloser.state import store
+
+pytestmark = pytest.mark.module("state")
+
+_T = "2026-05-19T17:00:00.000Z"
+
+
+def _make_queue_item(qid: str = "q1") -> QueueItem:
+    return QueueItem(
+        queue_item_id=qid,
+        facility_name="Sunset Ridge",
+        phone_number="+15555550100",
+        timezone="America/Los_Angeles",
+        attempt_count=0,
+        callable_status=CallableStatus.READY,
+    )
+
+
+def _make_session(sid: str = "ses_1", qid: str = "q1", **overrides: object) -> Session:
+    base = {
+        "session_id": sid,
+        "queue_item_id": qid,
+        "state": SessionState.CREATED,
+        "started_at": _T,
+    }
+    base.update(overrides)
+    return Session(**base)
+
+
+# -- schema bootstrapping ----------------------------------------------------
+
+
+def test_init_schema_creates_tables(tmp_state_db: sqlite3.Connection) -> None:
+    rows = tmp_state_db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+    ).fetchall()
+    names = {r["name"] for r in rows}
+    for expected in {
+        "queue_items",
+        "sessions",
+        "eligibility_decisions",
+        "mock_call_events",
+        "idempotency_keys",
+        "conflicting_event_audit_records",
+        "phone_call_activities",
+        "queue_status_updates",
+        "task_payloads",
+        "normalized_results",
+        "schema_meta",
+    }:
+        assert expected in names
+
+
+def test_init_schema_seeds_schema_meta_once(tmp_state_db: sqlite3.Connection) -> None:
+    count = tmp_state_db.execute("SELECT COUNT(*) AS n FROM schema_meta;").fetchone()["n"]
+    assert count == 1
+    store.init_schema(tmp_state_db, now_utc_ms=_T)
+    count = tmp_state_db.execute("SELECT COUNT(*) AS n FROM schema_meta;").fetchone()["n"]
+    assert count == 1, "init_schema must be idempotent"
+
+
+# -- queue_items -------------------------------------------------------------
+
+
+def test_queue_item_round_trip(tmp_state_db: sqlite3.Connection) -> None:
+    item = _make_queue_item()
+    store.insert_queue_item(tmp_state_db, item)
+    restored = store.get_queue_item(tmp_state_db, item.queue_item_id)
+    assert restored == item
+
+
+def test_increment_attempt_count(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.increment_attempt_count(tmp_state_db, "q1")
+    store.increment_attempt_count(tmp_state_db, "q1")
+    restored = store.get_queue_item(tmp_state_db, "q1")
+    assert restored is not None
+    assert restored.attempt_count == 2
+
+
+def test_update_queue_item_status_partial(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.update_queue_item_status(
+        tmp_state_db,
+        "q1",
+        callable_status=CallableStatus.DNC,
+        dnc_flag=True,
+        last_decision_at=_T,
+    )
+    restored = store.get_queue_item(tmp_state_db, "q1")
+    assert restored is not None
+    assert restored.callable_status is CallableStatus.DNC
+    assert restored.dnc_flag is True
+    assert restored.last_decision_at == _T
+
+
+# -- sessions ----------------------------------------------------------------
+
+
+def test_session_round_trip(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    sess = _make_session()
+    store.insert_session(tmp_state_db, sess)
+    restored = store.get_session(tmp_state_db, "ses_1")
+    assert restored == sess
+
+
+def test_session_blocked_terminal(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    sess = _make_session(
+        state=SessionState.BLOCKED,
+        final_disposition=Disposition.BLOCKED,
+        blocked_reason=["d"],
+        ended_at=_T,
+    )
+    store.insert_session(tmp_state_db, sess)
+    restored = store.get_session(tmp_state_db, "ses_1")
+    assert restored is not None
+    assert restored.blocked_reason == ["d"]
+    assert restored.final_disposition is Disposition.BLOCKED
+
+
+def test_session_mock_provider_call_id_unique(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(
+        tmp_state_db,
+        _make_session(sid="ses_1", mock_provider_call_id="call_x"),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_session(
+            tmp_state_db,
+            _make_session(sid="ses_2", mock_provider_call_id="call_x"),
+        )
+
+
+# -- eligibility_decisions ---------------------------------------------------
+
+
+def test_eligibility_decision_insert(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(tmp_state_db, _make_session())
+    decision = EligibilityDecision(
+        decision_id="dec_1",
+        queue_item_id="q1",
+        decided_at=_T,
+        outcome="block",
+        rule_a_phone_pass=True,
+        rule_b_timezone_pass=True,
+        rule_c_call_window_pass=True,
+        rule_d_dnc_pass=False,
+        rule_e_max_attempts_pass=True,
+        rule_f_callable_status_pass=True,
+        failing_rules=["d"],
+        session_id="ses_1",
+    )
+    store.insert_eligibility_decision(tmp_state_db, decision)
+    row = tmp_state_db.execute(
+        "SELECT outcome, failing_rules FROM eligibility_decisions WHERE decision_id = ?;",
+        ("dec_1",),
+    ).fetchone()
+    assert row["outcome"] == "block"
+    assert row["failing_rules"] == '["d"]'
+
+
+# -- mock_call_events --------------------------------------------------------
+
+
+def test_mock_call_event_round_trip(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(tmp_state_db, _make_session())
+    event = MockCallEvent(
+        session_id="ses_1",
+        event_id="evt_1",
+        event_type=EventType.CONNECTED,
+        received_at=_T,
+    )
+    store.insert_mock_call_event(tmp_state_db, event)
+    events = store.list_mock_call_events(tmp_state_db, "ses_1")
+    assert events == [event]
+
+
+def test_mock_call_event_duplicate_pk_raises(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(tmp_state_db, _make_session())
+    event = MockCallEvent(
+        session_id="ses_1", event_id="evt_1", event_type=EventType.CONNECTED, received_at=_T
+    )
+    store.insert_mock_call_event(tmp_state_db, event)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_mock_call_event(tmp_state_db, event)
+
+
+# -- FK cascade --------------------------------------------------------------
+
+
+def test_queue_item_delete_cascades_session(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(tmp_state_db, _make_session())
+    tmp_state_db.execute("DELETE FROM queue_items WHERE queue_item_id = ?;", ("q1",))
+    assert store.get_session(tmp_state_db, "ses_1") is None
+
+
+# -- conflicting events ------------------------------------------------------
+
+
+def test_conflicting_event_round_trip(tmp_state_db: sqlite3.Connection) -> None:
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(tmp_state_db, _make_session())
+    audit = ConflictingEventAuditRecord(
+        audit_id="audit_1",
+        session_id="ses_1",
+        event_id="evt_late",
+        conflicting_event_type=EventType.FAILED,
+        received_at=_T,
+        full_event_payload={"failure_reason": "carrier_error"},
+        preserved_disposition=Disposition.NO_ANSWER,
+    )
+    store.insert_conflicting_event(tmp_state_db, audit)
+    rows = store.list_conflicting_events(tmp_state_db, "ses_1")
+    assert rows == [audit]
