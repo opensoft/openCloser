@@ -1,0 +1,23 @@
+{
+  "fixture_id": "conflicting_failed_after_completed",
+  "events": [
+    {
+      "event_id": "evt_connected_003",
+      "type": "connected",
+      "timestamp": "2026-05-19T17:00:01.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_completed_003",
+      "type": "completed",
+      "timestamp": "2026-05-19T17:00:45.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_late_failed_001",
+      "type": "failed",
+      "timestamp": "2026-05-19T17:00:50.000Z",
+      "payload": { "failure_reason": "transport_error" }
+    }
+  ]
+}

@@ -124,13 +124,13 @@ Every user story below depends on these. Foundational unit tests are included be
 
 **Independent Test (matches spec.md Story 2 Independent Test)**: For each disqualifying condition (DNC flag, call-window, max-attempts, missing-phone), load a fixture queue record carrying only that condition and run `opencloser run-one`. Assert (a) a session row exists in `state='blocked'` with `final_disposition='blocked'` and `mock_provider_call_id IS NULL`, (b) `eligibility-decision.json` lists every failing rule in `failing_rules`, (c) no `phone_call_activities` row exists, (d) `queue_items.attempt_count` is unchanged, (e) the CLI prints "blocked: <rule names>" and the operator can read the block reason from `eligibility-decision.json`.
 
-- [ ] T039 [US2] Extend `process_one_queue_item` in `src/opencloser/core/orchestrator.py` to handle the `block` branch per contracts/orchestrator.md §Behavior step 4: create a session with `state='blocked'`, `final_disposition='blocked'`, copy `failing_rules` to the session's `blocked_reason`, call `crm.emit_queue_status_update(...)` only (FR-029 mandate), do NOT call `transport.place_call`, do NOT increment `attempt_count`.
-- [ ] T040 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-dnc.json` — `dnc_flag=true`, everything else valid
-- [ ] T041 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-after-hours.json` — record's local time outside call window (encoded via timezone selection that places "now" outside `[09:00, 20:00]` in tests via `FrozenClock`)
-- [ ] T042 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-max-attempts.json` — `attempt_count=5` (== configured max)
-- [ ] T043 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-missing-phone.json` — `phone_number=null`
-- [ ] T044 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-not-ready.json` — `callable_status='in_progress'` (per FR-004(f) — only `ready` allows)
-- [ ] T045 [US2] End-to-end integration test in `tests/integration/test_us2_blocked.py` @pytest.mark.integration with one parametrized case per blocking condition (DNC, call-window, max-attempts, missing-phone, callable-status, multi-rule failure). Asserts (a)–(e) of the Independent Test.
+- [x] T039 [US2] Extend `process_one_queue_item` in `src/opencloser/core/orchestrator.py` to handle the `block` branch per contracts/orchestrator.md §Behavior step 4: create a session with `state='blocked'`, `final_disposition='blocked'`, copy `failing_rules` to the session's `blocked_reason`, call `crm.emit_queue_status_update(...)` only (FR-029 mandate), do NOT call `transport.place_call`, do NOT increment `attempt_count`.
+- [x] T040 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-dnc.json` — `dnc_flag=true`, everything else valid
+- [x] T041 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-after-hours.json` — record's local time outside call window (encoded via timezone selection that places "now" outside `[09:00, 20:00]` in tests via `FrozenClock`)
+- [x] T042 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-max-attempts.json` — `attempt_count=5` (== configured max)
+- [x] T043 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-missing-phone.json` — `phone_number=null`
+- [x] T044 [P] [US2] Create `tests/fixtures/queue_items/alf-prospect-not-ready.json` — `callable_status='in_progress'` (per FR-004(f) — only `ready` allows)
+- [x] T045 [US2] End-to-end integration test in `tests/integration/test_us2_blocked.py` @pytest.mark.integration with one parametrized case per blocking condition (DNC, call-window, max-attempts, missing-phone, callable-status, multi-rule failure). Asserts (a)–(e) of the Independent Test.
 
 **Checkpoint US2**: Running against any of the 5 blocking fixtures produces a `blocked` session and emits only the queue-status update payload. US1 still passes.
 
@@ -142,17 +142,17 @@ Every user story below depends on these. Foundational unit tests are included be
 
 **Independent Test (matches spec.md Story 3 Independent Test)**: For each transport-path fixture, run the orchestrator and verify (a) the session's `final_disposition` matches the path, (b) the FR-031 write-back shape is correct, (c) attempt-count increments exactly once per `mock_provider_call_id`, (d) re-running with a duplicate-event fixture leaves all state and artifacts byte-identical (SC-005), (e) re-running with a conflicting-late-event fixture preserves the original disposition AND inserts one `conflicting_event_audit_records` row.
 
-- [ ] T046 [US3] Extend `process_one_queue_item` in `src/opencloser/core/orchestrator.py` for non-connected terminal events (`no_answer`, `voicemail`, `failed`) — finalize the session with the matching disposition; emit Phone Call activity + queue-status update; no Task payload (FR-018 + FR-031).
-- [ ] T047 [US3] Add the FR-019 duplicate-event no-op path to `process_one_queue_item`: every event-driven state mutation first attempts INSERT into `idempotency_keys` and skips on UNIQUE-violation. Covers session-state, attempt-count, write-back, and exported-artifact write surfaces.
-- [ ] T048 [US3] Add the FR-020 conflicting-late-event handler to `process_one_queue_item`: when an event arrives that would change the disposition of an already-`finalized` session, INSERT into `conflicting_event_audit_records` instead of mutating session state. The `conflicting_events.json` artifact is emitted at end-of-run if any such rows exist.
-- [ ] T049 [P] [US3] Create `tests/fixtures/transport_events/no_answer.json` — single `no_answer` event
-- [ ] T050 [P] [US3] Create `tests/fixtures/transport_events/voicemail.json` — single `voicemail` event
-- [ ] T051 [P] [US3] Create `tests/fixtures/transport_events/failed.json` — single `failed` event
-- [ ] T052 [P] [US3] Create `tests/fixtures/transport_events/duplicate_connected.json` — `connected` + `completed` + repeated `connected` with same `event_id` + repeated `completed` with same `event_id`
-- [ ] T053 [P] [US3] Create `tests/fixtures/transport_events/duplicate_callback_requested.json` — `connected` + `callback_requested` + `completed` + repeated `callback_requested` with same `event_id`
-- [ ] T054 [P] [US3] Create `tests/fixtures/transport_events/conflicting_failed_after_completed.json` — `connected` + `completed` + late `failed` with a distinct `event_id`
-- [ ] T055 [US3] Unit tests for idempotency in `tests/unit/test_idempotency_orchestrator.py` @pytest.mark.module("core"): every write-back kind no-ops on duplicate event_id; attempt-count increments exactly once across duplicate redeliveries.
-- [ ] T056 [US3] End-to-end integration test in `tests/integration/test_us3_paths.py` @pytest.mark.integration: one parametrized case per transport path (no_answer, voicemail, failed) + a duplicate-event byte-identity check + a conflicting-late-event audit-row check. Asserts the Independent Test's (a)–(e).
+- [x] T046 [US3] Extend `process_one_queue_item` in `src/opencloser/core/orchestrator.py` for non-connected terminal events (`no_answer`, `voicemail`, `failed`) — finalize the session with the matching disposition; emit Phone Call activity + queue-status update; no Task payload (FR-018 + FR-031).
+- [x] T047 [US3] Add the FR-019 duplicate-event no-op path to `process_one_queue_item`: every event-driven state mutation first attempts INSERT into `idempotency_keys` and skips on UNIQUE-violation. Covers session-state, attempt-count, write-back, and exported-artifact write surfaces.
+- [x] T048 [US3] Add the FR-020 conflicting-late-event handler to `process_one_queue_item`: when an event arrives that would change the disposition of an already-`finalized` session, INSERT into `conflicting_event_audit_records` instead of mutating session state. The `conflicting_events.json` artifact is emitted at end-of-run if any such rows exist.
+- [x] T049 [P] [US3] Create `tests/fixtures/transport_events/no_answer.json` — single `no_answer` event
+- [x] T050 [P] [US3] Create `tests/fixtures/transport_events/voicemail.json` — single `voicemail` event
+- [x] T051 [P] [US3] Create `tests/fixtures/transport_events/failed.json` — single `failed` event
+- [x] T052 [P] [US3] Create `tests/fixtures/transport_events/duplicate_connected.json` — `connected` + `completed` + repeated `connected` with same `event_id` + repeated `completed` with same `event_id`
+- [x] T053 [P] [US3] Create `tests/fixtures/transport_events/duplicate_callback_requested.json` — `connected` + `callback_requested` + `completed` + repeated `callback_requested` with same `event_id`
+- [x] T054 [P] [US3] Create `tests/fixtures/transport_events/conflicting_failed_after_completed.json` — `connected` + `completed` + late `failed` with a distinct `event_id`
+- [x] T055 [US3] Unit tests for idempotency in `tests/unit/test_idempotency_orchestrator.py` @pytest.mark.module("core"): every write-back kind no-ops on duplicate event_id; attempt-count increments exactly once across duplicate redeliveries.
+- [x] T056 [US3] End-to-end integration test in `tests/integration/test_us3_paths.py` @pytest.mark.integration: one parametrized case per transport path (no_answer, voicemail, failed) + a duplicate-event byte-identity check + a conflicting-late-event audit-row check. Asserts the Independent Test's (a)–(e).
 
 **Checkpoint US3**: Every transport-path fixture produces the FR-031 shape; duplicate-event reruns are byte-identical; conflicting-event audit row exists. US1 and US2 still pass.
 
@@ -164,16 +164,16 @@ Every user story below depends on these. Foundational unit tests are included be
 
 **Independent Test (matches spec.md Story 4 Independent Test, expanded for SC-003 coverage)**: For at least one fixture per remaining disposition in FR-013's 11-value enum, run the orchestrator and open the exported `session-result.json`. Assert each required FR-014 field is present (with the "when applicable" rules satisfied) and human-readable. For `needs_human_review`, assert the `human_review_reason` is one of FR-035's 9 codes. For the Q5 case, assert the callback task payload carries both `preferred_callback_window` AND `captured_email`.
 
-- [ ] T057 [P] [US4] Create `tests/fixtures/conversations/interested_email_captured.json` — verified email captured, no callback request
-- [ ] T058 [P] [US4] Create `tests/fixtures/conversations/interested_email_and_callback.json` — verified email AND callback request (Q5 Clarification case)
-- [ ] T059 [P] [US4] Create `tests/fixtures/conversations/needs_human_review_uncertain_role.json` — contact's role is ambiguous; persona escalates with `uncertain_role`
-- [ ] T060 [P] [US4] Create `tests/fixtures/conversations/needs_human_review_email_invalid.json` — contact gives a syntactically valid but un-confirmed email, no callback → FR-036 rule #7 → `captured_email_invalid_no_callback`
-- [ ] T061 [P] [US4] Create `tests/fixtures/conversations/do_not_call_mid_call.json` — contact states DNC mid-conversation; triggers Edge Case "DNC stated mid-conversation"
-- [ ] T062 [P] [US4] Create `tests/fixtures/conversations/wrong_number.json` — contact states wrong number
-- [ ] T063 [P] [US4] Create `tests/fixtures/conversations/not_interested.json` — contact explicitly declines
-- [ ] T064 [P] [US4] Create `tests/fixtures/conversations/call_back_later.json` — contact asks to be called back later with no specific window
-- [ ] T065 [P] [US4] Create `tests/fixtures/conversations/script_truncated.json` — conversation ends without a clear signal (FR-036 rule #10)
-- [ ] T066 [US4] End-to-end integration test in `tests/integration/test_us4_artifact_readability.py` @pytest.mark.integration: parametrized over every fixture from T035–T065; for each, run the orchestrator and assert the FR-014 field presence/absence per disposition + the FR-031 write-back-shape per disposition + the FR-032 `new_status` per disposition. Includes a dedicated Q5 assertion that the callback task payload carries both `preferred_callback_window` and `captured_email`.
+- [x] T057 [P] [US4] Create `tests/fixtures/conversations/interested_email_captured.json` — verified email captured, no callback request
+- [x] T058 [P] [US4] Create `tests/fixtures/conversations/interested_email_and_callback.json` — verified email AND callback request (Q5 Clarification case)
+- [x] T059 [P] [US4] Create `tests/fixtures/conversations/needs_human_review_uncertain_role.json` — contact's role is ambiguous; persona escalates with `uncertain_role`
+- [x] T060 [P] [US4] Create `tests/fixtures/conversations/needs_human_review_email_invalid.json` — contact gives a syntactically valid but un-confirmed email, no callback → FR-036 rule #7 → `captured_email_invalid_no_callback`
+- [x] T061 [P] [US4] Create `tests/fixtures/conversations/do_not_call_mid_call.json` — contact states DNC mid-conversation; triggers Edge Case "DNC stated mid-conversation"
+- [x] T062 [P] [US4] Create `tests/fixtures/conversations/wrong_number.json` — contact states wrong number
+- [x] T063 [P] [US4] Create `tests/fixtures/conversations/not_interested.json` — contact explicitly declines
+- [x] T064 [P] [US4] Create `tests/fixtures/conversations/call_back_later.json` — contact asks to be called back later with no specific window
+- [x] T065 [P] [US4] Create `tests/fixtures/conversations/script_truncated.json` — conversation ends without a clear signal (FR-036 rule #10)
+- [x] T066 [US4] End-to-end integration test in `tests/integration/test_us4_artifact_readability.py` @pytest.mark.integration: parametrized over every fixture from T035–T065; for each, run the orchestrator and assert the FR-014 field presence/absence per disposition + the FR-031 write-back-shape per disposition + the FR-032 `new_status` per disposition. Includes a dedicated Q5 assertion that the callback task payload carries both `preferred_callback_window` and `captured_email`.
 
 **Checkpoint US4**: Every disposition in FR-013's 11-value enum is reachable via a fixture and produces operator-readable artifacts (SC-003 satisfied). US1, US2, and US3 still pass.
 
@@ -181,15 +181,15 @@ Every user story below depends on these. Foundational unit tests are included be
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T067 Implement the SC-009 module-isolation gate via a dependency-direction lint in `tests/test_imports.py`: walks each module's `import` statements via the `ast` module and asserts only the allowed dependencies per the contracts (`core` may import any boundary module; boundary modules may import `models` and `state` but NOT each other). Fails CI on violation.
-- [ ] T068 Add the SC-001 wall-time **gate test** in `tests/integration/test_sc001_budget.py` @pytest.mark.integration: parametrized over every Slice 1 conversation + transport fixture combination, run the CLI and assert the emitted `wall_time_ms < 60000` (the 60-second SC-001 budget). The CLI line itself is owned by T034; this task only adds the integration assertion.
-- [ ] T069 [P] Add an SC-005 deterministic-JSON property test in `tests/integration/test_sc005_determinism.py`: run any US1 fixture twice in isolated temp directories; assert byte-identity of every exported artifact across the two runs.
-- [ ] T070 [P] Add an SC-006 false-positive test in `tests/integration/test_sc006_no_false_activity.py`: run the no_answer / voicemail / failed fixtures and assert no `phone_call_activities` row falsely claims a connected conversation (e.g., `summary` does NOT contain words the persona would only say on a connected call).
-- [ ] T071 [P] Enforce a 90% coverage floor in `pyproject.toml` `[tool.pytest.ini_options]` via `--cov=src/opencloser --cov-fail-under=90`.
-- [ ] T072 Verify `.specify/memory/constitution.md` (authored 2026-05-19 during /speckit.analyze remediation) remains in sync with the spec's `## Constitution Alignment` section. If Slice 1 implementation surfaced any principle refinement, amend the constitution and record a Rationale section per its Governance clause.
-- [ ] T073 [P] Update `README.md` with a 20-line "what is Slice 1" section linking to quickstart.md and the 5 contract files.
-- [ ] T074 [P] Run `uv run ruff check . && uv run ruff format .` and resolve any findings; commit lint config in `pyproject.toml` if not already.
-- [ ] T075 Verify SC-008's plan-time review: walk the 5 `contracts/*.md` files and confirm each public surface is documented language-neutrally and is plausibly satisfiable by the future SignalWire / Dataverse / real-persona substitutions. Record findings in `specs/001-mock-call-mock-crm/SC008_REVIEW.md`.
+- [x] T067 Implement the SC-009 module-isolation gate via a dependency-direction lint in `tests/test_imports.py`: walks each module's `import` statements via the `ast` module and asserts only the allowed dependencies per the contracts (`core` may import any boundary module; boundary modules may import `models` and `state` but NOT each other). Fails CI on violation.
+- [x] T068 Add the SC-001 wall-time **gate test** in `tests/integration/test_sc001_budget.py` @pytest.mark.integration: parametrized over every Slice 1 conversation + transport fixture combination, run the CLI and assert the emitted `wall_time_ms < 60000` (the 60-second SC-001 budget). The CLI line itself is owned by T034; this task only adds the integration assertion.
+- [x] T069 [P] Add an SC-005 deterministic-JSON property test in `tests/integration/test_sc005_determinism.py`: run any US1 fixture twice in isolated temp directories; assert byte-identity of every exported artifact across the two runs.
+- [x] T070 [P] Add an SC-006 false-positive test in `tests/integration/test_sc006_no_false_activity.py`: run the no_answer / voicemail / failed fixtures and assert no `phone_call_activities` row falsely claims a connected conversation (e.g., `summary` does NOT contain words the persona would only say on a connected call).
+- [x] T071 [P] Enforce a 90% coverage floor in `pyproject.toml` `[tool.pytest.ini_options]` via `--cov=src/opencloser --cov-fail-under=90`.
+- [x] T072 Verify `.specify/memory/constitution.md` (authored 2026-05-19 during /speckit.analyze remediation) remains in sync with the spec's `## Constitution Alignment` section. If Slice 1 implementation surfaced any principle refinement, amend the constitution and record a Rationale section per its Governance clause.
+- [x] T073 [P] Update `README.md` with a 20-line "what is Slice 1" section linking to quickstart.md and the 5 contract files.
+- [x] T074 [P] Run `uv run ruff check . && uv run ruff format .` and resolve any findings; commit lint config in `pyproject.toml` if not already.
+- [x] T075 Verify SC-008's plan-time review: walk the 5 `contracts/*.md` files and confirm each public surface is documented language-neutrally and is plausibly satisfiable by the future SignalWire / Dataverse / real-persona substitutions. Record findings in `specs/001-mock-call-mock-crm/SC008_REVIEW.md`.
 
 **Checkpoint Polish**: All 9 success criteria measurable from CI + artifacts. The codebase has lint + coverage gates. Constitution doc exists. SC-008 review is on record.
 

@@ -1,0 +1,12 @@
+{
+  "queue_item_id": "alf-prospect-not-ready",
+  "facility_name": "Meadow ALF",
+  "phone_number": "+15555550105",
+  "timezone": "America/Los_Angeles",
+  "default_tz_applied": false,
+  "email": null,
+  "attempt_count": 0,
+  "dnc_flag": false,
+  "callable_status": "in_progress",
+  "last_decision_at": null
+}

@@ -1,0 +1,11 @@
+{
+  "fixture_id": "no_answer",
+  "events": [
+    {
+      "event_id": "evt_no_answer_001",
+      "type": "no_answer",
+      "timestamp": "2026-05-19T17:00:30.000Z",
+      "payload": {}
+    }
+  ]
+}

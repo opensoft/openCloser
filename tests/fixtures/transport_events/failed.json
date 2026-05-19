@@ -1,0 +1,11 @@
+{
+  "fixture_id": "failed",
+  "events": [
+    {
+      "event_id": "evt_failed_001",
+      "type": "failed",
+      "timestamp": "2026-05-19T17:00:05.000Z",
+      "payload": { "failure_reason": "carrier_error" }
+    }
+  ]
+}
