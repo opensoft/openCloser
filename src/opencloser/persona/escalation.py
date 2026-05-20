@@ -55,24 +55,32 @@ _OUTSIDE_ALLOWED_KEYWORDS = (
     "compared to sunrise",
 )
 
-_AMBIGUOUS_DNC_KEYWORDS = (
-    "i'm busy right now",
-    "we'll get back",
-    "don't really want to talk",
-    "not the best time but",
-)
+# N2 — genuinely DNC-adjacent phrasing the persona cannot disambiguate from a
+# soft brush-off. Per spec.md FR-010 / Clarifications Round 2 Q5, "I'm busy",
+# "we'll get back to you", and "not the best time" are explicitly NOT ambiguous
+# DNC — they MUST route to `call_back_later` (handled in
+# extraction._classify_intent via _CALL_BACK_LATER_PHRASES), so they are
+# deliberately excluded from this set.
+_AMBIGUOUS_DNC_KEYWORDS = ("don't really want to talk",)
 
 
 def derive_escalation_reason(
     extraction: Extraction,
     turns: Sequence[ConversationTurn],
+    *,
+    script_terminated_without_signal: bool = False,
 ) -> HumanReviewReason | None:
     """Return the matching FR-035 reason code, or None if no escalation is warranted.
 
-    Order matches the FR-035 trigger-condition table (Clarifications Round 2 Q10).
+    Covers the FR-035 trigger-condition table (Clarifications Round 2 Q10). The two
+    FR-035 codes whose trigger conditions are *defined as* FR-036 rules —
+    `captured_email_invalid_no_callback` (rule 7) and `script_truncated` (rule 10) —
+    are intentionally NOT produced here; `disposition_rules.decide_disposition`
+    owns them so that rule 3 (escalation) does not pre-empt rules 6/7/10.
     """
     joined_contact = " ".join(t.text.lower() for t in turns if t.role == "contact")
 
+    # Always-on safety escalations — never suppressed by a competing FR-036 rule.
     if any(k in joined_contact for k in _LEGAL_KEYWORDS):
         return HumanReviewReason.LEGAL_REQUEST
     if any(k in joined_contact for k in _PHI_KEYWORDS):
@@ -82,6 +90,23 @@ def derive_escalation_reason(
     if any(k in joined_contact for k in _OUTSIDE_ALLOWED_KEYWORDS):
         return HumanReviewReason.OUTSIDE_ALLOWED_CLAIMS
 
+    # `ambiguous_dnc` is a genuine DNC-adjacent safety signal — it outranks the
+    # generic role/intent-uncertainty checks below and is never suppressed.
+    if any(k in joined_contact for k in _AMBIGUOUS_DNC_KEYWORDS):
+        return HumanReviewReason.AMBIGUOUS_DNC
+
+    # C3/C4/C5 — `uncertain_role` / `uncertain_intent` are suppressed when a
+    # *later* FR-036 rule already owns this conversation, so rule 3 does not
+    # pre-empt it and break first-match-wins precedence:
+    #   - a captured email (verified or unverified) → FR-036 rules 6 / 7
+    #   - a signal-starved / truncated script       → FR-036 rule 10
+    captured_email_present = (
+        extraction.captured_email is not None
+        or extraction.captured_email_unverified is not None
+    )
+    if captured_email_present or script_terminated_without_signal:
+        return None
+
     if extraction.role_confidence is RoleConfidence.UNCERTAIN:
         return HumanReviewReason.UNCERTAIN_ROLE
 
@@ -90,8 +115,5 @@ def derive_escalation_reason(
         and extraction.role_confidence is not RoleConfidence.UNCERTAIN
     ):
         return HumanReviewReason.UNCERTAIN_INTENT
-
-    if any(k in joined_contact for k in _AMBIGUOUS_DNC_KEYWORDS):
-        return HumanReviewReason.AMBIGUOUS_DNC
 
     return None

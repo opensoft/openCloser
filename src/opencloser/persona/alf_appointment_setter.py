@@ -53,12 +53,16 @@ class ALFAppointmentSetterPersona:
             )
 
         extraction = extract_from_turns(turns)
-        escalation = derive_escalation_reason(extraction, turns)
-        # Heuristic for "script terminated without signal": there are no contact turns
-        # beyond the initial pleasantry, or every contact turn has < 12 chars.
+        # "Script terminated without signal" (FR-036 rule 10): the contact never
+        # produced a substantive turn — every contact turn is a short pleasantry
+        # (< 12 chars), or there were no contact turns at all. A single *long*
+        # turn is NOT truncated: it carries enough signal to classify genuinely.
         contact_turns = [t for t in turns if t.role == "contact"]
-        terminated = len(contact_turns) <= 1 or all(len(t.text.strip()) < 12 for t in contact_turns)
+        terminated = all(len(t.text.strip()) < 12 for t in contact_turns)
 
+        escalation = derive_escalation_reason(
+            extraction, turns, script_terminated_without_signal=terminated
+        )
         disposition, review_reason = decide_disposition(
             extraction, escalation, script_terminated_without_signal=terminated
         )

@@ -107,7 +107,6 @@ def test_happy_path_callback_requested(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
 ) -> None:
     _seed_eligible(tmp_state_db)
-    _connected_fixture(tmp_path / "transport")
     (tmp_path / "transport").mkdir(exist_ok=True)
     _connected_fixture(tmp_path / "transport")
 

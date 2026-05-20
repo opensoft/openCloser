@@ -48,6 +48,7 @@ _CALL_BACK_LATER_PHRASES = (
     "call back later",
     "try later",
     "not a good time",
+    "not the best time",
     "busy right now",
     "we'll get back",
 )
@@ -58,6 +59,39 @@ _CALLBACK_REQUEST_PHRASES = (
     "callback",
     "call back",
     "schedule a call",
+)
+
+# C2 — affirmative-engagement phrases. A contact who engages positively (without
+# requesting a callback or volunteering an email) is still classified INTERESTED;
+# without these the classifier fell through to UNCERTAIN and FR-036 rules 6/7
+# became unreachable behind a spurious `uncertain_intent` escalation.
+_INTERESTED_PHRASES = (
+    "interested",
+    "tell me more",
+    "sounds good",
+    "sounds great",
+    "sounds reasonable",
+    "that works",
+    "that sounds",
+    "what's this about",
+    "what is this about",
+    "go ahead",
+    "happy to",
+    "love to hear",
+)
+
+# C2 — a contact volunteering an email address is itself an engaged (INTERESTED)
+# signal, independent of the separate email-extraction pass.
+_EMAIL_VOLUNTEER_PHRASES = (
+    "send info to",
+    "send it to",
+    "send me",
+    "email me",
+    "email is",
+    "email it to",
+    "my email",
+    "reach me at",
+    "info pack",
 )
 
 _DECISION_MAKER_PHRASES = (
@@ -146,7 +180,11 @@ def _classify_intent(contact_turns: Sequence[ConversationTurn]) -> IntentClassif
         return IntentClassification.NOT_INTERESTED
     if _any_in(joined, _CALL_BACK_LATER_PHRASES) and not _any_in(joined, _CALLBACK_REQUEST_PHRASES):
         return IntentClassification.CALL_BACK_LATER
-    if _any_in(joined, _CALLBACK_REQUEST_PHRASES) or "interested" in joined or "tell me more" in joined:
+    if (
+        _any_in(joined, _CALLBACK_REQUEST_PHRASES)
+        or _any_in(joined, _INTERESTED_PHRASES)
+        or _any_in(joined, _EMAIL_VOLUNTEER_PHRASES)
+    ):
         return IntentClassification.INTERESTED
     return IntentClassification.UNCERTAIN
 

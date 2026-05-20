@@ -52,7 +52,7 @@ def _load_conv() -> ConversationFixture:
 def _run(tmp_path: Path) -> Path:
     state_db = tmp_path / "state.db"
     artifact_dir = tmp_path / "artifacts"
-    artifact_dir.mkdir()
+    artifact_dir.mkdir(parents=True)
     config = SliceConfig(
         call_window=CallWindowConfig(start="09:00", end="20:00"),
         eligibility=EligibilityConfig(max_attempts=5, default_timezone="America/Los_Angeles"),

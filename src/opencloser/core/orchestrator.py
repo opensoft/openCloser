@@ -134,6 +134,11 @@ def process_one_queue_item(
     # ----- step 2: eligibility decision -------------------------------------
     decision = eligibility.evaluate(queue_item, config, clock)
 
+    # Pre-validate allow-path inputs BEFORE creating any session row, so a bad
+    # invocation never leaves a partial session behind (P1-5 / N3).
+    if decision.outcome != "block" and transport_fixture_id is None:
+        raise ValueError("transport_fixture_id is required when eligibility allows the call")
+
     # ----- step 3: create session row (always, per Q3) ----------------------
     session_id = ids.new_session_id()
     started_at = clock.now_utc_ms()
@@ -288,8 +293,9 @@ def _run_allowed_session(
 ) -> RunReport:
     del eligibility  # already used; kept for signature symmetry
 
-    if transport_fixture_id is None:
-        raise ValueError("transport_fixture_id is required when eligibility allows the call")
+    # transport_fixture_id is pre-validated by process_one_queue_item (P1-5) before
+    # the session row is created — by here it is guaranteed present.
+    assert transport_fixture_id is not None
 
     # Transition session to eligibility_evaluated.
     with store.transaction(conn):
@@ -316,10 +322,13 @@ def _run_allowed_session(
         if idempotency.record_or_skip(conn, attempt_key, applied_at=clock.now_utc_ms()):
             store.increment_attempt_count(conn, queue_item.queue_item_id)
 
-    # Drain the transport event stream.
+    # Drain the FULL transport event stream. The session is finalized once, AFTER the
+    # loop — keeping iteration going past the first terminal event is what lets FR-020
+    # conflicting late events be audited instead of silently dropped (C1).
     persona_output: PersonaOutput | None = None
     transcript_text: str | None = None
     finalizing_event: MockCallEvent | None = None
+    final_disposition: Disposition | None = None
     conflicting_events: list[ConflictingEventAuditRecord] = []
 
     for raw_event in transport.event_stream(mock_call_id):
@@ -339,86 +348,72 @@ def _run_allowed_session(
             write_back_kind=WriteBackKind.SESSION_STATE,
         )
 
-        # Duplicate detection (FR-019). UNIQUE on idempotency_keys is the dedup signal.
-        if not idempotency.record_or_skip(conn, event_key, applied_at=clock.now_utc_ms()):
-            continue
+        # Idempotency-key INSERT and the state mutation it gates run in ONE transaction
+        # (H1) — a crash can never record the key without persisting the event/audit row.
+        with store.transaction(conn):
+            # Duplicate detection (FR-019). A UNIQUE violation on idempotency_keys means
+            # this event was already applied — silent no-op, even if it is also a
+            # conflicting late event (FR-019 wins over FR-020 per the clarifications).
+            if not idempotency.record_or_skip(conn, event_key, applied_at=clock.now_utc_ms()):
+                continue
 
-        # Conflicting late event (FR-020): if session is already finalized AND this event
-        # would change the disposition, audit-log it but do NOT mutate state.
-        current_session = store.get_session(conn, session.session_id)
-        if current_session is not None and current_session.state == SessionState.FINALIZED:
-            if event.event_type in _TERMINAL_EVENTS:
-                conflicting_events.append(
-                    ConflictingEventAuditRecord(
+            # Conflicting late event (FR-020): the session already had a finalizing
+            # event this run. A late terminal event is audit-logged (separate channel);
+            # it does NOT mutate state or emit write-backs. Non-terminal late events
+            # (e.g. a stray callback_requested) are simply dropped.
+            if finalizing_event is not None:
+                if event.event_type in _TERMINAL_EVENTS:
+                    audit = ConflictingEventAuditRecord(
                         audit_id=ids.new_audit_id(),
                         session_id=session.session_id,
                         event_id=event.event_id,
                         conflicting_event_type=event.event_type,
                         received_at=event.received_at,
                         full_event_payload=event.payload,
-                        preserved_disposition=current_session.final_disposition or Disposition.NEEDS_HUMAN_REVIEW,
+                        preserved_disposition=final_disposition or Disposition.FAILED,
                     )
-                )
-                store.insert_conflicting_event(conn, conflicting_events[-1])
-            continue
+                    conflicting_events.append(audit)
+                    store.insert_conflicting_event(conn, audit)
+                continue
 
-        # Normal path: persist the event row.
-        with store.transaction(conn):
+            # Normal path: persist the event row atomically with its idempotency key.
             store.insert_mock_call_event(conn, event)
 
-        # On `connected`: run the persona over the full conversation fixture.
+        # On `connected`: run the persona over the full conversation fixture (once).
         if event.event_type is EventType.CONNECTED and persona_output is None:
-            if conversation_fixture is None:
-                raise ValueError(
-                    "conversation_fixture is required when transport emits a `connected` event"
+            if conversation_fixture is not None:
+                session_context = SessionContext(
+                    session_id=session.session_id,
+                    queue_item=queue_item,
+                    mock_provider_call_id=mock_call_id,
+                    started_at=session.started_at,
+                    config=config,
+                    clock=clock,
                 )
-            session_context = SessionContext(
-                session_id=session.session_id,
-                queue_item=queue_item,
-                mock_provider_call_id=mock_call_id,
-                started_at=session.started_at,
-                config=config,
-                clock=clock,
-            )
-            persona_output = persona.run(session_context, conversation_fixture)
-            transcript_text = _format_transcript(conversation_fixture.turns)
-            with store.transaction(conn):
-                store.update_session(
-                    conn,
-                    session.session_id,
-                    persona_version=persona_output.persona_version,
-                )
+                persona_output = persona.run(session_context, conversation_fixture)
+                transcript_text = _format_transcript(conversation_fixture.turns)
+                with store.transaction(conn):
+                    store.update_session(
+                        conn,
+                        session.session_id,
+                        persona_version=persona_output.persona_version,
+                    )
+            # else: no conversation fixture supplied for a connected call — the persona
+            # cannot run; the session finalizes cleanly as `failed` (P1-5) rather than
+            # raising mid-stream.
 
-        # Terminal event finalizes the session.
-        if event.event_type in _TERMINAL_EVENTS:
+        # First terminal event marks the finalization point. We record it and the
+        # resolved disposition, but keep draining the stream so later events that
+        # arrive after finalization are routed to the FR-020 audit channel above.
+        if finalizing_event is None and event.event_type in _TERMINAL_EVENTS:
             finalizing_event = event
-            disposition = _resolve_final_disposition(event, persona_output)
-            normalized, paths = _finalize_session(
-                conn=conn,
-                session=session,
-                queue_item=queue_item,
-                decision=decision,
-                config=config,
-                clock=clock,
-                mock_call_id=mock_call_id,
-                disposition=disposition,
-                persona_output=persona_output,
-                transcript_text=transcript_text,
-                conflicting_events=conflicting_events,
-            )
-            return RunReport(
-                session_id=session.session_id,
-                final_disposition=disposition,
-                mock_provider_call_id=mock_call_id,
-                artifact_dir=paths.session_dir,
-                wall_time_ms=int((time.monotonic() - start_ts_monotonic) * 1000),
-                eligibility_outcome="allow",
-            )
+            final_disposition = _resolve_final_disposition(event, persona_output)
 
-    # Defensive: stream ended without a finalizing event (e.g., only `callback_requested`
-    # or a malformed fixture). Treat as `failed`.
-    del finalizing_event
-    fallback = _resolve_final_disposition(None, persona_output)
+    # Stream fully drained. Resolve the disposition (covers the no-terminal-event case,
+    # e.g. only callback_requested or a truncated fixture) and finalize exactly once.
+    if final_disposition is None:
+        final_disposition = _resolve_final_disposition(finalizing_event, persona_output)
+
     normalized, paths = _finalize_session(
         conn=conn,
         session=session,
@@ -427,14 +422,14 @@ def _run_allowed_session(
         config=config,
         clock=clock,
         mock_call_id=mock_call_id,
-        disposition=fallback,
+        disposition=final_disposition,
         persona_output=persona_output,
         transcript_text=transcript_text,
         conflicting_events=conflicting_events,
     )
     return RunReport(
         session_id=session.session_id,
-        final_disposition=fallback,
+        final_disposition=final_disposition,
         mock_provider_call_id=mock_call_id,
         artifact_dir=paths.session_dir,
         wall_time_ms=int((time.monotonic() - start_ts_monotonic) * 1000),
@@ -491,12 +486,14 @@ def _finalize_session(
         ended_at=ended_at,
     )
 
-    # Persist session.state = finalized, ended_at, persona_version, blocked_reason.
+    # Persist the disposition, normalized result, and queue-item lifecycle update.
+    # The session's `state` is intentionally NOT flipped to FINALIZED here — that
+    # flip is the LAST commit, after write-backs and artifacts succeed (N3), so a
+    # FINALIZED session row is guaranteed to have its write-backs and artifacts.
     with store.transaction(conn):
         store.update_session(
             conn,
             session.session_id,
-            state=SessionState.FINALIZED,
             final_disposition=disposition,
             ended_at=ended_at,
         )
@@ -590,6 +587,12 @@ def _finalize_session(
         transcript_text=transcript_text,
         conflicting_events=conflicting_events or None,
     )
+
+    # FINAL commit: flip the session to FINALIZED only now that every write-back row
+    # and artifact has been persisted (N3) — a FINALIZED row is always complete.
+    with store.transaction(conn):
+        store.update_session(conn, session.session_id, state=SessionState.FINALIZED)
+
     return normalized, paths
 
 

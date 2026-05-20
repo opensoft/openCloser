@@ -149,6 +149,36 @@ def test_us3_duplicate_connected_completed_attempt_count_increments_once(
     assert not (report.artifact_dir / "conflicting-events.json").exists()
 
 
+def test_us3_duplicate_callback_event_does_not_emit_second_task(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
+) -> None:
+    """Story 3 AS5 / FR-019: a `callback_requested` event redelivered for the same
+    session retains the original callback task and does NOT emit a second one."""
+    store.insert_queue_item(tmp_state_db, _seed())
+    report = process_one_queue_item(
+        "alf-prospect-001",
+        conn=tmp_state_db,
+        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        eligibility=BuiltinEligibilityEvaluator(),
+        transport=FixtureDrivenTransport(_TRANSPORT),
+        persona=ALFAppointmentSetterPersona(),
+        conversation_fixture=_load_conversation(),
+        transport_fixture_id="duplicate_callback_requested",
+        clock=_clock(),
+    )
+
+    assert report.final_disposition is Disposition.INTERESTED_CALLBACK_REQUESTED
+    # Exactly one task payload despite the redelivered callback_requested event.
+    n = tmp_state_db.execute("SELECT COUNT(*) AS n FROM task_payloads;").fetchone()["n"]
+    assert n == 1
+    # The duplicate is a silent no-op (FR-019), not an FR-020 audit event.
+    assert not (report.artifact_dir / "conflicting-events.json").exists()
+    n = tmp_state_db.execute(
+        "SELECT COUNT(*) AS n FROM conflicting_event_audit_records;"
+    ).fetchone()["n"]
+    assert n == 0
+
+
 # ---------------------------------------------------------------------------
 # Conflicting late event (FR-020)
 # ---------------------------------------------------------------------------
