@@ -69,7 +69,7 @@ def test_load_config_parses_toml(tmp_path: Path) -> None:
 
 def test_load_config_rejects_malformed_toml(tmp_path: Path) -> None:
     """A TOML file missing a required section MUST fail validation."""
-    partial = "[call_window]\nstart = \"09:00\"\nend = \"20:00\"\n"
+    partial = '[call_window]\nstart = "09:00"\nend = "20:00"\n'
     with pytest.raises(ValidationError):
         load_config(_write_toml(tmp_path, partial))
 
@@ -77,9 +77,7 @@ def test_load_config_rejects_malformed_toml(tmp_path: Path) -> None:
 # -- env-var overrides -------------------------------------------------------
 
 
-def test_env_var_overrides_take_precedence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_var_overrides_take_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENCLOSER_CALL_WINDOW_START", "07:30")
     monkeypatch.setenv("OPENCLOSER_ELIGIBILITY_DEFAULT_TIMEZONE", "America/New_York")
     monkeypatch.setenv("OPENCLOSER_ARTIFACTS_DIR", "/var/opencloser/artifacts")

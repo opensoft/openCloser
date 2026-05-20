@@ -50,11 +50,13 @@ def _config(artifact_dir: Path, db_path: Path) -> SliceConfig:
 
 
 def _load_queue_item(name: str) -> QueueItem:
-    return QueueItem.model_validate_json((_QUEUE_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    return QueueItem.model_validate_json(
+        (_QUEUE_FIXTURES / f"{name}.json").read_text(encoding="utf-8")
+    )
 
 
 # Each case: (fixture name, clock instant, expected failing rule code).
-# After-hours uses a clock at 04:00 Pacific (UTC 11:00 — well outside 09:00–20:00).
+# After-hours uses a clock at 04:00 Pacific (UTC 11:00 — well outside 09:00-20:00).
 _CASES = [
     ("alf-prospect-dnc", datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC), "d"),
     ("alf-prospect-after-hours", datetime(2026, 5, 19, 11, 0, 0, tzinfo=UTC), "c"),
@@ -135,15 +137,15 @@ def test_us2_multi_rule_failure_lists_all_in_canonical_order(
     (f). Rule (b) usable-timezone cannot fail in Slice 1 by design: the evaluator's
     default-timezone fallback always yields a usable zone, so rule (b) always passes
     (see contracts/eligibility.md §Behavior + evaluator._resolve_timezone). The clock is
-    set to 04:00 Pacific (11:00 UTC) — outside the 09:00–20:00 window — to fail (c)."""
+    set to 04:00 Pacific (11:00 UTC) — outside the 09:00-20:00 window — to fail (c)."""
     bad_qi = QueueItem(
         queue_item_id="q_multi",
         facility_name="Bad ALF",
-        phone_number=None,             # fails (a)
+        phone_number=None,  # fails (a)
         timezone="America/Los_Angeles",  # rule (b) passes (valid; would also pass via fallback)
-        attempt_count=5,                # fails (e)
-        dnc_flag=True,                  # fails (d)
-        callable_status="dnc",          # fails (f)
+        attempt_count=5,  # fails (e)
+        dnc_flag=True,  # fails (d)
+        callable_status="dnc",  # fails (f)
     )
     store.insert_queue_item(tmp_state_db, bad_qi)
     report = process_one_queue_item(
@@ -159,7 +161,7 @@ def test_us2_multi_rule_failure_lists_all_in_canonical_order(
     )
     assert report.final_disposition is Disposition.BLOCKED
     decision = json.loads((report.artifact_dir / "eligibility-decision.json").read_text())
-    # All five failable rules, in canonical (a)–(f) order; (b) passes by design.
+    # All five failable rules, in canonical (a)-(f) order; (b) passes by design.
     assert decision["failing_rules"] == ["a", "c", "d", "e", "f"]
     # The persisted decision records (b) as a pass even though every other rule failed.
     assert decision["rules"]["b"] is True

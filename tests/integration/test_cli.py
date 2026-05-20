@@ -115,9 +115,7 @@ def test_cli_run_one_blocked_path(tmp_path: Path) -> None:
     fixtures needed, `mock_provider_call_id` is absent, disposition is `blocked`."""
     config_path = _write_config(tmp_path)
 
-    assert (
-        _runner.invoke(app, ["init-state", "--config", str(config_path)]).exit_code == 0
-    )
+    assert _runner.invoke(app, ["init-state", "--config", str(config_path)]).exit_code == 0
     load = _runner.invoke(
         app,
         [
@@ -149,9 +147,7 @@ def test_cli_run_one_blocked_path(tmp_path: Path) -> None:
 def test_cli_run_one_unknown_queue_item_id_exits_2(tmp_path: Path) -> None:
     """An unknown queue-item ID surfaces a clear error and exits with code 2."""
     config_path = _write_config(tmp_path)
-    assert (
-        _runner.invoke(app, ["init-state", "--config", str(config_path)]).exit_code == 0
-    )
+    assert _runner.invoke(app, ["init-state", "--config", str(config_path)]).exit_code == 0
 
     run = _runner.invoke(
         app,

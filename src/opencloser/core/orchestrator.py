@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opencloser.artifacts.writer import ArtifactPaths, write_session_artifacts
-from opencloser.core import ids, idempotency
+from opencloser.core import idempotency, ids
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.models import (
@@ -57,9 +57,9 @@ _TERMINAL_EVENTS: frozenset[EventType] = frozenset(
 )
 
 # FR-031 per-disposition write-back emission map.
-_EMITS_PHONE_CALL_ACTIVITY: frozenset[Disposition] = frozenset(
-    Disposition.__members__.values()
-) - {Disposition.BLOCKED}
+_EMITS_PHONE_CALL_ACTIVITY: frozenset[Disposition] = frozenset(Disposition.__members__.values()) - {
+    Disposition.BLOCKED
+}
 
 _EMITS_CALLBACK_TASK: frozenset[Disposition] = frozenset(
     {
@@ -107,8 +107,8 @@ def process_one_queue_item(
     *,
     conn: sqlite3.Connection,
     config: SliceConfig,
-    eligibility: "BuiltinEligibilityEvaluator",
-    transport: "FixtureDrivenTransport",
+    eligibility: BuiltinEligibilityEvaluator,
+    transport: FixtureDrivenTransport,
     persona: ALFAppointmentSetterPersona,
     conversation_fixture: ConversationFixture | None,
     transport_fixture_id: str | None,
@@ -144,7 +144,9 @@ def process_one_queue_item(
     started_at = clock.now_utc_ms()
     initial_state = SessionState.BLOCKED if decision.outcome == "block" else SessionState.CREATED
     final_disp_at_start = Disposition.BLOCKED if decision.outcome == "block" else None
-    blocked_reason: list[RuleCode] | None = decision.failing_rules if decision.outcome == "block" else None
+    blocked_reason: list[RuleCode] | None = (
+        decision.failing_rules if decision.outcome == "block" else None
+    )
     initial_session = Session(
         session_id=session_id,
         queue_item_id=queue_item.queue_item_id,
@@ -161,9 +163,7 @@ def process_one_queue_item(
         # Backfill session_id on the decision and persist.
         decision_with_session = decision.model_copy(update={"session_id": session_id})
         store.insert_eligibility_decision(conn, decision_with_session)
-        store.update_queue_item_status(
-            conn, queue_item_id, last_decision_at=clock.now_utc_ms()
-        )
+        store.update_queue_item_status(conn, queue_item_id, last_decision_at=clock.now_utc_ms())
 
     # ----- block branch -----------------------------------------------------
     if decision.outcome == "block":
@@ -285,7 +285,7 @@ def _run_allowed_session(
     config: SliceConfig,
     clock: Clock,
     eligibility,
-    transport: "FixtureDrivenTransport",
+    transport: FixtureDrivenTransport,
     persona: ALFAppointmentSetterPersona,
     conversation_fixture: ConversationFixture | None,
     transport_fixture_id: str | None,
@@ -384,27 +384,30 @@ def _run_allowed_session(
             store.insert_mock_call_event(conn, event)
 
         # On `connected`: run the persona over the full conversation fixture (once).
-        if event.event_type is EventType.CONNECTED and persona_output is None:
-            if conversation_fixture is not None:
-                session_context = SessionContext(
-                    session_id=session.session_id,
-                    queue_item=queue_item,
-                    mock_provider_call_id=mock_call_id,
-                    started_at=session.started_at,
-                    config=config,
-                    clock=clock,
+        # If no conversation fixture was supplied for a connected call, the persona
+        # cannot run; the session finalizes cleanly as `failed` (P1-5) rather than
+        # raising mid-stream.
+        if (
+            event.event_type is EventType.CONNECTED
+            and persona_output is None
+            and conversation_fixture is not None
+        ):
+            session_context = SessionContext(
+                session_id=session.session_id,
+                queue_item=queue_item,
+                mock_provider_call_id=mock_call_id,
+                started_at=session.started_at,
+                config=config,
+                clock=clock,
+            )
+            persona_output = persona.run(session_context, conversation_fixture)
+            transcript_text = _format_transcript(conversation_fixture.turns)
+            with store.transaction(conn):
+                store.update_session(
+                    conn,
+                    session.session_id,
+                    persona_version=persona_output.persona_version,
                 )
-                persona_output = persona.run(session_context, conversation_fixture)
-                transcript_text = _format_transcript(conversation_fixture.turns)
-                with store.transaction(conn):
-                    store.update_session(
-                        conn,
-                        session.session_id,
-                        persona_version=persona_output.persona_version,
-                    )
-            # else: no conversation fixture supplied for a connected call — the persona
-            # cannot run; the session finalizes cleanly as `failed` (P1-5) rather than
-            # raising mid-stream.
 
         # First terminal event marks the finalization point. We record it and the
         # resolved disposition, but keep draining the stream so later events that
@@ -418,7 +421,7 @@ def _run_allowed_session(
     if final_disposition is None:
         final_disposition = _resolve_final_disposition(finalizing_event, persona_output)
 
-    normalized, paths = _finalize_session(
+    _, paths = _finalize_session(
         conn=conn,
         session=session,
         queue_item=queue_item,
@@ -525,7 +528,9 @@ def _finalize_session(
             session_id=session.session_id,
             queue_item_id=queue_item.queue_item_id,
             mock_provider_call_id=mock_call_id,
-            persona_version=(persona_output.persona_version if persona_output else "alf-appointment-setter@0.1.0"),
+            persona_version=(
+                persona_output.persona_version if persona_output else "alf-appointment-setter@0.1.0"
+            ),
             final_disposition=disposition,
             summary=(normalized.summary or f"Final disposition: {disposition.value}")[:200],
             started_at=session.started_at,
@@ -683,7 +688,9 @@ def _build_review_task(
         task_kind="review",
         subject=f"Review {reason_label} for {queue_item.facility_name}",
         reason_code=reason,
-        persona_version=(persona_output.persona_version if persona_output else "alf-appointment-setter@0.1.0"),
+        persona_version=(
+            persona_output.persona_version if persona_output else "alf-appointment-setter@0.1.0"
+        ),
         created_at=ended_at,
     )
 

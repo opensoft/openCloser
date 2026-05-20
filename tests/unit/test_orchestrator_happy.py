@@ -19,8 +19,8 @@ from opencloser.core.orchestrator import QueueItemNotFound, process_one_queue_it
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
-    CallWindowConfig,
     CallableStatus,
+    CallWindowConfig,
     Disposition,
     EligibilityConfig,
     PersonaConfig,
@@ -74,8 +74,16 @@ def _connected_fixture(tmp_path: Path) -> None:
             {
                 "fixture_id": "connected",
                 "events": [
-                    {"event_id": "evt_1", "type": "connected", "timestamp": "2026-05-19T17:00:00.000Z"},
-                    {"event_id": "evt_2", "type": "completed", "timestamp": "2026-05-19T17:00:30.000Z"},
+                    {
+                        "event_id": "evt_1",
+                        "type": "connected",
+                        "timestamp": "2026-05-19T17:00:00.000Z",
+                    },
+                    {
+                        "event_id": "evt_2",
+                        "type": "completed",
+                        "timestamp": "2026-05-19T17:00:30.000Z",
+                    },
                 ],
             }
         ),
@@ -124,7 +132,9 @@ def test_happy_path_callback_requested(
 
     assert report.eligibility_outcome == "allow"
     assert report.final_disposition is Disposition.INTERESTED_CALLBACK_REQUESTED
-    assert report.mock_provider_call_id is not None and report.mock_provider_call_id.startswith("call_")
+    assert report.mock_provider_call_id is not None and report.mock_provider_call_id.startswith(
+        "call_"
+    )
 
     # Artifacts exist.
     assert (report.artifact_dir / "session-result.json").exists()

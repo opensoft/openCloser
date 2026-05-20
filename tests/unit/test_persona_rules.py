@@ -13,8 +13,8 @@ import pytest
 from opencloser.core.clock import FrozenClock
 from opencloser.models import (
     ArtifactsConfig,
-    CallWindowConfig,
     CallableStatus,
+    CallWindowConfig,
     Disposition,
     EligibilityConfig,
     HumanReviewReason,
@@ -65,7 +65,9 @@ def _session_context(qi: QueueItem | None = None) -> SessionContext:
     )
 
 
-def _fixture(name: str, turns: list[tuple[str, str]], *, expected: str = "x") -> ConversationFixture:
+def _fixture(
+    name: str, turns: list[tuple[str, str]], *, expected: str = "x"
+) -> ConversationFixture:
     return ConversationFixture(
         fixture_id=name,
         expected_disposition=expected,
@@ -169,7 +171,10 @@ def test_q8_decision_maker_with_uncertain_intent_escalates_uncertain_intent() ->
         "q8_role_known_intent_uncertain",
         [
             _disclosure(),
-            ("contact", "I'm the owner here. I genuinely can't tell whether this would be a fit for us."),
+            (
+                "contact",
+                "I'm the owner here. I genuinely can't tell whether this would be a fit for us.",
+            ),
         ],
     )
     out = persona.run(_session_context(), fx)

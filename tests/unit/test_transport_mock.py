@@ -34,11 +34,15 @@ def _write_fixture(dir_: Path, name: str, events: list[dict]) -> Path:
 
 
 def test_place_call_returns_globally_unique_id(tmp_path: Path) -> None:
-    _write_fixture(tmp_path, "no_answer", [{"event_id": "evt_1", "type": "no_answer", "timestamp": _T}])
+    _write_fixture(
+        tmp_path, "no_answer", [{"event_id": "evt_1", "type": "no_answer", "timestamp": _T}]
+    )
     transport = FixtureDrivenTransport(tmp_path)
     id_a = transport.place_call(_qi(), "no_answer")
     # Stash a second fixture so a second place_call doesn't clobber.
-    _write_fixture(tmp_path, "no_answer2", [{"event_id": "evt_x", "type": "no_answer", "timestamp": _T}])
+    _write_fixture(
+        tmp_path, "no_answer2", [{"event_id": "evt_x", "type": "no_answer", "timestamp": _T}]
+    )
     id_b = transport.place_call(_qi(), "no_answer2")
     assert id_a != id_b
     assert id_a.startswith("call_") and id_b.startswith("call_")
@@ -122,7 +126,9 @@ def test_event_stream_raises_when_no_call_pending(tmp_path: Path) -> None:
 
 
 def test_fixture_id_with_json_suffix_accepted(tmp_path: Path) -> None:
-    _write_fixture(tmp_path, "no_answer", [{"event_id": "e1", "type": "no_answer", "timestamp": _T}])
+    _write_fixture(
+        tmp_path, "no_answer", [{"event_id": "e1", "type": "no_answer", "timestamp": _T}]
+    )
     transport = FixtureDrivenTransport(tmp_path)
     call_id = transport.place_call(_qi(), "no_answer.json")
     events = list(transport.event_stream(call_id))
@@ -243,7 +249,9 @@ def test_event_stream_emits_callback_requested_null_window_hint(tmp_path: Path) 
 
 def test_event_stream_is_one_shot_per_call_id(tmp_path: Path) -> None:
     """event_stream consumes the pending fixture; streaming the same call id twice raises."""
-    _write_fixture(tmp_path, "no_answer", [{"event_id": "e1", "type": "no_answer", "timestamp": _T}])
+    _write_fixture(
+        tmp_path, "no_answer", [{"event_id": "e1", "type": "no_answer", "timestamp": _T}]
+    )
     transport = FixtureDrivenTransport(tmp_path)
     call_id = transport.place_call(_qi(), "no_answer")
     assert len(list(transport.event_stream(call_id))) == 1

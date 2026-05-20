@@ -7,7 +7,6 @@ exported artifacts (excluding the session_id-keyed path, which is randomized by 
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -62,9 +61,7 @@ def _run(tmp_path: Path, transport_fixture_id: str = "connected") -> Path:
     )
     conn = store.connect(state_db)
     store.init_schema(conn, now_utc_ms="2026-05-19T17:00:00.000Z")
-    store.insert_queue_item(
-        conn, QueueItem.model_validate_json(_QUEUE.read_text(encoding="utf-8"))
-    )
+    store.insert_queue_item(conn, QueueItem.model_validate_json(_QUEUE.read_text(encoding="utf-8")))
     try:
         report = process_one_queue_item(
             "alf-prospect-001",

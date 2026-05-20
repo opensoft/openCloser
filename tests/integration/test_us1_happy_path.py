@@ -2,7 +2,7 @@
 
 Independent Test (per spec §Story 1): load alf-prospect-001, run with the
 interested_callback_requested conversation fixture + connected transport fixture, and
-verify (a)–(f) of the spec's Independent Test bullet.
+verify (a)-(f) of the spec's Independent Test bullet.
 """
 
 from __future__ import annotations
@@ -37,7 +37,9 @@ pytestmark = pytest.mark.integration
 # Fixtures are committed under tests/fixtures/.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _QUEUE_ITEM_FIXTURE = _REPO_ROOT / "tests/fixtures/queue_items/alf-prospect-001.json"
-_CONVERSATION_FIXTURE = _REPO_ROOT / "tests/fixtures/conversations/interested_callback_requested.json"
+_CONVERSATION_FIXTURE = (
+    _REPO_ROOT / "tests/fixtures/conversations/interested_callback_requested.json"
+)
 _TRANSPORT_FIXTURES = _REPO_ROOT / "tests/fixtures/transport_events"
 
 

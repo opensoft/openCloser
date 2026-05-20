@@ -19,7 +19,7 @@ from opencloser.core.clock import SystemClock
 from opencloser.core.config import load_config
 from opencloser.core.orchestrator import QueueItemNotFound, process_one_queue_item
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
-from opencloser.models import CallableStatus, QueueItem
+from opencloser.models import QueueItem
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import ConversationFixture, ConversationTurn
 from opencloser.state import store
@@ -37,7 +37,9 @@ _DEFAULT_CONFIG_PATH = Path("config/slice1.toml")
 
 @app.command(name="init-state")
 def init_state(
-    config_path: Annotated[Path, typer.Option("--config", help="Path to slice1.toml")] = _DEFAULT_CONFIG_PATH,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="Path to slice1.toml")
+    ] = _DEFAULT_CONFIG_PATH,
 ) -> None:
     """Create the SQLite state DB and apply the schema (idempotent)."""
     config = load_config(config_path)
@@ -54,7 +56,9 @@ def init_state(
 @app.command(name="load-queue-item")
 def load_queue_item(
     file: Annotated[Path, typer.Option("--file", help="Path to a queue-item JSON fixture")],
-    config_path: Annotated[Path, typer.Option("--config", help="Path to slice1.toml")] = _DEFAULT_CONFIG_PATH,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="Path to slice1.toml")
+    ] = _DEFAULT_CONFIG_PATH,
 ) -> None:
     """INSERT a queue item from a JSON fixture into local state."""
     config = load_config(config_path)
@@ -71,7 +75,9 @@ def load_queue_item(
 
 @app.command(name="run-one")
 def run_one(
-    queue_item_id: Annotated[str, typer.Option("--queue-item-id", help="The queue-item ID to process")],
+    queue_item_id: Annotated[
+        str, typer.Option("--queue-item-id", help="The queue-item ID to process")
+    ],
     conversation_fixture: Annotated[
         Path | None,
         typer.Option(
@@ -86,7 +92,9 @@ def run_one(
             help="Path to a transport-events JSON (required when eligibility allows the call)",
         ),
     ] = None,
-    config_path: Annotated[Path, typer.Option("--config", help="Path to slice1.toml")] = _DEFAULT_CONFIG_PATH,
+    config_path: Annotated[
+        Path, typer.Option("--config", help="Path to slice1.toml")
+    ] = _DEFAULT_CONFIG_PATH,
 ) -> None:
     """Process exactly one queue record end-to-end (FR-025)."""
     config = load_config(config_path)
@@ -101,7 +109,9 @@ def run_one(
             transport_fixture_id = None
 
         # Load conversation fixture if provided.
-        conversation = _load_conversation_fixture(conversation_fixture) if conversation_fixture else None
+        conversation = (
+            _load_conversation_fixture(conversation_fixture) if conversation_fixture else None
+        )
 
         try:
             report = process_one_queue_item(

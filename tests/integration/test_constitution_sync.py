@@ -16,7 +16,9 @@ _CONSTITUTION = _REPO / ".specify/memory/constitution.md"
 
 
 def test_constitution_file_exists_and_is_non_empty() -> None:
-    assert _CONSTITUTION.exists(), "Slice 1 constitution must be authored before /speckit.implement merges"
+    assert _CONSTITUTION.exists(), (
+        "Slice 1 constitution must be authored before /speckit.implement merges"
+    )
     text = _CONSTITUTION.read_text(encoding="utf-8")
     assert len(text) > 500
 
@@ -55,8 +57,18 @@ def test_constitution_traceability_section_references_known_FRs() -> None:
     traceability = text.split("## Traceability", 1)[1]
 
     for fr_or_sc in (
-        "FR-008", "FR-016", "FR-033", "FR-010", "FR-018",
-        "FR-035", "FR-019", "FR-020", "FR-021", "SC-005", "SC-006", "SC-009",
+        "FR-008",
+        "FR-016",
+        "FR-033",
+        "FR-010",
+        "FR-018",
+        "FR-035",
+        "FR-019",
+        "FR-020",
+        "FR-021",
+        "SC-005",
+        "SC-006",
+        "SC-009",
     ):
         assert fr_or_sc in traceability, (
             f"Constitution Traceability section should mention {fr_or_sc}"

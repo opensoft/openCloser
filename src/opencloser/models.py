@@ -226,7 +226,7 @@ class MockCallEvent(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _allowlist_payload_keys(self) -> "MockCallEvent":
+    def _allowlist_payload_keys(self) -> MockCallEvent:
         """FR-024 + Q15 — retain only the payload keys this event type is defined to carry."""
         allowed = _ALLOWED_PAYLOAD_KEYS.get(self.event_type, frozenset())
         filtered = {k: v for k, v in self.payload.items() if k in allowed}
@@ -254,7 +254,7 @@ class Extraction(BaseModel):
     refusal_topics: list[RefusalTopic] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _exclusive_email_fields(self) -> "Extraction":
+    def _exclusive_email_fields(self) -> Extraction:
         if self.captured_email is not None and self.captured_email_unverified is not None:
             raise ValueError("captured_email and captured_email_unverified are mutually exclusive")
         return self
@@ -288,7 +288,7 @@ class NormalizedResult(BaseModel):
     ended_at: UtcMs
 
     @model_validator(mode="after")
-    def _exclusive_email_fields(self) -> "NormalizedResult":
+    def _exclusive_email_fields(self) -> NormalizedResult:
         if self.captured_email is not None and self.captured_email_unverified is not None:
             raise ValueError("captured_email and captured_email_unverified are mutually exclusive")
         return self
@@ -342,13 +342,15 @@ class TaskPayload(BaseModel):
     subject: str
     reason_code: HumanReviewReason | None = None  # required when task_kind=='review'
     preferred_callback_window: str | None = None  # required when task_kind=='callback' AND captured
-    captured_email: str | None = None  # populated only for callback tasks when verified email present
+    captured_email: str | None = (
+        None  # populated only for callback tasks when verified email present
+    )
     assigned_to: str | None = None  # OPTIONAL per Q19; Slice 1 mock leaves null
     persona_version: str
     created_at: UtcMs
 
     @model_validator(mode="after")
-    def _kind_invariants(self) -> "TaskPayload":
+    def _kind_invariants(self) -> TaskPayload:
         # FR-030: review tasks carry a reason_code; callback tasks do not. `captured_email`
         # is a callback-task field (Q5 clarification) and MUST NOT appear on review tasks.
         if self.task_kind == "review":

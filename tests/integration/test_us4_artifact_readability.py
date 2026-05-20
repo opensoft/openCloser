@@ -86,9 +86,19 @@ def _run(
 
 # Each row: (conv fixture, expected disposition, expects_task_kind, expects_new_status).
 _CASES = [
-    ("interested_callback_requested", Disposition.INTERESTED_CALLBACK_REQUESTED, "callback", "ready"),
+    (
+        "interested_callback_requested",
+        Disposition.INTERESTED_CALLBACK_REQUESTED,
+        "callback",
+        "ready",
+    ),
     ("interested_email_captured", Disposition.INTERESTED_EMAIL_CAPTURED, "callback", "completed"),
-    ("interested_email_and_callback", Disposition.INTERESTED_CALLBACK_REQUESTED, "callback", "ready"),
+    (
+        "interested_email_and_callback",
+        Disposition.INTERESTED_CALLBACK_REQUESTED,
+        "callback",
+        "ready",
+    ),
     ("needs_human_review_uncertain_role", Disposition.NEEDS_HUMAN_REVIEW, "review", "blocked"),
     ("needs_human_review_email_invalid", Disposition.NEEDS_HUMAN_REVIEW, "review", "blocked"),
     ("do_not_call_mid_call", Disposition.DO_NOT_CALL, None, "dnc"),
@@ -113,7 +123,9 @@ def test_us4_per_disposition_shape_and_readability(
     assert report.final_disposition is disposition
 
     # FR-014: session-result.json carries the required fields.
-    session_result = json.loads((report.artifact_dir / "session-result.json").read_text(encoding="utf-8"))
+    session_result = json.loads(
+        (report.artifact_dir / "session-result.json").read_text(encoding="utf-8")
+    )
     assert session_result["schema_version"] == "slice1-v1"
     assert session_result["final_disposition"] == disposition.value
     assert session_result["session_id"] == report.session_id

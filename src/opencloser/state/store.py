@@ -71,7 +71,7 @@ def _restrict_permissions(target: Path, mode: int) -> None:
     """
     try:
         os.chmod(target, mode)
-    except OSError as exc:  # noqa: BLE001 - some filesystems (network/Windows) reject chmod
+    except OSError as exc:
         _LOGGER.warning("could not restrict permissions on %s (mode %o): %s", target, mode, exc)
 
 
@@ -169,7 +169,7 @@ def update_queue_item_status(
         return
     values.append(queue_item_id)
     conn.execute(
-        f"UPDATE queue_items SET {', '.join(fields)} WHERE queue_item_id = ?;",  # noqa: S608
+        f"UPDATE queue_items SET {', '.join(fields)} WHERE queue_item_id = ?;",
         tuple(values),
     )
 
@@ -251,7 +251,7 @@ def update_session(
         return
     values.append(session_id)
     conn.execute(
-        f"UPDATE sessions SET {', '.join(fields)} WHERE session_id = ?;",  # noqa: S608
+        f"UPDATE sessions SET {', '.join(fields)} WHERE session_id = ?;",
         tuple(values),
     )
 
@@ -266,7 +266,9 @@ def get_session(conn: sqlite3.Connection, session_id: str) -> Session | None:
         queue_item_id=row["queue_item_id"],
         persona_version=row["persona_version"],
         state=SessionState(row["state"]),
-        final_disposition=Disposition(row["final_disposition"]) if row["final_disposition"] else None,
+        final_disposition=Disposition(row["final_disposition"])
+        if row["final_disposition"]
+        else None,
         blocked_reason=blocked,
         mock_provider_call_id=row["mock_provider_call_id"],
         started_at=row["started_at"],
@@ -380,9 +382,7 @@ def try_record_idempotency_key(
 # ---------------------------------------------------------------------------
 
 
-def insert_conflicting_event(
-    conn: sqlite3.Connection, audit: ConflictingEventAuditRecord
-) -> None:
+def insert_conflicting_event(conn: sqlite3.Connection, audit: ConflictingEventAuditRecord) -> None:
     conn.execute(
         """
         INSERT OR IGNORE INTO conflicting_event_audit_records (
@@ -428,9 +428,7 @@ def list_conflicting_events(
 # ---------------------------------------------------------------------------
 
 
-def insert_phone_call_activity(
-    conn: sqlite3.Connection, payload: PhoneCallActivityPayload
-) -> None:
+def insert_phone_call_activity(conn: sqlite3.Connection, payload: PhoneCallActivityPayload) -> None:
     conn.execute(
         """
         INSERT INTO phone_call_activities (
@@ -451,9 +449,7 @@ def insert_phone_call_activity(
     )
 
 
-def insert_queue_status_update(
-    conn: sqlite3.Connection, payload: QueueStatusUpdatePayload
-) -> None:
+def insert_queue_status_update(conn: sqlite3.Connection, payload: QueueStatusUpdatePayload) -> None:
     conn.execute(
         """
         INSERT INTO queue_status_updates (

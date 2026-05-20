@@ -10,8 +10,8 @@ from opencloser.core.clock import FrozenClock
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
-    CallWindowConfig,
     CallableStatus,
+    CallWindowConfig,
     EligibilityConfig,
     PersonaConfig,
     QueueItem,
@@ -81,7 +81,9 @@ def test_all_rules_pass_yields_allow() -> None:
 
 def test_rule_a_phone_presence_null() -> None:
     evaluator = BuiltinEligibilityEvaluator()
-    decision = evaluator.evaluate(_eligible_item(phone_number=None), _config(), _clock_at_noon_pacific())
+    decision = evaluator.evaluate(
+        _eligible_item(phone_number=None), _config(), _clock_at_noon_pacific()
+    )
     assert decision.outcome == "block"
     assert decision.failing_rules == ["a"]
     assert decision.rule_a_phone_pass is False
@@ -90,7 +92,9 @@ def test_rule_a_phone_presence_null() -> None:
 def test_rule_a_phone_presence_whitespace_only() -> None:
     """Q13: non-null AND non-empty after trim."""
     evaluator = BuiltinEligibilityEvaluator()
-    decision = evaluator.evaluate(_eligible_item(phone_number="   "), _config(), _clock_at_noon_pacific())
+    decision = evaluator.evaluate(
+        _eligible_item(phone_number="   "), _config(), _clock_at_noon_pacific()
+    )
     assert decision.outcome == "block"
     assert decision.failing_rules == ["a"]
 
@@ -141,7 +145,9 @@ def test_rule_c_dst_spring_forward_applies_post_transition_offset() -> None:
     evaluator = BuiltinEligibilityEvaluator()
     # 2026-03-09 03:00 UTC = 20:00 Mar 8 PDT (inclusive end) — allowed.
     at_8pm_pdt = FrozenClock(datetime(2026, 3, 9, 3, 0, 0, tzinfo=UTC))
-    assert evaluator.evaluate(_eligible_item(), _config(), at_8pm_pdt).rule_c_call_window_pass is True
+    assert (
+        evaluator.evaluate(_eligible_item(), _config(), at_8pm_pdt).rule_c_call_window_pass is True
+    )
     # 2026-03-09 04:00 UTC = 21:00 Mar 8 PDT — blocked. Under PST this same instant
     # would be 20:00 and wrongly pass, so asserting block confirms the DST offset.
     at_9pm_pdt = FrozenClock(datetime(2026, 3, 9, 4, 0, 0, tzinfo=UTC))
@@ -152,7 +158,9 @@ def test_rule_c_dst_spring_forward_applies_post_transition_offset() -> None:
 
 def test_rule_d_dnc_flag_blocks() -> None:
     evaluator = BuiltinEligibilityEvaluator()
-    decision = evaluator.evaluate(_eligible_item(dnc_flag=True), _config(), _clock_at_noon_pacific())
+    decision = evaluator.evaluate(
+        _eligible_item(dnc_flag=True), _config(), _clock_at_noon_pacific()
+    )
     assert decision.outcome == "block"
     assert "d" in decision.failing_rules
     assert decision.rule_d_dnc_pass is False
@@ -160,7 +168,9 @@ def test_rule_d_dnc_flag_blocks() -> None:
 
 def test_rule_e_attempts_at_max_blocks() -> None:
     evaluator = BuiltinEligibilityEvaluator()
-    decision = evaluator.evaluate(_eligible_item(attempt_count=5), _config(), _clock_at_noon_pacific())
+    decision = evaluator.evaluate(
+        _eligible_item(attempt_count=5), _config(), _clock_at_noon_pacific()
+    )
     assert decision.outcome == "block"
     assert "e" in decision.failing_rules
 
@@ -186,12 +196,12 @@ def test_rule_f_callable_status_blocks_when_not_ready() -> None:
 
 
 def test_multi_rule_failure_lists_all_in_canonical_order() -> None:
-    """FR-004: when multiple rules fail, the decision lists every one in (a)–(f) order."""
+    """FR-004: when multiple rules fail, the decision lists every one in (a)-(f) order."""
     evaluator = BuiltinEligibilityEvaluator()
     decision = evaluator.evaluate(
         _eligible_item(
-            phone_number=None,           # fails (a)
-            dnc_flag=True,                # fails (d)
+            phone_number=None,  # fails (a)
+            dnc_flag=True,  # fails (d)
             callable_status=CallableStatus.DNC,  # fails (f)
         ),
         _config(),
@@ -209,7 +219,9 @@ def test_multi_rule_failure_lists_all_in_canonical_order() -> None:
 def test_rule_b_null_timezone_falls_back_silently() -> None:
     """When queue record has no timezone at all, default is used and substitution is None (no original)."""
     evaluator = BuiltinEligibilityEvaluator()
-    decision = evaluator.evaluate(_eligible_item(timezone=None), _config(), _clock_at_noon_pacific())
+    decision = evaluator.evaluate(
+        _eligible_item(timezone=None), _config(), _clock_at_noon_pacific()
+    )
     assert decision.rule_b_timezone_pass is True
     # The default WAS applied even though there is no original value to record (H3).
     assert decision.default_tz_applied is True

@@ -14,8 +14,8 @@ dependency-allowed rules from `contracts/*.md` hold. Per boundary:
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pytest
 
@@ -94,9 +94,8 @@ def _imported_names(tree: ast.AST) -> set[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 names.add(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                names.add(node.module)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
     return names
 
 

@@ -105,8 +105,13 @@ def test_emit_all_three_payloads_round_trip(tmp_state_db: sqlite3.Connection) ->
     adapter.emit_task(_callback_task())
 
     # Persisted rows exist.
-    assert tmp_state_db.execute("SELECT COUNT(*) AS n FROM phone_call_activities;").fetchone()["n"] == 1
-    assert tmp_state_db.execute("SELECT COUNT(*) AS n FROM queue_status_updates;").fetchone()["n"] == 1
+    assert (
+        tmp_state_db.execute("SELECT COUNT(*) AS n FROM phone_call_activities;").fetchone()["n"]
+        == 1
+    )
+    assert (
+        tmp_state_db.execute("SELECT COUNT(*) AS n FROM queue_status_updates;").fetchone()["n"] == 1
+    )
     assert tmp_state_db.execute("SELECT COUNT(*) AS n FROM task_payloads;").fetchone()["n"] == 1
 
     # Aggregate is correct.

@@ -93,7 +93,9 @@ def _make_inputs(session_id: str = "ses_1") -> dict[str, object]:
 
 
 def test_artifacts_written_to_session_dir(tmp_artifact_dir: Path) -> None:
-    paths = write_session_artifacts(artifact_root=tmp_artifact_dir, session_id="ses_1", **_make_inputs())
+    paths = write_session_artifacts(
+        artifact_root=tmp_artifact_dir, session_id="ses_1", **_make_inputs()
+    )
     assert paths.session_dir == tmp_artifact_dir / "ses_1"
     assert paths.session_result.exists()
     assert paths.writeback.exists()
@@ -126,7 +128,11 @@ def test_json_uses_sorted_keys_and_indent(tmp_artifact_dir: Path) -> None:
     # sorted keys: schema_version is alphabetically before session_id.
     first_key_index = content.index('"')
     excerpt = content[first_key_index : first_key_index + 200]
-    assert '"callback_requested"' in excerpt or '"captured_email"' in excerpt or '"ended_at"' in excerpt
+    assert (
+        '"callback_requested"' in excerpt
+        or '"captured_email"' in excerpt
+        or '"ended_at"' in excerpt
+    )
 
 
 def test_transcript_uses_lf_and_trailing_newline(tmp_artifact_dir: Path) -> None:

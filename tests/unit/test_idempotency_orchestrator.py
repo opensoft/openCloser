@@ -18,8 +18,8 @@ from opencloser.core.orchestrator import process_one_queue_item
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
-    CallWindowConfig,
     CallableStatus,
+    CallWindowConfig,
     Disposition,
     EligibilityConfig,
     PersonaConfig,

@@ -123,8 +123,7 @@ def derive_escalation_reason(
     #   - a captured email (verified or unverified) → FR-036 rules 6 / 7
     #   - a signal-starved / truncated script       → FR-036 rule 10
     captured_email_present = (
-        extraction.captured_email is not None
-        or extraction.captured_email_unverified is not None
+        extraction.captured_email is not None or extraction.captured_email_unverified is not None
     )
     if captured_email_present or script_terminated_without_signal:
         return None

@@ -15,7 +15,9 @@ from opencloser.models import MockCallEvent, QueueItem
 class CallTransport(Protocol):
     """FR-008 conceptual contract — the only path through which call-level events enter the Core."""
 
-    def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:  # pragma: no cover - protocol
+    def place_call(
+        self, queue_item: QueueItem, fixture_id: str
+    ) -> str:  # pragma: no cover - protocol
         """Initiate a call attempt. Return a globally-unique `mock_provider_call_id` (FR-007)."""
         ...
 
