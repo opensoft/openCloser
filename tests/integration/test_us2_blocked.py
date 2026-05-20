@@ -114,6 +114,18 @@ def test_us2_blocked_by_eligibility(
     assert sr["final_disposition"] == "blocked"
     assert expected_failing_rule in sr.get("blocked_reason", [])
 
+    # (f) FR-029 / FR-005(f): a queue-status update IS emitted for blocked sessions —
+    # exactly once per processed queue-item ID (the eligibility block does not skip it).
+    n = tmp_state_db.execute(
+        "SELECT COUNT(*) AS n FROM queue_status_updates WHERE session_id = ?;",
+        (report.session_id,),
+    ).fetchone()["n"]
+    assert n == 1
+
+    # (g) FR-018 / FR-031: no callback or review task payload is emitted for `blocked`.
+    n = tmp_state_db.execute("SELECT COUNT(*) AS n FROM task_payloads;").fetchone()["n"]
+    assert n == 0
+
 
 def test_us2_multi_rule_failure_lists_all_in_canonical_order(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path

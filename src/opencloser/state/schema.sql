@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS eligibility_decisions (
     rule_e_max_attempts_pass     INTEGER NOT NULL CHECK (rule_e_max_attempts_pass IN (0, 1)),
     rule_f_callable_status_pass  INTEGER NOT NULL CHECK (rule_f_callable_status_pass IN (0, 1)),
     failing_rules                TEXT,
+    default_tz_applied           INTEGER NOT NULL DEFAULT 0 CHECK (default_tz_applied IN (0, 1)),
     default_tz_substituted_for   TEXT,
     session_id                   TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE
 );

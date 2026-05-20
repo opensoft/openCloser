@@ -8,11 +8,14 @@ events as they arrive.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
 from opencloser.core import ids
 from opencloser.models import EventType, MockCallEvent, QueueItem
+
+logger = logging.getLogger(__name__)
 
 
 class FixtureDrivenTransport:
@@ -45,8 +48,16 @@ class FixtureDrivenTransport:
             try:
                 event_type = EventType(event_type_str)
             except ValueError:
-                # Per Clarifications: unknown event types are yielded verbatim;
-                # orchestrator decides what to do with them (log, no-op).
+                # Edge Case "Mock transport emits an unknown event type": the system
+                # MUST log it, MUST NOT mutate state, MUST NOT crash. The transport
+                # skips the event (the orchestrator never sees it), so the transport
+                # itself is responsible for the log.
+                logger.warning(
+                    "transport fixture %s: unknown event type %r (event_id=%s) — skipping",
+                    fixture_path.name,
+                    event_type_str,
+                    raw_event.get("event_id"),
+                )
                 continue
             yield MockCallEvent(
                 session_id=mock_provider_call_id,  # orchestrator rewrites to session_id on insert

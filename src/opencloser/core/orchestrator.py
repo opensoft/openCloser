@@ -698,6 +698,7 @@ def _to_exported_decision(decision) -> ExportedEligibilityDecision:
             "f": decision.rule_f_callable_status_pass,
         },
         failing_rules=decision.failing_rules,
+        default_tz_applied=decision.default_tz_applied,
         default_tz_substituted_for=decision.default_tz_substituted_for,
     )
 

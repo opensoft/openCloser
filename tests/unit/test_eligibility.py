@@ -69,6 +69,9 @@ def test_all_rules_pass_yields_allow() -> None:
     assert decision.rule_a_phone_pass and decision.rule_b_timezone_pass
     assert decision.rule_c_call_window_pass and decision.rule_d_dnc_pass
     assert decision.rule_e_max_attempts_pass and decision.rule_f_callable_status_pass
+    # A valid record-supplied timezone means no default substitution (H3).
+    assert decision.default_tz_applied is False
+    assert decision.default_tz_substituted_for is None
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +102,7 @@ def test_rule_b_default_tz_fallback_passes_with_substituted_for() -> None:
         _eligible_item(timezone="Not/A_Real_Zone"), _config(), _clock_at_noon_pacific()
     )
     assert decision.rule_b_timezone_pass is True
+    assert decision.default_tz_applied is True
     assert decision.default_tz_substituted_for == "Not/A_Real_Zone"
 
 
@@ -184,4 +188,6 @@ def test_rule_b_null_timezone_falls_back_silently() -> None:
     evaluator = BuiltinEligibilityEvaluator()
     decision = evaluator.evaluate(_eligible_item(timezone=None), _config(), _clock_at_noon_pacific())
     assert decision.rule_b_timezone_pass is True
+    # The default WAS applied even though there is no original value to record (H3).
+    assert decision.default_tz_applied is True
     assert decision.default_tz_substituted_for is None

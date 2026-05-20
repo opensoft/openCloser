@@ -34,12 +34,14 @@ class BuiltinEligibilityEvaluator:
         rule_a = bool(queue_item.phone_number and queue_item.phone_number.strip())
 
         # Rule (b) — usable timezone (record-supplied or configured default).
-        tz_name, default_tz_substituted_for = _resolve_timezone(queue_item, config)
+        tz_name, default_tz_applied, default_tz_substituted_for = _resolve_timezone(
+            queue_item, config
+        )
         rule_b = tz_name is not None  # always true once we apply the default-tz fallback
 
         # Rule (c) — current local time within the configured call window.
         rule_c = _is_within_call_window(
-            tz_name=tz_name or config.eligibility.default_timezone,
+            tz_name=tz_name,
             start_str=config.call_window.start,
             end_str=config.call_window.end,
             clock=clock,
@@ -77,25 +79,32 @@ class BuiltinEligibilityEvaluator:
             rule_e_max_attempts_pass=rule_e,
             rule_f_callable_status_pass=rule_f,
             failing_rules=failing_rules,
+            default_tz_applied=default_tz_applied,
             default_tz_substituted_for=default_tz_substituted_for,
             session_id="",  # backfilled by the orchestrator after session creation
         )
 
 
-def _resolve_timezone(queue_item: QueueItem, config: SliceConfig) -> tuple[str | None, str | None]:
-    """Return (tz_name, default_tz_substituted_for_original_value).
+def _resolve_timezone(
+    queue_item: QueueItem, config: SliceConfig
+) -> tuple[str, bool, str | None]:
+    """Return (tz_name, default_tz_applied, default_tz_substituted_for).
 
-    If the record's timezone is None or unparseable, fall back to the configured default and
-    record the original value (None or the unparseable string) in `default_tz_substituted_for`.
+    If the record's timezone is None or unparseable, fall back to the configured default,
+    flag `default_tz_applied=True`, and record the original value (None or the unparseable
+    string) in `default_tz_substituted_for` so the substitution is visible in the persisted
+    decision (spec Edge Case "Missing or malformed timezone on the record").
     """
     original = queue_item.timezone
     if original is None:
-        return config.eligibility.default_timezone, None  # None substituted (no original to record)
+        # Default applied; no original value to record.
+        return config.eligibility.default_timezone, True, None
     try:
         ZoneInfo(original)
     except (ZoneInfoNotFoundError, ValueError):
-        return config.eligibility.default_timezone, original
-    return original, None
+        # Default applied; preserve the unparseable original for the audit trail.
+        return config.eligibility.default_timezone, True, original
+    return original, False, None
 
 
 def _is_within_call_window(*, tz_name: str, start_str: str, end_str: str, clock: Clock) -> bool:

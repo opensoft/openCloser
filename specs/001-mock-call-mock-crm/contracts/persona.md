@@ -110,6 +110,22 @@ The mapping MUST be deterministic — the persona MUST NOT use randomness, the c
 
 Free-form reasons are forbidden in Slice 1. Future slices may extend the enumeration ONLY by appending new codes — existing codes MUST NOT be replaced or repurposed.
 
+### Escalation reason-code priority
+
+FR-035 does not pin a priority among reason codes, but a conversation can match more than one trigger at once. `persona/escalation.py::derive_escalation_reason` MUST apply this canonical Slice 1 priority (first match wins):
+
+1. `legal_request`
+2. `phi_collection_risk`
+3. `non_clinical_topic_escalation`
+4. `outside_allowed_claims`
+5. `ambiguous_dnc`
+6. `uncertain_role`
+7. `uncertain_intent`
+
+Rationale: **safety escalations (1-5) outrank uncertainty escalations (6-7)** — a legal / PHI / clinical / out-of-bounds-claim / DNC-adjacent signal is a hard compliance risk that MUST surface to a human even when the contact's role or intent also reads as uncertain. Within the safety group the highest-liability signals (legal, PHI) are checked first. `uncertain_role` precedes `uncertain_intent` because an uncertain role reading also makes the intent reading untrustworthy.
+
+`captured_email_invalid_no_callback` and `script_truncated` are NOT produced by `derive_escalation_reason`: their trigger conditions are *defined as* FR-036 rules #7 and #10, so `disposition_rules.decide_disposition` owns them. Safety codes (1-5) are never suppressed; `uncertain_role` / `uncertain_intent` (6-7) are suppressed when a later FR-036 rule already owns the conversation — a captured email (rules #6/#7) or a signal-starved/truncated script (rule #10) — so that disposition rule #3 does not pre-empt rules #6/#7/#10.
+
 ---
 
 ## Disclosure validator

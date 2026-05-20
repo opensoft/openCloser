@@ -217,3 +217,44 @@ def test_us3_conflicting_failed_after_completed_audited_not_applied(
         "SELECT COUNT(*) AS n FROM conflicting_event_audit_records;"
     ).fetchone()["n"]
     assert n == 1
+
+
+def test_us3_duplicate_conflicting_event_fr019_beats_fr020(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
+) -> None:
+    """FR-019/FR-020 overlap (Clarifications Q9): a late `failed` event that is BOTH a
+    conflicting late event AND a redelivered duplicate produces exactly ONE audit row.
+
+    FR-019's duplicate no-op wins on overlap — the redelivery is silent and MUST NOT
+    add a second `conflicting_event_audit_records` row.
+    """
+    store.insert_queue_item(tmp_state_db, _seed())
+    report = process_one_queue_item(
+        "alf-prospect-001",
+        conn=tmp_state_db,
+        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        eligibility=BuiltinEligibilityEvaluator(),
+        transport=FixtureDrivenTransport(_TRANSPORT),
+        persona=ALFAppointmentSetterPersona(),
+        conversation_fixture=_load_conversation(),
+        transport_fixture_id="duplicate_conflicting_failed",
+        clock=_clock(),
+    )
+
+    # Finalized disposition is the conversation outcome — the late `failed` never applies.
+    assert report.final_disposition is Disposition.INTERESTED_CALLBACK_REQUESTED
+
+    # Exactly ONE audit row: the late `failed` is audited once; its duplicate redelivery
+    # (same event_id) is a silent FR-019 no-op and adds no second row.
+    n = tmp_state_db.execute(
+        "SELECT COUNT(*) AS n FROM conflicting_event_audit_records;"
+    ).fetchone()["n"]
+    assert n == 1
+
+    # The exported audit artifact agrees: one event, recorded once.
+    audit_path = report.artifact_dir / "conflicting-events.json"
+    assert audit_path.exists()
+    parsed = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert len(parsed["events"]) == 1
+    assert parsed["events"][0]["conflicting_event_type"] == "failed"
+    assert parsed["events"][0]["preserved_disposition"] == "interested_callback_requested"

@@ -7,6 +7,8 @@ context manager that yields one. The orchestrator owns connection lifetime.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -33,6 +35,8 @@ from opencloser.models import (
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
+_LOGGER = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -40,15 +44,35 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
-    """Open a SQLite connection, ensure the parent dir exists, and apply Slice 1 PRAGMAs."""
+    """Open a SQLite connection, ensure the parent dir exists, and apply Slice 1 PRAGMAs.
+
+    The state directory and DB file hold local CRM data (N5), so they are restricted to
+    the owner — directory ``0o700``, file ``0o600``. The directory mode also shields the
+    WAL/SHM sidecar files. chmod is best-effort: filesystems that do not support it (some
+    network or Windows mounts) are logged and tolerated rather than treated as fatal.
+    """
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _restrict_permissions(path.parent, 0o700)
     conn = sqlite3.connect(str(path), isolation_level=None)
+    _restrict_permissions(path, 0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
+
+
+def _restrict_permissions(target: Path, mode: int) -> None:
+    """Best-effort chmod restricting local CRM state to the owner (N5).
+
+    A filesystem that does not support chmod is logged and tolerated — losing the
+    permission hardening is preferable to crashing the run.
+    """
+    try:
+        os.chmod(target, mode)
+    except OSError as exc:  # noqa: BLE001 - some filesystems (network/Windows) reject chmod
+        _LOGGER.warning("could not restrict permissions on %s (mode %o): %s", target, mode, exc)
 
 
 @contextmanager
@@ -262,8 +286,8 @@ def insert_eligibility_decision(conn: sqlite3.Connection, decision: EligibilityD
             decision_id, queue_item_id, decided_at, outcome,
             rule_a_phone_pass, rule_b_timezone_pass, rule_c_call_window_pass,
             rule_d_dnc_pass, rule_e_max_attempts_pass, rule_f_callable_status_pass,
-            failing_rules, default_tz_substituted_for, session_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            failing_rules, default_tz_applied, default_tz_substituted_for, session_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """,
         (
             decision.decision_id,
@@ -277,6 +301,7 @@ def insert_eligibility_decision(conn: sqlite3.Connection, decision: EligibilityD
             int(decision.rule_e_max_attempts_pass),
             int(decision.rule_f_callable_status_pass),
             json.dumps(decision.failing_rules) if decision.failing_rules else None,
+            int(decision.default_tz_applied),
             decision.default_tz_substituted_for,
             decision.session_id,
         ),

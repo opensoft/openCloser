@@ -77,6 +77,28 @@ def derive_escalation_reason(
     `captured_email_invalid_no_callback` (rule 7) and `script_truncated` (rule 10) —
     are intentionally NOT produced here; `disposition_rules.decide_disposition`
     owns them so that rule 3 (escalation) does not pre-empt rules 6/7/10.
+
+    H5 — escalation reason-code priority (first match wins). FR-035 does not pin a
+    priority among reason codes, so this is the canonical Slice 1 order, mirrored in
+    `contracts/persona.md` §Escalation reasons:
+
+        1. legal_request
+        2. phi_collection_risk
+        3. non_clinical_topic_escalation
+        4. outside_allowed_claims
+        5. ambiguous_dnc
+        6. uncertain_role
+        7. uncertain_intent
+
+    Rationale: SAFETY escalations (1-5) outrank UNCERTAINTY escalations (6-7) — a
+    legal/PHI/clinical/out-of-bounds/DNC-adjacent signal is a hard compliance risk
+    and must surface to a human even when the contact's role or intent also reads
+    as uncertain. Within the safety group, the highest-liability signals (legal,
+    PHI) are checked first. `uncertain_role` precedes `uncertain_intent` because a
+    `role_confidence == 'uncertain'` reading also makes the intent reading
+    untrustworthy, so the role gap is the more informative thing for a reviewer.
+    Safety codes (1-5) are never suppressed; `uncertain_role` / `uncertain_intent`
+    (6-7) are suppressed when a later FR-036 rule owns the conversation (see below).
     """
     joined_contact = " ".join(t.text.lower() for t in turns if t.role == "contact")
 

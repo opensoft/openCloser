@@ -38,7 +38,7 @@ Outcome:
 - Otherwise `outcome='block'` and `failing_rules` lists every failing rule letter in canonical order.
 
 Default-timezone fallback (FR-004(b), Edge Case "Missing or malformed timezone"):
-- If `queue_item.timezone` is None or unparseable, the evaluator MUST set `default_tz_substituted_for` to the original (possibly None) value AND use `config.eligibility.default_timezone` for rule (c). Rule (b) then PASSES (a usable timezone was obtained via fallback).
+- If `queue_item.timezone` is None or unparseable, the evaluator MUST set `default_tz_applied=True`, set `default_tz_substituted_for` to the original (possibly None) value, AND use `config.eligibility.default_timezone` for rule (c). Rule (b) then PASSES (a usable timezone was obtained via fallback). When the record supplied a valid timezone, `default_tz_applied` is False and `default_tz_substituted_for` is None.
 
 ---
 
@@ -64,6 +64,7 @@ SliceConfig:
 - `outcome` ∈ {`allow`, `block`}
 - six `rule_*_pass` booleans
 - `failing_rules` list (only populated when `outcome='block'`)
+- `default_tz_applied` (boolean — True when the configured default timezone was substituted because the record's timezone was null or unparseable)
 - `default_tz_substituted_for` (only populated when fallback applied)
 - `session_id` (assigned by the orchestrator AFTER session creation; the evaluator returns the decision with `session_id` unset and the orchestrator backfills)
 

@@ -94,13 +94,19 @@ _EMAIL_VOLUNTEER_PHRASES = (
     "info pack",
 )
 
+# H6 — bare "i handle " false-positived on non-decision-maker duties ("I handle
+# the laundry", "I handle calls"). Replaced with role-specific phrases that
+# genuinely indicate placement-decision authority.
 _DECISION_MAKER_PHRASES = (
     "i'm the owner",
     "i'm the manager",
     "i'm the administrator",
     "i'm the director",
     "i make those decisions",
-    "i handle ",
+    "i handle placement",
+    "i handle admissions",
+    "i handle the contracts",
+    "i handle those decisions",
 )
 
 _NON_DECISION_MAKER_PHRASES = (

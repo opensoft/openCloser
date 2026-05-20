@@ -177,6 +177,7 @@ class EligibilityDecision(BaseModel):
     rule_e_max_attempts_pass: bool
     rule_f_callable_status_pass: bool
     failing_rules: list[RuleCode] = Field(default_factory=list)
+    default_tz_applied: bool = False  # True when the configured default tz was substituted
     default_tz_substituted_for: str | None = None
     session_id: str
 
@@ -197,6 +198,22 @@ class Session(BaseModel):
     ended_at: UtcMs | None = None
 
 
+# FR-024 ("exported artifacts MUST NOT contain secrets / minimize sensitive data") +
+# Clarifications Round 2 Q15 — per-event-type payload sub-schema. Keys outside the set
+# for an event type are dropped on construction so exported artifacts (notably
+# conflicting-events.json, which serialises payloads verbatim) never carry unexpected or
+# sensitive data. Dropping (rather than raising on) unknown keys keeps a future provider
+# that adds fields forward-compatible.
+_ALLOWED_PAYLOAD_KEYS: dict[EventType, frozenset[str]] = {
+    EventType.CONNECTED: frozenset(),
+    EventType.NO_ANSWER: frozenset(),
+    EventType.COMPLETED: frozenset(),
+    EventType.VOICEMAIL: frozenset({"voicemail_length_seconds"}),
+    EventType.FAILED: frozenset({"failure_reason"}),
+    EventType.CALLBACK_REQUESTED: frozenset({"window_hint"}),
+}
+
+
 class MockCallEvent(BaseModel):
     """FR-006 + Clarifications Round 2 Q15 — one transport-emitted event."""
 
@@ -207,6 +224,15 @@ class MockCallEvent(BaseModel):
     event_type: EventType
     received_at: UtcMs
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _allowlist_payload_keys(self) -> "MockCallEvent":
+        """FR-024 + Q15 — retain only the payload keys this event type is defined to carry."""
+        allowed = _ALLOWED_PAYLOAD_KEYS.get(self.event_type, frozenset())
+        filtered = {k: v for k, v in self.payload.items() if k in allowed}
+        if len(filtered) != len(self.payload):
+            self.payload = filtered
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +403,7 @@ class ExportedEligibilityDecision(BaseModel):
     outcome: Literal["allow", "block"]
     rules: dict[RuleCode, bool]
     failing_rules: list[RuleCode] = Field(default_factory=list)
+    default_tz_applied: bool = False  # True when the configured default tz was substituted
     default_tz_substituted_for: str | None = None
 
 

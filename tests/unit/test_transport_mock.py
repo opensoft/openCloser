@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -81,8 +82,11 @@ def test_event_stream_yields_duplicate_event_ids_verbatim(tmp_path: Path) -> Non
     assert event_ids.count("evt_2") == 2
 
 
-def test_event_stream_skips_unknown_event_types(tmp_path: Path) -> None:
-    """Edge Case 'Mock transport emits an unknown event type': transport doesn't crash; orchestrator-side log."""
+def test_event_stream_skips_unknown_event_types(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Edge Case 'Mock transport emits an unknown event type': transport logs it,
+    skips it (no mutation), and does not crash."""
     _write_fixture(
         tmp_path,
         "unknown",
@@ -93,8 +97,16 @@ def test_event_stream_skips_unknown_event_types(tmp_path: Path) -> None:
     )
     transport = FixtureDrivenTransport(tmp_path)
     call_id = transport.place_call(_qi(), "unknown")
-    events = list(transport.event_stream(call_id))
+    with caplog.at_level(logging.WARNING, logger="opencloser.transport.mock"):
+        events = list(transport.event_stream(call_id))
     assert [e.event_type for e in events] == [EventType.COMPLETED]
+    # Edge Case: the unknown event MUST be logged.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "unknown event type" in message
+    assert "'ringing'" in message
+    assert "evt_1" in message
 
 
 def test_place_call_raises_when_fixture_missing(tmp_path: Path) -> None:

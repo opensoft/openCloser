@@ -157,3 +157,42 @@ def test_us4_dnc_mid_call_persists_dnc_signal(
     assert qi is not None
     assert qi.callable_status.value == "dnc"
     assert qi.dnc_flag is True
+
+
+# FR-035 reason codes reachable through the integration path. The first 3 rows close
+# the H7 coverage gap (`non_clinical_topic_escalation`, `ambiguous_dnc`,
+# `uncertain_intent` were previously untested anywhere); the 3 existing fixtures are
+# pinned alongside so an append-only change to the FR-035 enum is caught here too.
+_FR035_CASES = [
+    ("non_clinical_topic_escalation", "non_clinical_topic_escalation"),
+    ("ambiguous_dnc", "ambiguous_dnc"),
+    ("uncertain_intent", "uncertain_intent"),
+    ("needs_human_review_uncertain_role", "uncertain_role"),
+    ("needs_human_review_email_invalid", "captured_email_invalid_no_callback"),
+    ("script_truncated", "script_truncated"),
+]
+
+
+@pytest.mark.parametrize("conv_name,expected_reason", _FR035_CASES)
+def test_us4_fr035_reason_code_recorded(
+    tmp_state_db: sqlite3.Connection,
+    tmp_artifact_dir: Path,
+    tmp_path: Path,
+    conv_name: str,
+    expected_reason: str,
+) -> None:
+    """FR-035: each integration-reachable `human_review_reason` code is recorded verbatim
+    on the exported session result AND carried as the review task's `reason_code`."""
+    report = _run(conv_name, tmp_state_db, tmp_artifact_dir, tmp_path)
+    assert report.final_disposition is Disposition.NEEDS_HUMAN_REVIEW
+
+    # FR-014: the specific reason code (not just non-null) is on the session result.
+    session_result = json.loads(
+        (report.artifact_dir / "session-result.json").read_text(encoding="utf-8")
+    )
+    assert session_result["human_review_reason"] == expected_reason
+
+    # FR-030: the review task payload carries the same reason code.
+    task = json.loads((report.artifact_dir / "task.json").read_text(encoding="utf-8"))
+    assert task["task_kind"] == "review"
+    assert task["reason_code"] == expected_reason
