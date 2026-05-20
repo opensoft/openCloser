@@ -4,8 +4,8 @@
 
 **Module boundary**: FR-033, principle #5 (write-back side)
 **Implementation**: `src/opencloser/crm/base.py` (interface) + `src/opencloser/crm/mock.py` (Slice 1 mock)
-**Owns**: payload assembly per FR-028 / FR-029 / FR-030, FR-031 per-disposition mapping, FR-032 queue-status mapping
-**MUST NOT contain**: persona logic, eligibility logic, transport-event interpretation, session lifecycle management
+**Owns**: persistence of the FR-028 / FR-029 / FR-030 payloads into the three write-back tables, and assembly of the in-memory `WriteBack` aggregate the orchestrator hands to the artifact writer
+**MUST NOT contain**: persona logic, eligibility logic, transport-event interpretation, session lifecycle management, the FR-031 per-disposition emission decision, or the FR-032 `new_status` computation — those stay in the orchestrator
 
 ---
 
@@ -16,6 +16,7 @@ WriteBackAdapter (interface):
     emit_phone_call_activity(payload: PhoneCallActivityPayload) -> None
     emit_queue_status_update(payload: QueueStatusUpdatePayload) -> None
     emit_task(payload: TaskPayload) -> None
+    build_writeback(session_id: str) -> WriteBack
 ```
 
 A second concrete implementation in Slice 2 will satisfy this same interface against the Dataverse SDK without changes to consumer code (FR-016 conceptual-contract requirement).
@@ -31,6 +32,8 @@ For each call:
 1. INSERT a row into the corresponding table (`phone_call_activities` / `queue_status_updates` / `task_payloads`) per data-model.md.
 2. Append the payload to the in-memory `WriteBack` aggregate for this session.
 3. Return.
+
+At end-of-run the orchestrator calls `build_writeback(session_id)` once to retrieve the assembled `WriteBack` aggregate, which it passes to the `ArtifactWriter`.
 
 The Slice 1 mock adapter does NOT export artifacts directly — that's the `ArtifactWriter`'s job (called by the orchestrator at end-of-run). This keeps "persisted" and "exported" cleanly separated per the FR-015 + FR-023 split.
 

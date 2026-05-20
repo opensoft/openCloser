@@ -11,6 +11,7 @@ from opencloser.models import (
     PhoneCallActivityPayload,
     QueueStatusUpdatePayload,
     TaskPayload,
+    WriteBack,
 )
 
 
@@ -34,4 +35,8 @@ class WriteBackAdapter(Protocol):
         ...
 
     def emit_task(self, payload: TaskPayload) -> None:  # pragma: no cover - protocol
+        ...
+
+    def build_writeback(self, session_id: str) -> WriteBack:  # pragma: no cover - protocol
+        """Return the assembled in-memory `WriteBack` aggregate for one session (FR-015)."""
         ...

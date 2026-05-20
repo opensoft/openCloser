@@ -16,6 +16,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import QueueItemNotFound, process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -125,6 +126,7 @@ def test_happy_path_callback_requested(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_conversation_fixture(),
         transport_fixture_id="connected",
         clock=_at_noon_pacific(),
@@ -185,6 +187,7 @@ def test_block_path_dnc(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=None,
         clock=_at_noon_pacific(),
@@ -225,6 +228,7 @@ def test_unknown_queue_item_raises(
             eligibility=BuiltinEligibilityEvaluator(),
             transport=FixtureDrivenTransport(tmp_path / "transport"),
             persona=ALFAppointmentSetterPersona(),
+            crm=MockWriteBackAdapter(tmp_state_db),
             conversation_fixture=None,
             transport_fixture_id=None,
             clock=_at_noon_pacific(),

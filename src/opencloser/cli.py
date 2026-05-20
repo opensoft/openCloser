@@ -9,7 +9,6 @@ Three subcommands:
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Annotated
 
@@ -18,6 +17,7 @@ import typer
 from opencloser.core.clock import SystemClock
 from opencloser.core.config import load_config
 from opencloser.core.orchestrator import QueueItemNotFound, process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import QueueItem
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
@@ -121,6 +121,7 @@ def run_one(
                 eligibility=BuiltinEligibilityEvaluator(),
                 transport=FixtureDrivenTransport(transport_dir),
                 persona=ALFAppointmentSetterPersona(),
+                crm=MockWriteBackAdapter(conn),
                 conversation_fixture=conversation,
                 transport_fixture_id=transport_fixture_id,
             )
@@ -154,6 +155,3 @@ def _load_conversation_fixture(path: Path) -> ConversationFixture:
         turns=turns,
         expected_extraction=raw.get("expected_extraction", {}),
     )
-
-
-_ = sqlite3  # keep import for state-level callers; CLI itself doesn't use it directly

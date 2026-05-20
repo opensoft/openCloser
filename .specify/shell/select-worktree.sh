@@ -12,6 +12,11 @@ trim() {
     printf '%s' "$value"
 }
 
+get_mtime() {
+    # Epoch mtime of a path. GNU stat uses `-c %Y`; BSD/macOS stat uses `-f %m`.
+    stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || printf '0'
+}
+
 resolve_config_value() {
     local repo_root="$1"
     local key="$2"
@@ -71,7 +76,16 @@ if [ ! -d "$WORKTREE_ROOT" ]; then
     exit 1
 fi
 
-mapfile -t WORKTREE_LINES < <(find "$WORKTREE_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%T@|%f|%p\n' 2>/dev/null | sort -t'|' -k1,1nr)
+# Newest-first list of "mtime|leaf|path" lines. Avoids GNU-only `find -printf` and
+# `mapfile` (Bash 4+) so this also runs on macOS (BSD find, Bash 3.2).
+WORKTREE_LINES=()
+while IFS= read -r _wt_line; do
+    [ -n "$_wt_line" ] && WORKTREE_LINES+=("$_wt_line")
+done < <(
+    find "$WORKTREE_ROOT" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while IFS= read -r _wt_dir; do
+        printf '%s|%s|%s\n' "$(get_mtime "$_wt_dir")" "$(basename "$_wt_dir")" "$_wt_dir"
+    done | sort -t'|' -k1,1nr
+)
 if [ "${#WORKTREE_LINES[@]}" -eq 0 ]; then
     echo "No Speckit worktrees found under: $WORKTREE_ROOT" >&2
     exit 1

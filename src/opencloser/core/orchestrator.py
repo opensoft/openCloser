@@ -1,4 +1,4 @@
-"""Interaction Core / Orchestrator — FR-033 module boundary #5.
+"""Interaction Core / Orchestrator — FR-033 module boundary #1.
 
 Wires Eligibility → Transport → Persona → CRM Write-back → Artifacts into a single
 deterministic loop. Owns session lifecycle, idempotency (FR-019), attempt-count
@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 from opencloser.artifacts.writer import ArtifactPaths, write_session_artifacts
 from opencloser.core import idempotency, ids
 from opencloser.core.clock import Clock, SystemClock
-from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.models import (
     CallableStatus,
     ConflictingEventAuditRecord,
@@ -37,18 +36,19 @@ from opencloser.models import (
     TaskPayload,
     WriteBackKind,
 )
-from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import (
     ConversationFixture,
     ConversationTurn,
+    Persona,
     PersonaOutput,
     SessionContext,
 )
 from opencloser.state import store
 
 if TYPE_CHECKING:
-    from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
-    from opencloser.transport.mock import FixtureDrivenTransport
+    from opencloser.crm.base import WriteBackAdapter
+    from opencloser.eligibility import EligibilityEvaluator
+    from opencloser.transport.base import CallTransport
 
 
 # Terminal events that finalize a session.
@@ -107,9 +107,10 @@ def process_one_queue_item(
     *,
     conn: sqlite3.Connection,
     config: SliceConfig,
-    eligibility: BuiltinEligibilityEvaluator,
-    transport: FixtureDrivenTransport,
-    persona: ALFAppointmentSetterPersona,
+    eligibility: EligibilityEvaluator,
+    transport: CallTransport,
+    persona: Persona,
+    crm: WriteBackAdapter,
     conversation_fixture: ConversationFixture | None,
     transport_fixture_id: str | None,
     clock: Clock | None = None,
@@ -174,6 +175,7 @@ def process_one_queue_item(
             decision=decision_with_session,
             config=config,
             clock=clock,
+            crm=crm,
             start_ts_monotonic=start_ts_monotonic,
         )
         return report
@@ -189,6 +191,7 @@ def process_one_queue_item(
         eligibility=eligibility,
         transport=transport,
         persona=persona,
+        crm=crm,
         conversation_fixture=conversation_fixture,
         transport_fixture_id=transport_fixture_id,
         start_ts_monotonic=start_ts_monotonic,
@@ -208,10 +211,10 @@ def _finalize_blocked(
     decision,
     config: SliceConfig,
     clock: Clock,
+    crm: WriteBackAdapter,
     start_ts_monotonic: float,
 ) -> RunReport:
     """FR-005 block path: queue-status update only, no Phone Call activity, no task."""
-    crm = MockWriteBackAdapter(conn)
     new_status = queue_item.callable_status  # FR-032: blocked → unchanged
     failing_str = ",".join(decision.failing_rules) if decision.failing_rules else ""
     status_payload = QueueStatusUpdatePayload(
@@ -285,8 +288,9 @@ def _run_allowed_session(
     config: SliceConfig,
     clock: Clock,
     eligibility,
-    transport: FixtureDrivenTransport,
-    persona: ALFAppointmentSetterPersona,
+    transport: CallTransport,
+    persona: Persona,
+    crm: WriteBackAdapter,
     conversation_fixture: ConversationFixture | None,
     transport_fixture_id: str | None,
     start_ts_monotonic: float,
@@ -428,6 +432,7 @@ def _run_allowed_session(
         decision=decision,
         config=config,
         clock=clock,
+        crm=crm,
         mock_call_id=mock_call_id,
         disposition=final_disposition,
         persona_output=persona_output,
@@ -472,6 +477,7 @@ def _finalize_session(
     decision,
     config: SliceConfig,
     clock: Clock,
+    crm: WriteBackAdapter,
     mock_call_id: str,
     disposition: Disposition,
     persona_output: PersonaOutput | None,
@@ -521,7 +527,6 @@ def _finalize_session(
         )
 
     # Emit write-backs per FR-031.
-    crm = MockWriteBackAdapter(conn)
     activity: PhoneCallActivityPayload | None = None
     if disposition in _EMITS_PHONE_CALL_ACTIVITY:
         activity = PhoneCallActivityPayload(

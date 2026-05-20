@@ -1,1 +1,1 @@
-"""Interaction Core / Orchestrator — FR-033 module boundary #5."""
+"""Interaction Core / Orchestrator — FR-033 module boundary #1."""

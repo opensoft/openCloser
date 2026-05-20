@@ -15,6 +15,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -76,6 +77,7 @@ def test_sc001_per_fixture_under_60s(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_load_conv(conv_name),
         transport_fixture_id="connected",
         clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
@@ -102,6 +104,7 @@ def test_sc001_terminal_paths_under_60s(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=transport_fixture,
         clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
@@ -142,6 +145,7 @@ def test_sc001_blocked_paths_under_60s(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=None,
         clock=FrozenClock(clock_utc),

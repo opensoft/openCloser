@@ -16,6 +16,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -83,6 +84,7 @@ def test_us1_story1_happy_path_end_to_end(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_load_conversation(),
         transport_fixture_id="connected",
         clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),

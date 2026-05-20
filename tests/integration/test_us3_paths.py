@@ -15,6 +15,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -99,6 +100,7 @@ def test_us3_terminal_paths_no_persona_invocation(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=transport_fixture,
         clock=_clock(),
@@ -131,6 +133,7 @@ def test_us3_duplicate_connected_completed_attempt_count_increments_once(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_load_conversation(),
         transport_fixture_id="duplicate_connected",
         clock=_clock(),
@@ -162,6 +165,7 @@ def test_us3_duplicate_callback_event_does_not_emit_second_task(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_load_conversation(),
         transport_fixture_id="duplicate_callback_requested",
         clock=_clock(),
@@ -195,6 +199,7 @@ def test_us3_conflicting_failed_after_completed_audited_not_applied(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_load_conversation(),
         transport_fixture_id="conflicting_failed_after_completed",
         clock=_clock(),
@@ -236,6 +241,7 @@ def test_us3_duplicate_conflicting_event_fr019_beats_fr020(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_load_conversation(),
         transport_fixture_id="duplicate_conflicting_failed",
         clock=_clock(),

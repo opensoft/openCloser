@@ -18,7 +18,7 @@ See:
 
 ## Status
 
-Slice 1 spec, plan, tasks, contracts, and checklists are complete. Implementation is in progress per `tasks.md`.
+Slice 1 is complete — spec, plan, tasks, contracts, checklists, and the end-to-end implementation (all 75 tasks in `tasks.md`). Run the Bootstrap steps below to exercise the mock loop.
 
 ## Bootstrap (developers)
 

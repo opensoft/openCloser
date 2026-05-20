@@ -16,6 +16,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -73,6 +74,7 @@ def test_sc006_no_false_connected_activity(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=fixture_id,
         clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),

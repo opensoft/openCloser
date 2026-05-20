@@ -15,6 +15,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -104,6 +105,7 @@ def test_orchestrator_duplicate_events_are_no_ops(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_conv(),
         transport_fixture_id="dup",
         clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
@@ -150,6 +152,7 @@ def test_orchestrator_late_conflicting_event_audited_only(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=_conv(),
         transport_fixture_id="conflict",
         clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),

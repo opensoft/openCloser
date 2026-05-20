@@ -17,6 +17,7 @@ import pytest
 
 from opencloser.core.clock import FrozenClock
 from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     ArtifactsConfig,
@@ -85,6 +86,7 @@ def test_us2_blocked_by_eligibility(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=None,
         clock=FrozenClock(clock_utc),
@@ -157,6 +159,7 @@ def test_us2_multi_rule_failure_lists_all_in_canonical_order(
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
         persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
         conversation_fixture=None,
         transport_fixture_id=None,
         clock=FrozenClock(datetime(2026, 5, 19, 11, 0, 0, tzinfo=UTC)),  # 04:00 Pacific → fails (c)
