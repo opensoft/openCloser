@@ -36,7 +36,10 @@ class MockWriteBackAdapter:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        # session_id → composite WriteBack aggregate (kept in-memory so the orchestrator can export it)
+        # session_id → composite WriteBack aggregate (kept in-memory so the orchestrator can export it).
+        # NOTE (Slice 1): this dict has no eviction. Safe in Slice 1 because each process run
+        # handles exactly one session. Slice 2 (worker reuse / batch) MUST add a clear_session()
+        # or per-session adapter lifetime to avoid unbounded growth.
         self._aggregates: dict[str, _AggregateBuilder] = {}
 
     # ----- emit_* methods ---------------------------------------------------
@@ -53,7 +56,11 @@ class MockWriteBackAdapter:
         # Belt-and-suspenders enforcement of FR-018 — even if the orchestrator misroutes,
         # the adapter refuses to persist a task for an excluded disposition.
         session = store.get_session(self._conn, payload.session_id)
-        if session is not None and session.final_disposition in _TASK_EXCLUDED_DISPOSITIONS:
+        # Fail-closed: without a finalized session carrying a disposition we cannot verify
+        # FR-018 compliance, so refuse to persist rather than risk a forbidden task payload.
+        if session is None or session.final_disposition is None:
+            return  # silent no-op — FR-018 compliance unverifiable
+        if session.final_disposition in _TASK_EXCLUDED_DISPOSITIONS:
             return  # silent no-op per FR-018
         store.insert_task_payload(self._conn, payload)
         self._aggregate(payload.session_id).task = payload
@@ -64,7 +71,12 @@ class MockWriteBackAdapter:
         """Return the composite WriteBack artifact for the given session.
 
         Raises KeyError if no queue-status update has been emitted yet (which is required
-        for every session per FR-029)."""
+        for every session per FR-029).
+
+        NOTE (Slice 2): this reads only the in-memory aggregate. Slice 1 CLI runs are
+        atomic (emit_* and build_writeback happen in one process), so no SQLite-backed
+        ``load_writeback(session_id)`` is needed. Slice 2 (crash recovery / out-of-process
+        export) MUST add a store-backed reconstruction path."""
         agg = self._aggregates.get(session_id)
         if agg is None or agg.queue_status_update is None:
             raise KeyError(f"No queue-status update emitted for session {session_id!r} yet")

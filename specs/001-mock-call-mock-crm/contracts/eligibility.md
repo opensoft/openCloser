@@ -27,7 +27,7 @@ The evaluator MUST evaluate ALL six rules on every call (FR-004 — no short-cir
 | Rule | Definition |
 |---|---|
 | (a) phone presence | `queue_item.phone_number is not None and queue_item.phone_number.strip() != ""` |
-| (b) usable timezone | `queue_item.timezone` resolves via `zoneinfo.ZoneInfo(...)` OR `config.eligibility.default_timezone` was substituted |
+| (b) usable timezone | `queue_item.timezone` resolves via `zoneinfo.ZoneInfo(...)`, OR — when the record's timezone is null/unparseable — the substituted `config.eligibility.default_timezone` itself resolves via `zoneinfo.ZoneInfo(...)`. If neither resolves, rule (b) FAILS. |
 | (c) call window | `now_in_local_tz` falls within `[config.call_window.start, config.call_window.end]` (inclusive both ends; minute resolution) |
 | (d) DNC | `queue_item.dnc_flag is False` |
 | (e) max attempts | `queue_item.attempt_count < config.eligibility.max_attempts` |
@@ -38,7 +38,8 @@ Outcome:
 - Otherwise `outcome='block'` and `failing_rules` lists every failing rule letter in canonical order.
 
 Default-timezone fallback (FR-004(b), Edge Case "Missing or malformed timezone"):
-- If `queue_item.timezone` is None or unparseable, the evaluator MUST set `default_tz_applied=True`, set `default_tz_substituted_for` to the original (possibly None) value, AND use `config.eligibility.default_timezone` for rule (c). Rule (b) then PASSES (a usable timezone was obtained via fallback). When the record supplied a valid timezone, `default_tz_applied` is False and `default_tz_substituted_for` is None.
+- If `queue_item.timezone` is None or unparseable, the evaluator MUST set `default_tz_applied=True`, set `default_tz_substituted_for` to the original (possibly None) value, AND use `config.eligibility.default_timezone` for rule (c). When the record supplied a valid timezone, `default_tz_applied` is False and `default_tz_substituted_for` is None.
+- Rule (b) PASSES when the resolved timezone — the record's own or the substituted default — itself resolves via `zoneinfo.ZoneInfo(...)`. If the configured default is itself unparseable, no usable timezone could be obtained: rule (b) FAILS (and rule (c) also fails, since the call window cannot be computed).
 
 ---
 

@@ -106,14 +106,12 @@ def test_rule_b_default_tz_fallback_passes_with_substituted_for() -> None:
     assert decision.default_tz_substituted_for == "Not/A_Real_Zone"
 
 
-def test_rule_c_outside_call_window_blocks() -> None:
+def test_rule_c_just_past_end_boundary_blocks() -> None:
+    """Q12: 20:01 local — one minute past the inclusive 20:00 end — is blocked."""
     evaluator = BuiltinEligibilityEvaluator()
-    # 2026-05-19 04:00 UTC = 21:00 the previous day Pacific (during DST, UTC-7).
-    # Wait — UTC-7 means 04:00 UTC = 21:00 the prior day local. To get a clear "outside window"
-    # case during May 19 we want 03:00 UTC on May 20 → 20:00 May 19 Pacific. Actually 20:00
-    # is the inclusive end so it should PASS. Let's use 03:01 UTC May 20 → 20:01 May 19 Pacific = outside.
-    early_morning_utc = FrozenClock(datetime(2026, 5, 20, 3, 1, 0, tzinfo=UTC))
-    decision = evaluator.evaluate(_eligible_item(), _config(), early_morning_utc)
+    # 2026-05-20 03:01:00 UTC = 20:01:00 May 19 Pacific (UTC-7 during DST).
+    at_8_01_pm = FrozenClock(datetime(2026, 5, 20, 3, 1, 0, tzinfo=UTC))
+    decision = evaluator.evaluate(_eligible_item(), _config(), at_8_01_pm)
     assert decision.outcome == "block"
     assert "c" in decision.failing_rules
 
@@ -125,6 +123,31 @@ def test_rule_c_inclusive_end_boundary_at_2000() -> None:
     at_eight_pm = FrozenClock(datetime(2026, 5, 20, 3, 0, 0, tzinfo=UTC))
     decision = evaluator.evaluate(_eligible_item(), _config(), at_eight_pm)
     assert decision.rule_c_call_window_pass is True
+
+
+def test_rule_c_inclusive_start_boundary_at_0900() -> None:
+    """Q12: 09:00 local is allowed (inclusive start)."""
+    evaluator = BuiltinEligibilityEvaluator()
+    # 2026-05-19 16:00:00 UTC = 09:00:00 May 19 Pacific (UTC-7 during DST).
+    at_nine_am = FrozenClock(datetime(2026, 5, 19, 16, 0, 0, tzinfo=UTC))
+    decision = evaluator.evaluate(_eligible_item(), _config(), at_nine_am)
+    assert decision.rule_c_call_window_pass is True
+
+
+def test_rule_c_dst_spring_forward_applies_post_transition_offset() -> None:
+    """Q14: zoneinfo handles DST. US Pacific springs forward 2026-03-08 02:00 →
+    03:00, so that evening Pacific is PDT (UTC-7). A UTC instant therefore resolves
+    one hour later than it would under PST — asserting the boundary proves DST applied."""
+    evaluator = BuiltinEligibilityEvaluator()
+    # 2026-03-09 03:00 UTC = 20:00 Mar 8 PDT (inclusive end) — allowed.
+    at_8pm_pdt = FrozenClock(datetime(2026, 3, 9, 3, 0, 0, tzinfo=UTC))
+    assert evaluator.evaluate(_eligible_item(), _config(), at_8pm_pdt).rule_c_call_window_pass is True
+    # 2026-03-09 04:00 UTC = 21:00 Mar 8 PDT — blocked. Under PST this same instant
+    # would be 20:00 and wrongly pass, so asserting block confirms the DST offset.
+    at_9pm_pdt = FrozenClock(datetime(2026, 3, 9, 4, 0, 0, tzinfo=UTC))
+    decision = evaluator.evaluate(_eligible_item(), _config(), at_9pm_pdt)
+    assert decision.rule_c_call_window_pass is False
+    assert "c" in decision.failing_rules
 
 
 def test_rule_d_dnc_flag_blocks() -> None:
@@ -191,3 +214,51 @@ def test_rule_b_null_timezone_falls_back_silently() -> None:
     # The default WAS applied even though there is no original value to record (H3).
     assert decision.default_tz_applied is True
     assert decision.default_tz_substituted_for is None
+
+
+# ---------------------------------------------------------------------------
+# Invalid configured default timezone
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_default_timezone_fails_rule_b() -> None:
+    """A bogus configured default_timezone fails rule (b) outright instead of
+    silently passing (b) and surfacing only as a rule (c) failure."""
+    evaluator = BuiltinEligibilityEvaluator()
+    bad_tz_config = _config(default_tz="Not/A_Real_Zone")
+    decision = evaluator.evaluate(
+        _eligible_item(timezone=None), bad_tz_config, _clock_at_noon_pacific()
+    )
+    assert decision.rule_b_timezone_pass is False
+    assert decision.rule_c_call_window_pass is False  # window cannot be computed
+    assert decision.outcome == "block"
+    assert decision.failing_rules == ["b", "c"]
+    assert decision.default_tz_applied is True
+
+
+def test_invalid_default_timezone_ignored_when_record_tz_valid() -> None:
+    """When the record carries a usable timezone the configured default is never
+    consulted, so a bogus default does not affect rule (b)."""
+    evaluator = BuiltinEligibilityEvaluator()
+    bad_tz_config = _config(default_tz="Not/A_Real_Zone")
+    decision = evaluator.evaluate(
+        _eligible_item(timezone="America/Los_Angeles"), bad_tz_config, _clock_at_noon_pacific()
+    )
+    assert decision.rule_b_timezone_pass is True
+    assert decision.outcome == "allow"
+
+
+# ---------------------------------------------------------------------------
+# EligibilityDecision envelope shape
+# ---------------------------------------------------------------------------
+
+
+def test_decision_envelope_shape() -> None:
+    """The decision carries a prefixed decision_id, a UTC-ms decided_at, and an
+    unset session_id (the orchestrator backfills session_id after session creation)."""
+    evaluator = BuiltinEligibilityEvaluator()
+    decision = evaluator.evaluate(_eligible_item(), _config(), _clock_at_noon_pacific())
+    assert decision.decision_id.startswith("dec_")
+    assert decision.queue_item_id == "q1"
+    assert decision.decided_at == "2026-05-19T19:00:00.000Z"
+    assert decision.session_id == ""

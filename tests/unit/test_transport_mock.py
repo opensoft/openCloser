@@ -127,3 +127,132 @@ def test_fixture_id_with_json_suffix_accepted(tmp_path: Path) -> None:
     call_id = transport.place_call(_qi(), "no_answer.json")
     events = list(transport.event_stream(call_id))
     assert len(events) == 1
+
+
+# --- FR-006 emission coverage + Q15 per-event-type payload pass-through ---
+
+
+def test_event_stream_emits_voicemail_with_payload_verbatim(tmp_path: Path) -> None:
+    """FR-006 + Q15: `voicemail` is emittable; `{voicemail_length_seconds}` passes through unchanged."""
+    _write_fixture(
+        tmp_path,
+        "voicemail",
+        [
+            {
+                "event_id": "evt_1",
+                "type": "voicemail",
+                "timestamp": _T,
+                "payload": {"voicemail_length_seconds": 42},
+            }
+        ],
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "voicemail")
+    events = list(transport.event_stream(call_id))
+    assert len(events) == 1
+    assert events[0].event_type is EventType.VOICEMAIL
+    assert events[0].payload == {"voicemail_length_seconds": 42}
+
+
+def test_event_stream_emits_voicemail_zero_length(tmp_path: Path) -> None:
+    """Q15: `voicemail_length_seconds=0` is allowed and passes through unchanged."""
+    _write_fixture(
+        tmp_path,
+        "voicemail0",
+        [
+            {
+                "event_id": "evt_1",
+                "type": "voicemail",
+                "timestamp": _T,
+                "payload": {"voicemail_length_seconds": 0},
+            }
+        ],
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "voicemail0")
+    events = list(transport.event_stream(call_id))
+    assert events[0].payload == {"voicemail_length_seconds": 0}
+
+
+@pytest.mark.parametrize(
+    "reason", ["carrier_error", "transport_error", "invalid_number", "unknown"]
+)
+def test_event_stream_emits_failed_with_failure_reason(tmp_path: Path, reason: str) -> None:
+    """FR-006 + Q15: `failed` is emittable; `{failure_reason}` passes through for every enum value."""
+    _write_fixture(
+        tmp_path,
+        f"failed_{reason}",
+        [
+            {
+                "event_id": "evt_1",
+                "type": "failed",
+                "timestamp": _T,
+                "payload": {"failure_reason": reason},
+            }
+        ],
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), f"failed_{reason}")
+    events = list(transport.event_stream(call_id))
+    assert len(events) == 1
+    assert events[0].event_type is EventType.FAILED
+    assert events[0].payload == {"failure_reason": reason}
+
+
+def test_event_stream_emits_callback_requested_with_window_hint(tmp_path: Path) -> None:
+    """FR-006 + Q15: `callback_requested` is emittable; `{window_hint: str}` passes through unchanged."""
+    _write_fixture(
+        tmp_path,
+        "callback",
+        [
+            {
+                "event_id": "evt_1",
+                "type": "callback_requested",
+                "timestamp": _T,
+                "payload": {"window_hint": "Thursday 14:00"},
+            }
+        ],
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "callback")
+    events = list(transport.event_stream(call_id))
+    assert len(events) == 1
+    assert events[0].event_type is EventType.CALLBACK_REQUESTED
+    assert events[0].payload == {"window_hint": "Thursday 14:00"}
+
+
+def test_event_stream_emits_callback_requested_null_window_hint(tmp_path: Path) -> None:
+    """Q15: `callback_requested` with `window_hint=null` passes through unchanged."""
+    _write_fixture(
+        tmp_path,
+        "callback_null",
+        [
+            {
+                "event_id": "evt_1",
+                "type": "callback_requested",
+                "timestamp": _T,
+                "payload": {"window_hint": None},
+            }
+        ],
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "callback_null")
+    events = list(transport.event_stream(call_id))
+    assert events[0].payload == {"window_hint": None}
+
+
+def test_event_stream_is_one_shot_per_call_id(tmp_path: Path) -> None:
+    """event_stream consumes the pending fixture; streaming the same call id twice raises."""
+    _write_fixture(tmp_path, "no_answer", [{"event_id": "e1", "type": "no_answer", "timestamp": _T}])
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "no_answer")
+    assert len(list(transport.event_stream(call_id))) == 1
+    with pytest.raises(ValueError):
+        list(transport.event_stream(call_id))
+
+
+def test_fixture_driven_transport_satisfies_calltransport_protocol(tmp_path: Path) -> None:
+    """@runtime_checkable CallTransport — FixtureDrivenTransport structurally conforms."""
+    from opencloser.transport.base import CallTransport
+
+    assert isinstance(FixtureDrivenTransport(tmp_path), CallTransport)

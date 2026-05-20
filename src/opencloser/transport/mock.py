@@ -23,7 +23,7 @@ class FixtureDrivenTransport:
 
     def __init__(self, fixtures_dir: str | Path) -> None:
         self._fixtures_dir = Path(fixtures_dir)
-        # Map mock_provider_call_id → fixture path so event_stream can replay.
+        # Map mock_provider_call_id → fixture path; consumed (one-shot) by event_stream.
         self._pending: dict[str, Path] = {}
 
     def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:
@@ -37,8 +37,26 @@ class FixtureDrivenTransport:
         return call_id
 
     def event_stream(self, mock_provider_call_id: str) -> Iterator[MockCallEvent]:
-        """FR-006: yield events from the fixture in order. Duplicates are yielded verbatim
-        (FR-019 dedup is the orchestrator's job)."""
+        """FR-006: yield the fixture's events in order for a placed call.
+
+        One-shot per call id: the pending fixture mapping is consumed on the first
+        call, so each ``mock_provider_call_id`` may be streamed exactly once. A
+        second call with the same id (or an id that was never placed) raises
+        ``ValueError``. Callers that need the events again must persist them — the
+        orchestrator does, on insert.
+
+        Duplicate events are yielded verbatim; FR-019 deduplication is the
+        orchestrator's job, not the transport's.
+
+        ``session_id`` caveat: the transport operates at the call layer and has no
+        session_id. The yielded ``MockCallEvent.session_id`` field therefore
+        carries the ``mock_provider_call_id`` as a stand-in value; the orchestrator
+        rewrites it to the real session_id when it persists the event (see
+        ``core/orchestrator.py``). Both fields are plain ``str``, so this
+        substitution is not type-checked — splitting a session-less
+        ``TransportEvent`` type out of ``MockCallEvent`` is a Slice 2 cleanup
+        (see contracts/transport.md).
+        """
         fixture_path = self._pending.pop(mock_provider_call_id, None)
         if fixture_path is None:
             raise ValueError(f"No fixture pending for {mock_provider_call_id!r}")

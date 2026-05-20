@@ -18,8 +18,10 @@ from opencloser.models import (
     Disposition,
     EligibilityConfig,
     HumanReviewReason,
+    IntentClassification,
     PersonaConfig,
     QueueItem,
+    RoleConfidence,
     SliceConfig,
     StateConfig,
 )
@@ -155,6 +157,26 @@ def test_rule_3_escalation_phi_collection() -> None:
     out = persona.run(_session_context(), fx)
     assert out.final_disposition is Disposition.NEEDS_HUMAN_REVIEW
     assert out.human_review_reason is HumanReviewReason.PHI_COLLECTION_RISK
+
+
+def test_q8_decision_maker_with_uncertain_intent_escalates_uncertain_intent() -> None:
+    """Clarifications Round 2 Q8: a confident decision-maker whose *intent* is
+    uncertain → FR-036 rule 3 → needs_human_review with `uncertain_intent`
+    (NOT `uncertain_role` — role_confidence and intent_classification are
+    independent fields)."""
+    persona = ALFAppointmentSetterPersona()
+    fx = _fixture(
+        "q8_role_known_intent_uncertain",
+        [
+            _disclosure(),
+            ("contact", "I'm the owner here. I genuinely can't tell whether this would be a fit for us."),
+        ],
+    )
+    out = persona.run(_session_context(), fx)
+    assert out.extraction.role_confidence is RoleConfidence.CONFIDENT_DECISION_MAKER
+    assert out.extraction.intent_classification is IntentClassification.UNCERTAIN
+    assert out.final_disposition is Disposition.NEEDS_HUMAN_REVIEW
+    assert out.human_review_reason is HumanReviewReason.UNCERTAIN_INTENT
 
 
 def test_rule_4_verified_email_and_callback() -> None:

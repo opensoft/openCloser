@@ -236,9 +236,9 @@ A Medx sales operator (or developer impersonating one) opens the JSON artifacts 
 #### Module boundaries
 
 - **FR-033**: The five Slice 1 modules MUST each expose a named contract surface that the Interaction Core depends on. At minimum:
-  - **Eligibility evaluator**: `evaluate(queue_item, config) → EligibilityDecision`.
+  - **Eligibility evaluator**: `evaluate(queue_item, config, clock) → EligibilityDecision` (the `clock` argument supplies the decision-time `now`; see `contracts/eligibility.md`).
   - **Mock call transport**: `place_call(queue_item) → mock_provider_call_id`, and an event-stream surface that yields Mock Call Events as defined in FR-006.
-  - **Persona**: `run(session_context, transport_event_stream) → NormalizedResult` (where `NormalizedResult` matches FR-014's field set).
+  - **Persona**: `run(session_context, conversation) → PersonaOutput` (per `contracts/persona.md`; `PersonaOutput` carries the persona-produced fields — extraction, disposition, summary — that the orchestrator assembles into the FR-014 `NormalizedResult`).
   - **Mock CRM write-back adapter**: `emit_phone_call_activity(payload)`, `emit_queue_status_update(payload)`, `emit_task(payload)` (where `payload` shapes follow FR-028/FR-029/FR-030).
   - **Interaction Core / Orchestrator**: owns session lifecycle, idempotency-key checks (FR-019), attempt-count increments (FR-021), and the call sequence into the four modules above. It MUST NOT contain persona language, eligibility-rule logic, transport-event interpretation, or vendor-shaped payload assembly.
 

@@ -5,7 +5,7 @@ Contract: see specs/001-mock-call-mock-crm/contracts/eligibility.md
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from opencloser.core import ids
@@ -33,11 +33,13 @@ class BuiltinEligibilityEvaluator:
         # Rule (a) — phone presence: Q13 says non-null AND non-empty after trim.
         rule_a = bool(queue_item.phone_number and queue_item.phone_number.strip())
 
-        # Rule (b) — usable timezone (record-supplied or configured default).
-        tz_name, default_tz_applied, default_tz_substituted_for = _resolve_timezone(
+        # Rule (b) — usable timezone: the record's own zone or, when that is
+        # missing/unparseable, the configured default. The resolved zone MUST
+        # itself be parseable; a bogus configured default fails rule (b) here
+        # rather than silently passing (b) and surfacing only as a rule (c) failure.
+        tz_name, default_tz_applied, default_tz_substituted_for, rule_b = _resolve_timezone(
             queue_item, config
         )
-        rule_b = tz_name is not None  # always true once we apply the default-tz fallback
 
         # Rule (c) — current local time within the configured call window.
         rule_c = _is_within_call_window(
@@ -87,24 +89,33 @@ class BuiltinEligibilityEvaluator:
 
 def _resolve_timezone(
     queue_item: QueueItem, config: SliceConfig
-) -> tuple[str, bool, str | None]:
-    """Return (tz_name, default_tz_applied, default_tz_substituted_for).
+) -> tuple[str, bool, str | None, bool]:
+    """Return (tz_name, default_tz_applied, default_tz_substituted_for, rule_b_pass).
 
     If the record's timezone is None or unparseable, fall back to the configured default,
     flag `default_tz_applied=True`, and record the original value (None or the unparseable
     string) in `default_tz_substituted_for` so the substitution is visible in the persisted
     decision (spec Edge Case "Missing or malformed timezone on the record").
+
+    `rule_b_pass` is True only when the resolved zone — the record's own or the substituted
+    default — is itself parseable by `zoneinfo`. A bogus configured default therefore fails
+    rule (b) instead of silently passing it.
     """
     original = queue_item.timezone
-    if original is None:
-        # Default applied; no original value to record.
-        return config.eligibility.default_timezone, True, None
+    if original is not None and _is_parseable_tz(original):
+        return original, False, None, True
+    # Record timezone is missing or unparseable — substitute the configured default.
+    default_tz = config.eligibility.default_timezone
+    return default_tz, True, original, _is_parseable_tz(default_tz)
+
+
+def _is_parseable_tz(tz_name: str) -> bool:
+    """True when `tz_name` resolves via `zoneinfo.ZoneInfo` (which also handles DST)."""
     try:
-        ZoneInfo(original)
+        ZoneInfo(tz_name)
     except (ZoneInfoNotFoundError, ValueError):
-        # Default applied; preserve the unparseable original for the audit trail.
-        return config.eligibility.default_timezone, True, original
-    return original, False, None
+        return False
+    return True
 
 
 def _is_within_call_window(*, tz_name: str, start_str: str, end_str: str, clock: Clock) -> bool:
@@ -122,6 +133,3 @@ def _is_within_call_window(*, tz_name: str, start_str: str, end_str: str, clock:
 def _parse_hhmm(value: str) -> time:
     hours, minutes = value.split(":", 1)
     return time(int(hours), int(minutes))
-
-
-_ = datetime  # keep import for static-checker friendliness

@@ -349,8 +349,16 @@ class TaskPayload(BaseModel):
 
     @model_validator(mode="after")
     def _kind_invariants(self) -> "TaskPayload":
-        if self.task_kind == "review" and self.reason_code is None:
-            raise ValueError("review task requires reason_code")
+        # FR-030: review tasks carry a reason_code; callback tasks do not. `captured_email`
+        # is a callback-task field (Q5 clarification) and MUST NOT appear on review tasks.
+        if self.task_kind == "review":
+            if self.reason_code is None:
+                raise ValueError("review task requires reason_code")
+            if self.captured_email is not None:
+                raise ValueError("review task must not carry captured_email")
+        else:  # task_kind == "callback"
+            if self.reason_code is not None:
+                raise ValueError("callback task must not carry reason_code")
         return self
 
 

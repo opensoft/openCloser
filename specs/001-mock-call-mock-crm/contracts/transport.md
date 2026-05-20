@@ -41,19 +41,51 @@ Duplicate-event variants of any of the above MUST be emittable (same `event_id` 
 
 ## Event shape
 
+The runtime `MockCallEvent` model (`src/opencloser/models.py`) carries **five**
+fields:
+
 ```text
 MockCallEvent:
+    session_id: str          # See caveat below. The transport has no session_id;
+                             # it sets this to the mock_provider_call_id, and the
+                             # orchestrator rewrites it to the real session_id on insert.
     event_id: str            # FR-019 idempotency anchor. Unique within (mock_provider_call_id) per emission. Duplicates carry the same id.
-    type: "connected" | "no_answer" | "voicemail" | "failed" | "completed" | "callback_requested"
-    timestamp: UtcMs         # ISO 8601 UTC ms
+    event_type: EventType    # "connected" | "no_answer" | "voicemail" | "failed" | "completed" | "callback_requested"
+    received_at: UtcMs       # ISO 8601 UTC ms timestamp
     payload: dict            # opaque to the orchestrator; passed through unchanged
 ```
+
+> **`session_id` caveat (Slice 1)**: `MockCallEvent` is a single shared type used
+> both by the transport (which knows only the `mock_provider_call_id`) and by
+> persisted/orchestrator-level event rows (which carry the real `session_id`). In
+> Slice 1 the transport sets `session_id = mock_provider_call_id` as a placeholder,
+> and the orchestrator rewrites it when it persists each event. Both fields are
+> plain `str`, so this substitution is not type-checked. Splitting a session-less
+> `TransportEvent` type out of `MockCallEvent` is a deferred Slice 2 cleanup —
+> `models.py` is intentionally not changed in Slice 1.
+
+The per-event-type `payload` sub-schema (Q15) is defined in `spec.md` (Mock Call
+Event entity); the transport treats `payload` as opaque and yields it verbatim.
 
 ---
 
 ## Slice 1 mock implementation
 
 `FixtureDrivenTransport` reads a transport fixture (`tests/fixtures/transport_events/<id>.json`) at `place_call(...)` time. The fixture's events are yielded in order via `event_stream(...)`. `place_call` generates a UUID-based `mock_provider_call_id` ensuring global uniqueness.
+
+**Slice 1 simplification — `fixture: TransportFixture` → `fixture_id: str`**: the
+public surface above names the second `place_call` parameter `fixture: TransportFixture`
+(a fixture object). The Slice 1 runtime signature is `place_call(queue_item, fixture_id: str)`:
+the transport receives only a fixture identifier and loads the fixture file from disk
+itself. This is a deliberate Slice 1 simplification — the Slice 2 SignalWire
+implementation replaces this parameter with a `dial_plan: DialPlan` object (per the
+Forward-compat section). The SC-008 contract review (T075) verifies this is a
+parameter-shape change, not a contract-shape change.
+
+`event_stream(...)` is **one-shot per `mock_provider_call_id`**: the pending fixture
+mapping is consumed on the first call, so each call id may be streamed exactly once;
+a second call (or an id that was never placed) raises `ValueError`. Consumers that
+need the events again must persist them — the orchestrator does, on insert.
 
 The transport MUST NOT mutate the queue item or the session. It is read-only with respect to all openCloser state — its only side-effect is yielding events.
 

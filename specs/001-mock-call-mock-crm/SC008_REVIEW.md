@@ -25,10 +25,12 @@ For each Slice 2 substitution, walk the corresponding `contracts/*.md`'s **Publi
 |---|---|---|---|
 | `place_call(queue_item, fixture_id) -> mock_provider_call_id` | sync fn returns string | `place_call(queue_item, dial_plan) -> provider_call_id` | **Name-only change** (fixture_id → dial_plan; mock_provider_call_id → provider_call_id) |
 | `event_stream(call_id) -> Iterator[MockCallEvent]` | sync generator over JSON fixture | same; backed by SignalWire webhook handler | **Name-only change** (MockCallEvent → CallEvent) |
-| `MockCallEvent` fields: `(session_id, event_id, event_type, received_at, payload)` | fixed | Same field set; `payload` may add `provider_raw` sub-key | **Shape-stable** — Slice 2's `provider_raw` is additive |
+| `MockCallEvent` fields: `(session_id, event_id, event_type, received_at, payload)` — **5 fields** (authoritative: runtime `src/opencloser/models.py`) | fixed | Same field set; `payload` may add `provider_raw` sub-key | **Shape-stable** — Slice 2's `provider_raw` is additive |
 | Event types `{connected, no_answer, voicemail, failed, completed, callback_requested}` | enum | SignalWire produces a superset; Slice 2 maps to this enum at the transport boundary | **Shape-stable** — translation happens inside the adapter |
 
 **Verdict**: ✅ The transport contract is forward-compatible. Slice 2 maps SignalWire webhooks into `MockCallEvent` shape; consumer code (orchestrator) needs no changes.
+
+> **Doc-drift note (Slice 1 cleanup)**: the runtime `MockCallEvent` model (`src/opencloser/models.py`) carries **5 fields** — `session_id, event_id, event_type, received_at, payload`. The `contracts/transport.md` Public Surface still shows the pre-implementation 4-field sketch (`event_id, type, timestamp, payload`). This is a stale-doc discrepancy, not a shape regression — the table row above uses the authoritative runtime field set. `contracts/transport.md` should be reconciled to the 5-field runtime model at Slice 2 plan time.
 
 ### 2. Mock CRM Write-back → Dataverse (per [contracts/crm-writeback.md](./contracts/crm-writeback.md))
 
@@ -37,9 +39,9 @@ For each Slice 2 substitution, walk the corresponding `contracts/*.md`'s **Publi
 | `emit_phone_call_activity(payload)` | INSERT into local SQLite | POST to Dataverse Phone Call entity | **Name-only** (no signature change) |
 | `emit_queue_status_update(payload)` | INSERT into local SQLite | PATCH the Dataverse-managed queue row | **Name-only** |
 | `emit_task(payload)` | INSERT into local SQLite | POST to Dataverse Task entity, mapping `task_kind` to subtype | **Name-only** |
-| `PhoneCallActivityPayload` fields | 8 fields (FR-028) | Dataverse Phone Call entity has additional fields (e.g., regarding, owner) that the adapter populates from session context | **Shape-stable** — Dataverse can be a *superset* of Slice 1 fields; the consumer-facing shape is unchanged |
-| `QueueStatusUpdatePayload` fields | 6 fields (FR-029) | Same; Dataverse queue-status update is a delta operation | **Shape-stable** |
-| `TaskPayload` fields | 10 fields (FR-030 + Q19 assigned_to) | `assigned_to` is the Slice 2 wiring point for the Dataverse owner | **Shape-stable** — `assigned_to` is Slice 1-optional, Slice 2-required |
+| `PhoneCallActivityPayload` fields | **9 fields** — FR-028's 8 + `schema_version` (runtime `models.py`) | Dataverse Phone Call entity has additional fields (e.g., regarding, owner) that the adapter populates from session context | **Shape-stable** — Dataverse can be a *superset* of Slice 1 fields; the consumer-facing shape is unchanged |
+| `QueueStatusUpdatePayload` fields | **7 fields** — FR-029's 6 + `schema_version` (runtime `models.py`) | Same; Dataverse queue-status update is a delta operation | **Shape-stable** |
+| `TaskPayload` fields | **12 fields** — FR-030's 10 (incl. Q19 `assigned_to`) + `schema_version` + `task_id` (runtime `models.py`) | `assigned_to` is the Slice 2 wiring point for the Dataverse owner | **Shape-stable** — `assigned_to` is Slice 1-optional, Slice 2-required |
 | FR-018 belt-and-suspenders in `emit_task` | adapter looks up session disposition + no-ops on exclusion set | Same; the Slice 2 Dataverse adapter inherits this safety net | **Shape-stable** |
 
 **Verdict**: ✅ The CRM write-back contract is forward-compatible. The Slice 2 Dataverse adapter implements the same three `emit_*` methods over the same three payload Pydantic classes (renamed to drop the `Mock` prefix if desired). The `assigned_to` carve-out from Clarifications Q19 is the explicit Slice 2 wiring point.

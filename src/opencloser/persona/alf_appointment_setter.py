@@ -38,7 +38,12 @@ class ALFAppointmentSetterPersona:
         session_context: SessionContext,
         conversation: ConversationFixture,
     ) -> PersonaOutput:
-        del session_context  # unused in Slice 1; preserved for the contract surface
+        # `session_context` is unused in Slice 1: the scripted-fixture persona is
+        # fully deterministic and reads only `conversation`. The parameter is part
+        # of the FR-033 / contracts/persona.md `run()` surface and is required so
+        # the Slice 2 live persona can consume `clock`, `config`, and the
+        # `queue_item` without a contract change. Deleted here to signal intent.
+        del session_context
         turns = list(conversation.turns)
         disclosure_completed = _disclosure_completed(turns)
 
@@ -79,10 +84,17 @@ class ALFAppointmentSetterPersona:
 
 
 def _disclosure_completed(turns: list[ConversationTurn]) -> bool:
+    """Byte-exact match of the first persona turn against the canonical disclosure.
+
+    The contract (contracts/persona.md §Disclosure validator) mandates an exact
+    string match with no paraphrases in Slice 1; surrounding whitespace is
+    significant and is NOT stripped — a deviation, including a stray leading or
+    trailing space, fails the validator.
+    """
     persona_turns = [t for t in turns if t.role == "persona"]
     if not persona_turns:
         return False
-    return persona_turns[0].text.strip() == CANONICAL_DISCLOSURE.strip()
+    return persona_turns[0].text == CANONICAL_DISCLOSURE
 
 
 def _minimal_extraction() -> Extraction:

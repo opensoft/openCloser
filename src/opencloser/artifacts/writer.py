@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from opencloser.models import (
     ConflictingEventAuditRecord,
@@ -104,6 +104,8 @@ def write_session_artifacts(
 
 class _ConflictingEventsArtifact(BaseModel):
     """Container for conflicting-events.json (FR-020 audit log export)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     schema_version: str
     session_id: str

@@ -66,8 +66,11 @@ def decide_disposition(
         return Disposition.NOT_INTERESTED, None
 
     # Rule 10: script ended without producing a disposition.
-    if script_terminated_without_signal or intent is IntentClassification.UNCERTAIN:
+    if script_terminated_without_signal:
         return Disposition.NEEDS_HUMAN_REVIEW, HumanReviewReason.SCRIPT_TRUNCATED
 
-    # Defensive fallback (should not reach in well-formed fixtures).
+    # Catch-all: rules 1-9 only fire on a clear signal, so reaching here means no
+    # clear signal was produced (e.g. an `intent == UNCERTAIN` conversation with
+    # no captured email and no escalation). FR-036 designates rule 10 as the
+    # catch-all, so this maps to `script_truncated` — it is NOT an error path.
     return Disposition.NEEDS_HUMAN_REVIEW, HumanReviewReason.SCRIPT_TRUNCATED

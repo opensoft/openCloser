@@ -6,7 +6,7 @@ Contract: see specs/001-mock-call-mock-crm/contracts/persona.md
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from opencloser.core.clock import Clock
 from opencloser.models import (
@@ -61,8 +61,14 @@ class PersonaOutput:
     disclosure_completed: bool
 
 
+@runtime_checkable
 class Persona(Protocol):
-    """FR-009 / FR-011 persona contract surface."""
+    """FR-009 / FR-011 persona contract surface.
+
+    `@runtime_checkable` allows `isinstance(obj, Persona)` structural checks (used
+    by tests / orchestrator wiring to confirm a persona implementation satisfies
+    the contract). Note this verifies member *presence* only, not signatures.
+    """
 
     @property
     def version(self) -> str:  # pragma: no cover - protocol

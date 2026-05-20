@@ -136,7 +136,7 @@ The persona MUST verify that its FIRST turn (the first `role="persona"` entry in
 Hi, this is an AI assistant calling on behalf of Medx, the senior-living placement service. Is this a good time to chat for two minutes?
 ```
 
-Match is exact-string (no paraphrases in Slice 1). If the first turn matches, `disclosure_completed=True`. If the first turn deviates from the canonical string, `disclosure_completed=False` AND the persona MUST emit disposition `needs_human_review` with `human_review_reason='outside_allowed_claims'` (the disclosure failure is treated as an out-of-bounds persona behavior). Future slices may introduce variants behind this same validator.
+Match is exact-string (no paraphrases in Slice 1). The comparison is **byte-exact**: surrounding whitespace is significant and MUST NOT be stripped — a stray leading or trailing space is itself a deviation that fails the validator. If the first turn matches, `disclosure_completed=True`. If the first turn deviates from the canonical string, `disclosure_completed=False` AND the persona MUST emit disposition `needs_human_review` with `human_review_reason='outside_allowed_claims'` (the disclosure failure is treated as an out-of-bounds persona behavior). Future slices may introduce variants behind this same validator.
 
 ---
 

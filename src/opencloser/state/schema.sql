@@ -56,7 +56,12 @@ CREATE TABLE IF NOT EXISTS eligibility_decisions (
     failing_rules                TEXT,
     default_tz_applied           INTEGER NOT NULL DEFAULT 0 CHECK (default_tz_applied IN (0, 1)),
     default_tz_substituted_for   TEXT,
-    session_id                   TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE
+    -- DEFERRABLE INITIALLY DEFERRED (data-model.md §Schema): the FK is checked at COMMIT,
+    -- not at row INSERT, so the orchestrator may persist the decision and its session in
+    -- either order within one transaction.
+    session_id                   TEXT NOT NULL
+                                 REFERENCES sessions(session_id) ON DELETE CASCADE
+                                 DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE INDEX IF NOT EXISTS idx_eligibility_decisions_queue_item ON eligibility_decisions(queue_item_id);

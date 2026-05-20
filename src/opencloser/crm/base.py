@@ -5,7 +5,7 @@ Contract: see specs/001-mock-call-mock-crm/contracts/crm-writeback.md
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from opencloser.models import (
     PhoneCallActivityPayload,
@@ -14,8 +14,14 @@ from opencloser.models import (
 )
 
 
+@runtime_checkable
 class WriteBackAdapter(Protocol):
-    """FR-016 conceptual contract that the future Dataverse adapter will satisfy."""
+    """FR-016 conceptual contract that the future Dataverse adapter will satisfy.
+
+    Marked ``@runtime_checkable`` so ``isinstance(adapter, WriteBackAdapter)`` works —
+    this is the Slice 1 runtime enforcement of FR-033's module-boundary contract
+    (spec.md Round 2 Q23: "Python ABCs/Protocols in base.py are the runtime enforcement").
+    """
 
     def emit_phone_call_activity(
         self, payload: PhoneCallActivityPayload

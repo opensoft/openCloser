@@ -362,6 +362,10 @@ def _run_allowed_session(
             # it does NOT mutate state or emit write-backs. Non-terminal late events
             # (e.g. a stray callback_requested) are simply dropped.
             if finalizing_event is not None:
+                # finalizing_event and final_disposition are assigned together when the
+                # first terminal event is processed — by here final_disposition is set.
+                # The assert surfaces an invariant violation instead of masking it.
+                assert final_disposition is not None
                 if event.event_type in _TERMINAL_EVENTS:
                     audit = ConflictingEventAuditRecord(
                         audit_id=ids.new_audit_id(),
@@ -370,7 +374,7 @@ def _run_allowed_session(
                         conflicting_event_type=event.event_type,
                         received_at=event.received_at,
                         full_event_payload=event.payload,
-                        preserved_disposition=final_disposition or Disposition.FAILED,
+                        preserved_disposition=final_disposition,
                     )
                     conflicting_events.append(audit)
                     store.insert_conflicting_event(conn, audit)
@@ -452,10 +456,8 @@ def _resolve_final_disposition(
         return Disposition.NO_ANSWER
     if et is EventType.VOICEMAIL:
         return Disposition.VOICEMAIL
-    if et is EventType.FAILED:
-        return Disposition.FAILED
-    if et is EventType.COMPLETED:
-        return persona_output.final_disposition if persona_output else Disposition.FAILED
+    # `failed`, or `completed` with no persona output (no conversation reached the
+    # persona) — both resolve to `failed`.
     return Disposition.FAILED
 
 
@@ -490,6 +492,14 @@ def _finalize_session(
     # The session's `state` is intentionally NOT flipped to FINALIZED here — that
     # flip is the LAST commit, after write-backs and artifacts succeed (N3), so a
     # FINALIZED session row is guaranteed to have its write-backs and artifacts.
+    # The normalized_result INSERT is gated on a NORMALIZED_RESULT idempotency key
+    # (FR-019) so a redelivered finalizing event cannot raise on the session_id PK.
+    normalized_key = idempotency.compute_key(
+        session_id=session.session_id,
+        mock_provider_call_id=mock_call_id,
+        event_id=None,
+        write_back_kind=WriteBackKind.NORMALIZED_RESULT,
+    )
     with store.transaction(conn):
         store.update_session(
             conn,
@@ -497,7 +507,8 @@ def _finalize_session(
             final_disposition=disposition,
             ended_at=ended_at,
         )
-        store.insert_normalized_result(conn, normalized)
+        if idempotency.record_or_skip(conn, normalized_key, applied_at=ended_at):
+            store.insert_normalized_result(conn, normalized)
         store.update_queue_item_status(
             conn,
             queue_item.queue_item_id,

@@ -49,7 +49,7 @@ def _load_conv() -> ConversationFixture:
     )
 
 
-def _run(tmp_path: Path) -> Path:
+def _run(tmp_path: Path, transport_fixture_id: str = "connected") -> Path:
     state_db = tmp_path / "state.db"
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir(parents=True)
@@ -74,7 +74,7 @@ def _run(tmp_path: Path) -> Path:
             transport=FixtureDrivenTransport(_TRANSPORT),
             persona=ALFAppointmentSetterPersona(),
             conversation_fixture=_load_conv(),
-            transport_fixture_id="connected",
+            transport_fixture_id=transport_fixture_id,
             clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
         )
         return report.artifact_dir
@@ -104,6 +104,29 @@ def test_sc005_deterministic_artifact_keys_across_runs(tmp_path: Path) -> None:
         a_text = _normalize(dir_a / name)
         b_text = _normalize(dir_b / name)
         assert a_text == b_text, f"{name} differs across runs"
+
+    # transcript.txt carries no runtime ids — it is rendered verbatim from the fixture
+    # turns, so it must be byte-identical across runs without any normalization.
+    assert (dir_a / "transcript.txt").read_bytes() == (dir_b / "transcript.txt").read_bytes(), (
+        "transcript.txt differs across runs"
+    )
+
+
+def test_sc005_conflicting_events_artifact_deterministic(tmp_path: Path) -> None:
+    """The FR-020 audit artifact (conflicting-events.json) is also byte-deterministic
+    across reruns of the same fixture, modulo the runtime-randomized audit/session ids."""
+    dir_a = _run(tmp_path / "a", transport_fixture_id="conflicting_failed_after_completed")
+    dir_b = _run(tmp_path / "b", transport_fixture_id="conflicting_failed_after_completed")
+
+    def _normalize(path: Path) -> str:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        _strip_ids(data)
+        return json.dumps(data, sort_keys=True, indent=2)
+
+    a_path = dir_a / "conflicting-events.json"
+    b_path = dir_b / "conflicting-events.json"
+    assert a_path.exists() and b_path.exists(), "conflicting-events.json was not exported"
+    assert _normalize(a_path) == _normalize(b_path), "conflicting-events.json differs across runs"
 
 
 def _strip_ids(obj) -> None:

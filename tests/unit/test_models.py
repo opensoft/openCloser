@@ -131,6 +131,37 @@ def test_task_payload_callback_with_email_and_window() -> None:
     assert payload.assigned_to is None
 
 
+def test_task_payload_callback_rejects_reason_code() -> None:
+    """crm M1 / FR-030: `reason_code` is null for callback tasks."""
+    with pytest.raises(ValidationError):
+        TaskPayload(
+            task_id="task_3",
+            session_id="ses_1",
+            queue_item_id="q1",
+            task_kind="callback",
+            subject="Callback Thursday 14:00",
+            reason_code=HumanReviewReason.UNCERTAIN_ROLE,
+            persona_version="alf-appointment-setter@0.1.0",
+            created_at=_T,
+        )
+
+
+def test_task_payload_review_rejects_captured_email() -> None:
+    """crm M2 / FR-030: `captured_email` is a callback-task field, never on a review task."""
+    with pytest.raises(ValidationError):
+        TaskPayload(
+            task_id="task_4",
+            session_id="ses_1",
+            queue_item_id="q1",
+            task_kind="review",
+            subject="Review uncertain intent",
+            reason_code=HumanReviewReason.UNCERTAIN_INTENT,
+            captured_email="ok@example.com",
+            persona_version="alf-appointment-setter@0.1.0",
+            created_at=_T,
+        )
+
+
 # -- Timestamp format --------------------------------------------------------
 
 

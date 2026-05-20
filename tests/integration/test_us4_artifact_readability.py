@@ -196,3 +196,95 @@ def test_us4_fr035_reason_code_recorded(
     task = json.loads((report.artifact_dir / "task.json").read_text(encoding="utf-8"))
     assert task["task_kind"] == "review"
     assert task["reason_code"] == expected_reason
+
+
+# --- Terminal-path and blocked-path session-result readability (FR-014) -------------
+# US4's `_CASES` above only covers the 7 connected dispositions; no_answer / voicemail /
+# failed / blocked are exercised elsewhere (US3, US2) but their *exported session result*
+# is never read field-by-field. These two tests close that FR-014 readability gap.
+
+_QUEUE_FIXTURES = _REPO / "tests/fixtures/queue_items"
+
+
+@pytest.mark.parametrize(
+    "transport_fixture,disposition",
+    [
+        ("no_answer", Disposition.NO_ANSWER),
+        ("voicemail", Disposition.VOICEMAIL),
+        ("failed", Disposition.FAILED),
+    ],
+)
+def test_us4_terminal_path_result_readability(
+    tmp_state_db: sqlite3.Connection,
+    tmp_artifact_dir: Path,
+    tmp_path: Path,
+    transport_fixture: str,
+    disposition: Disposition,
+) -> None:
+    """FR-014: a no_answer / voicemail / failed session-result.json is self-describing —
+    an operator can read the outcome without source code."""
+    store.insert_queue_item(
+        tmp_state_db, QueueItem.model_validate_json(_QUEUE.read_text(encoding="utf-8"))
+    )
+    report = process_one_queue_item(
+        "alf-prospect-001",
+        conn=tmp_state_db,
+        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        eligibility=BuiltinEligibilityEvaluator(),
+        transport=FixtureDrivenTransport(_TRANSPORT),
+        persona=ALFAppointmentSetterPersona(),
+        conversation_fixture=None,
+        transport_fixture_id=transport_fixture,
+        clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
+    )
+    assert report.final_disposition is disposition
+
+    sr = json.loads((report.artifact_dir / "session-result.json").read_text(encoding="utf-8"))
+    assert sr["schema_version"] == "slice1-v1"
+    assert sr["session_id"] == report.session_id
+    assert sr["queue_item_id"] == "alf-prospect-001"
+    assert sr["final_disposition"] == disposition.value
+    # A call WAS placed for these paths, so the provider call id is present and readable.
+    assert sr["mock_provider_call_id"] is not None
+    assert isinstance(sr["summary"], str) and sr["summary"]
+    assert sr["started_at"] and sr["ended_at"]
+    # No connected conversation → no review reason, no transcript pointer, no blocked reason.
+    assert sr["human_review_reason"] is None
+    assert sr["transcript_pointer"] is None
+    assert sr["blocked_reason"] is None
+
+
+def test_us4_blocked_result_readability(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
+) -> None:
+    """FR-014: a blocked-by-eligibility session-result.json names the failing rule(s)
+    in `blocked_reason` and carries no provider call id or transcript pointer."""
+    qi = QueueItem.model_validate_json(
+        (_QUEUE_FIXTURES / "alf-prospect-dnc.json").read_text(encoding="utf-8")
+    )
+    store.insert_queue_item(tmp_state_db, qi)
+    report = process_one_queue_item(
+        qi.queue_item_id,
+        conn=tmp_state_db,
+        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        eligibility=BuiltinEligibilityEvaluator(),
+        transport=FixtureDrivenTransport(_TRANSPORT),
+        persona=ALFAppointmentSetterPersona(),
+        conversation_fixture=None,
+        transport_fixture_id=None,
+        clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
+    )
+    assert report.final_disposition is Disposition.BLOCKED
+
+    sr = json.loads((report.artifact_dir / "session-result.json").read_text(encoding="utf-8"))
+    assert sr["schema_version"] == "slice1-v1"
+    assert sr["session_id"] == report.session_id
+    assert sr["queue_item_id"] == "alf-prospect-dnc"
+    assert sr["final_disposition"] == "blocked"
+    assert sr["blocked_reason"] == ["d"]  # DNC rule
+    assert isinstance(sr["summary"], str) and sr["summary"]
+    assert sr["started_at"] and sr["ended_at"]
+    # No call was placed and no conversation occurred.
+    assert sr["mock_provider_call_id"] is None
+    assert sr["transcript_pointer"] is None
+    assert sr["human_review_reason"] is None

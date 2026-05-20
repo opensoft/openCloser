@@ -30,11 +30,18 @@ _DNC_PHRASES = (
     "opt-out",
 )
 
+# Bare "this isn't " / "this is not " false-positived on unrelated negations
+# ("this isn't urgent"). Narrowed to phrasings that genuinely signal the persona
+# reached a non-facility / wrong number.
 _WRONG_NUMBER_PHRASES = (
     "wrong number",
     "you have the wrong",
-    "this isn't ",
-    "this is not ",
+    "isn't a facility",
+    "is not a facility",
+    "not a facility",
+    "this isn't the right number",
+    "this is not the right number",
+    "no facility here",
 )
 
 _NOT_INTERESTED_PHRASES = (
@@ -147,6 +154,34 @@ _OUTSIDE_ALLOWED_KEYWORDS = (
     "compared to sunrise",
 )
 
+# Refusal-topic keyword sets (FR-034 / Q9 enum). MEDICAL_HISTORY and LEGAL_ADVICE
+# reuse _PHI_KEYWORDS / _LEGAL_KEYWORDS; the three below complete the 7-value enum.
+_CLINICAL_ADVICE_KEYWORDS = (
+    "clinical advice",
+    "medical advice",
+    "should i take",
+    "what medication",
+    "what dose",
+    "recommend a treatment",
+)
+
+_REGULATORY_KEYWORDS = (
+    "regulation",
+    "regulatory",
+    "state law",
+    "licensing requirement",
+    "compliance rule",
+)
+
+_INSURANCE_DISPUTE_KEYWORDS = (
+    "insurance",
+    "medicare",
+    "medicaid",
+    "coverage dispute",
+    "claim denied",
+    "claim was denied",
+)
+
 
 def extract_from_turns(turns: Sequence[ConversationTurn]) -> Extraction:
     """Apply Slice 1 deterministic extraction rules to a scripted conversation."""
@@ -228,7 +263,12 @@ def _capture_window_fragment(text: str) -> str | None:
         r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week|this afternoon|tonight|this evening)\b",
         re.IGNORECASE,
     )
-    hour_re = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", re.IGNORECASE)
+    # An hour mention MUST carry an am/pm marker OR explicit :MM minutes — a bare
+    # 1-2 digit number ("I'm 35", "for 2 people") is NOT a callback time.
+    hour_re = re.compile(
+        r"\b\d{1,2}(?::\d{2}\s*(?:am|pm)?|\s*(?:am|pm))\b",
+        re.IGNORECASE,
+    )
     day = day_re.search(text)
     hour = hour_re.search(text)
     if day and hour:
@@ -279,12 +319,23 @@ def _was_email_read_back_and_confirmed(
 
 
 def _extract_refusal_topics(contact_turns: Sequence[ConversationTurn]) -> list[RefusalTopic]:
+    """Detect contact-raised topics the persona must refuse, drawn from the Q9 enum.
+
+    Order of appended topics is deterministic (fixed sequence below); all seven
+    `RefusalTopic` values are reachable.
+    """
     joined = _lower_join(contact_turns)
     topics: list[RefusalTopic] = []
     if any(k in joined for k in _PHI_KEYWORDS):
         topics.append(RefusalTopic.MEDICAL_HISTORY)
+    if any(k in joined for k in _CLINICAL_ADVICE_KEYWORDS):
+        topics.append(RefusalTopic.CLINICAL_ADVICE)
     if any(k in joined for k in _LEGAL_KEYWORDS):
         topics.append(RefusalTopic.LEGAL_ADVICE)
+    if any(k in joined for k in _REGULATORY_KEYWORDS):
+        topics.append(RefusalTopic.REGULATORY_INTERPRETATION)
+    if any(k in joined for k in _INSURANCE_DISPUTE_KEYWORDS):
+        topics.append(RefusalTopic.INSURANCE_DISPUTE)
     if any(k in joined for k in ("compared to", "brookdale", "sunrise")):
         topics.append(RefusalTopic.COMPETITOR_COMPARISON)
     if any(k in joined for k in ("exact cost", "what do you charge", "how much exactly")):

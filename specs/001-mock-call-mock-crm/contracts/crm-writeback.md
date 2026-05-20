@@ -94,6 +94,7 @@ TaskPayload (FR-030):
   reason_code: HumanReviewReason | None   # required for task_kind="review"
   preferred_callback_window: str | None    # required for task_kind="callback" when window was captured
   captured_email: str | None               # populated when verified email accompanies callback (Q5)
+  assigned_to: str | None                   # OPTIONAL (Q19); null in Slice 1 mock, Slice 2 Dataverse populates it
   persona_version, created_at
 ```
 

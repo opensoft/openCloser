@@ -6,10 +6,12 @@ import sqlite3
 
 import pytest
 
+from opencloser.crm.base import WriteBackAdapter
 from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.models import (
     CallableStatus,
     Disposition,
+    HumanReviewReason,
     PhoneCallActivityPayload,
     QueueItem,
     QueueStatusUpdatePayload,
@@ -161,7 +163,7 @@ def test_emit_task_permitted_for_needs_human_review(tmp_state_db: sqlite3.Connec
         queue_item_id="q1",
         task_kind="review",
         subject="Review uncertain role",
-        reason_code=__import__("opencloser.models", fromlist=["HumanReviewReason"]).HumanReviewReason.UNCERTAIN_ROLE,
+        reason_code=HumanReviewReason.UNCERTAIN_ROLE,
         persona_version="alf-appointment-setter@0.1.0",
         created_at=_T,
     )
@@ -186,3 +188,86 @@ def test_queue_status_payload_always_required(tmp_state_db: sqlite3.Connection) 
     assert wb.phone_call_activity is None
     assert wb.task is None
     assert wb.queue_status_update is not None
+
+
+def test_emit_task_fail_closed_when_session_not_finalized(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """L2 / FR-018: emit_task fails closed — it no-ops when the session has no final
+    disposition yet, since FR-018 compliance cannot be verified without one."""
+    _seed_queue_item(tmp_state_db)
+    _seed_session(tmp_state_db)  # IN_FLIGHT, final_disposition is None
+    adapter = MockWriteBackAdapter(tmp_state_db)
+    adapter.emit_task(_callback_task())
+    row = tmp_state_db.execute(
+        "SELECT COUNT(*) AS n FROM task_payloads WHERE session_id = 'ses_1';"
+    ).fetchone()
+    assert row["n"] == 0
+
+
+def test_emit_task_fail_closed_when_session_missing(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """L2 / FR-018: emit_task no-ops when the referenced session does not exist."""
+    _seed_queue_item(tmp_state_db)
+    adapter = MockWriteBackAdapter(tmp_state_db)
+    adapter.emit_task(_callback_task())  # ses_1 was never inserted
+    row = tmp_state_db.execute(
+        "SELECT COUNT(*) AS n FROM task_payloads WHERE session_id = 'ses_1';"
+    ).fetchone()
+    assert row["n"] == 0
+
+
+def test_mock_adapter_satisfies_writeback_protocol(tmp_state_db: sqlite3.Connection) -> None:
+    """M3 / FR-016: MockWriteBackAdapter structurally satisfies the runtime-checkable
+    WriteBackAdapter Protocol — the Slice 1 runtime enforcement of the FR-033 boundary."""
+    adapter = MockWriteBackAdapter(tmp_state_db)
+    assert isinstance(adapter, WriteBackAdapter)
+
+
+def test_task_payload_assigned_to_defaults_to_none() -> None:
+    """Q19: assigned_to is OPTIONAL and the Slice 1 mock leaves it null. It is the
+    explicit Slice 2 Dataverse wiring point (SC-008)."""
+    task = _callback_task()
+    assert task.assigned_to is None
+
+
+def test_emit_queue_status_update_exactly_once_db_guard(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """FR-029: queue_status_updates.session_id is a PRIMARY KEY — a second emit for the
+    same session raises IntegrityError. This is the schema-level belt-and-suspenders
+    behind the orchestrator's idempotency-key gate."""
+    _seed_queue_item(tmp_state_db)
+    _seed_session(tmp_state_db, disposition=Disposition.INTERESTED_CALLBACK_REQUESTED)
+    adapter = MockWriteBackAdapter(tmp_state_db)
+    adapter.emit_queue_status_update(_status())
+    with pytest.raises(sqlite3.IntegrityError):
+        adapter.emit_queue_status_update(_status())
+
+
+def test_q5_verified_email_carried_into_callback_task(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """Q5 carve-out: when a verified email accompanies a callback request, the captured
+    email MUST be carried in the emitted callback task payload (FR-030 + FR-013)."""
+    _seed_queue_item(tmp_state_db)
+    _seed_session(tmp_state_db, disposition=Disposition.INTERESTED_CALLBACK_REQUESTED)
+    adapter = MockWriteBackAdapter(tmp_state_db)
+    adapter.emit_queue_status_update(_status())
+    adapter.emit_task(_callback_task())
+
+    # Persisted row carries both the callback window and the verified email.
+    row = tmp_state_db.execute(
+        "SELECT task_kind, preferred_callback_window, captured_email "
+        "FROM task_payloads WHERE session_id = 'ses_1';"
+    ).fetchone()
+    assert row["task_kind"] == "callback"
+    assert row["preferred_callback_window"] == "Thursday 14:00"
+    assert row["captured_email"] == "alice@example.com"
+
+    # And it surfaces on the composite WriteBack aggregate.
+    wb = adapter.build_writeback("ses_1")
+    assert wb.task is not None
+    assert wb.task.captured_email == "alice@example.com"
+    assert wb.task.preferred_callback_window == "Thursday 14:00"

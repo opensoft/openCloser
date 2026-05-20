@@ -6,11 +6,12 @@ Contract: see specs/001-mock-call-mock-crm/contracts/transport.md
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from opencloser.models import MockCallEvent, QueueItem
 
 
+@runtime_checkable
 class CallTransport(Protocol):
     """FR-008 conceptual contract — the only path through which call-level events enter the Core."""
 

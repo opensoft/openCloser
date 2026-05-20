@@ -60,6 +60,18 @@ _ALLOWED: dict[str, set[str]] = {
 }
 
 
+# Top-level files living directly under `src/opencloser/` (not inside an FR-033
+# boundary package). These are intentionally EXEMPT from the dependency-direction
+# lint, each for a documented reason:
+#   - `cli.py`    — the operator entrypoint; it composes the concrete implementations
+#                   of every boundary by design (that is its job, per FR-025).
+#   - `models.py` — the shared Pydantic layer that every boundary is allowed to import.
+# The exemption is explicit (not a silent `group is None` skip): any NEW top-level
+# file will fail `test_dependency_directions_respect_contracts` until a reviewer
+# either adds it here with a rationale or moves it into a boundary package.
+_TOP_LEVEL_EXEMPT: set[str] = {"cli.py", "models.py"}
+
+
 def _python_files(root: Path) -> Iterable[Path]:
     for p in root.rglob("*.py"):
         if p.name == "__init__.py":
@@ -93,7 +105,15 @@ def test_dependency_directions_respect_contracts() -> None:
     for path in _python_files(_SRC):
         rel = path.relative_to(_SRC)
         group = _module_group(rel)
-        if group is None or group not in _ALLOWED:
+        if group is None:
+            # A top-level file directly under src/opencloser/. These are exempt from the
+            # lint, but only via the explicit allow-list — an unrecognized one is an error.
+            assert path.name in _TOP_LEVEL_EXEMPT, (
+                f"unexpected top-level file {path.name!r} under src/opencloser/ — add it "
+                f"to _TOP_LEVEL_EXEMPT with a rationale, or move it into a boundary package"
+            )
+            continue
+        if group not in _ALLOWED:
             continue
         allowed = _ALLOWED[group]
         tree = ast.parse(path.read_text(encoding="utf-8"))
