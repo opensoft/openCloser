@@ -133,16 +133,18 @@ def test_us2_multi_rule_failure_lists_all_in_canonical_order(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
 ) -> None:
     """FR-004: every failing rule appears in the decision, in canonical order (no
-    short-circuit). This record fails every rule that *can* fail — (a), (c), (d), (e),
-    (f). Rule (b) usable-timezone cannot fail in Slice 1 by design: the evaluator's
-    default-timezone fallback always yields a usable zone, so rule (b) always passes
-    (see contracts/eligibility.md §Behavior + evaluator._resolve_timezone). The clock is
-    set to 04:00 Pacific (11:00 UTC) — outside the 09:00-20:00 window — to fail (c)."""
+    short-circuit). This record fails rules (a), (c), (d), (e), (f). Rule (b)
+    usable-timezone passes here because the record carries a valid timezone AND the
+    configured default is valid — the default-timezone fallback resolves to a usable
+    zone. Rule (b) CAN fail (see contracts/eligibility.md §Behavior +
+    evaluator._resolve_timezone — a bogus configured default_timezone fails (b)); this
+    fixture simply doesn't exercise that path. The clock is set to 04:00 Pacific
+    (11:00 UTC) — outside the 09:00-20:00 window — to fail (c)."""
     bad_qi = QueueItem(
         queue_item_id="q_multi",
         facility_name="Bad ALF",
         phone_number=None,  # fails (a)
-        timezone="America/Los_Angeles",  # rule (b) passes (valid; would also pass via fallback)
+        timezone="America/Los_Angeles",  # valid tz → rule (b) passes
         attempt_count=5,  # fails (e)
         dnc_flag=True,  # fails (d)
         callable_status="dnc",  # fails (f)
@@ -161,7 +163,7 @@ def test_us2_multi_rule_failure_lists_all_in_canonical_order(
     )
     assert report.final_disposition is Disposition.BLOCKED
     decision = json.loads((report.artifact_dir / "eligibility-decision.json").read_text())
-    # All five failable rules, in canonical (a)-(f) order; (b) passes by design.
+    # Five of the six rules fail, in canonical (a)-(f) order; (b) passes (valid tz).
     assert decision["failing_rules"] == ["a", "c", "d", "e", "f"]
     # The persisted decision records (b) as a pass even though every other rule failed.
     assert decision["rules"]["b"] is True
