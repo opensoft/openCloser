@@ -160,7 +160,16 @@ fi
 WORKTREE_ROOT=$(resolve_worktree_root "$REPO_ROOT")
 LATEST_WORKTREE=""
 if [ -d "$WORKTREE_ROOT" ]; then
-    LATEST_WORKTREE=$(find "$WORKTREE_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 {print $2}')
+    # Newest immediate subdirectory by mtime. Avoids GNU-only `find -printf` so this
+    # also works on macOS (BSD find). stat flags differ: GNU `-c %Y`, BSD `-f %m`.
+    LATEST_WORKTREE=$(
+        for _wt in "$WORKTREE_ROOT"/*/; do
+            [ -d "$_wt" ] || continue
+            _wt=${_wt%/}
+            _mt=$(stat -c '%Y' "$_wt" 2>/dev/null || stat -f '%m' "$_wt" 2>/dev/null || echo 0)
+            printf '%s\t%s\n' "$_mt" "$_wt"
+        done | sort -rn | awk -F'\t' 'NR == 1 { print $2 }'
+    )
 fi
 
 if [ -n "$LATEST_WORKTREE" ] && [ -d "$LATEST_WORKTREE" ]; then

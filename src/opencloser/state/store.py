@@ -46,18 +46,22 @@ _LOGGER = logging.getLogger(__name__)
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection, ensure the parent dir exists, and apply Slice 1 PRAGMAs.
 
-    The state directory and DB file hold local CRM data (N5), so they are restricted to
-    the owner — directory ``0o700``, file ``0o600``. The directory mode also shields the
-    WAL/SHM sidecar files. chmod is best-effort: filesystems that do not support it (some
-    network or Windows mounts) are logged and tolerated rather than treated as fatal.
+    The DB file holds local CRM data (N5), so it is restricted to the owner (``0o600``).
+    A state directory that this call creates is likewise restricted (``0o700``), which
+    also shields the WAL/SHM sidecar files; a pre-existing directory is left untouched.
+    chmod is best-effort: filesystems that do not support it (some network or Windows
+    mounts) are logged and tolerated rather than treated as fatal.
     """
     path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Restrict the state directory to the owner — but only when db_path actually names
-    # a directory. A bare filename ("state.db") has parent ".", and chmod-ing the
-    # current working directory would change permissions for the whole checkout.
-    if path.parent != Path("."):
-        _restrict_permissions(path.parent, 0o700)
+    state_dir = path.parent
+    # Harden the state directory only when THIS call creates it. chmod-ing a
+    # pre-existing directory — the CWD for a bare filename, or any shared location an
+    # absolute db_path points into — would change permissions other processes and
+    # users rely on.
+    created_state_dir = not state_dir.exists()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    if created_state_dir:
+        _restrict_permissions(state_dir, 0o700)
     conn = sqlite3.connect(str(path), isolation_level=None)
     _restrict_permissions(path, 0o600)
     conn.row_factory = sqlite3.Row
@@ -376,8 +380,13 @@ def try_record_idempotency_key(
             """,
             (session_id, mock_provider_call_id or "", event_id or "", write_back_kind, applied_at),
         )
-    except sqlite3.IntegrityError:
-        return False
+    except sqlite3.IntegrityError as exc:
+        # A PRIMARY KEY (or UNIQUE) conflict means the key was already recorded — the
+        # FR-019 duplicate no-op. Any other integrity failure (FK, CHECK, NOT NULL) is a
+        # real bug and must surface rather than be downgraded to a silent skip.
+        if exc.sqlite_errorname in ("SQLITE_CONSTRAINT_PRIMARYKEY", "SQLITE_CONSTRAINT_UNIQUE"):
+            return False
+        raise
     return True
 
 

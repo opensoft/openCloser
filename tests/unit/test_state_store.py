@@ -65,6 +65,39 @@ def test_connect_with_bare_filename_does_not_chmod_cwd(
         conn.close()
 
 
+def test_connect_hardens_created_state_dir_only(tmp_path: Path) -> None:
+    """connect() hardens a state directory it creates (0o700) but leaves a
+    pre-existing directory's permissions untouched."""
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    existing.chmod(0o755)
+    store.connect(existing / "a.db").close()
+    assert existing.stat().st_mode & 0o777 == 0o755  # pre-existing dir untouched
+
+    created = tmp_path / "fresh" / "nested"
+    store.connect(created / "b.db").close()
+    assert created.stat().st_mode & 0o777 == 0o700  # dir created by connect() hardened
+
+
+# -- idempotency keys --------------------------------------------------------
+
+
+def test_try_record_idempotency_key_reraises_non_duplicate_integrity_error(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """A non-duplicate integrity failure (here a foreign-key violation — no such
+    session) must surface, not be silently swallowed as a duplicate no-op."""
+    with pytest.raises(sqlite3.IntegrityError):
+        store.try_record_idempotency_key(
+            tmp_state_db,
+            session_id="ghost-session",
+            mock_provider_call_id="",
+            event_id="",
+            write_back_kind="session_state",
+            applied_at=_T,
+        )
+
+
 # -- schema bootstrapping ----------------------------------------------------
 
 
