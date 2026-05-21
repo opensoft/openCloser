@@ -186,12 +186,11 @@ _INSURANCE_DISPUTE_KEYWORDS = (
 def extract_from_turns(turns: Sequence[ConversationTurn]) -> Extraction:
     """Apply Slice 1 deterministic extraction rules to a scripted conversation."""
     contact_turns = [t for t in turns if t.role == "contact"]
-    persona_turns = [t for t in turns if t.role == "persona"]
 
     intent = _classify_intent(contact_turns)
     role = _classify_role_confidence(contact_turns)
     callback_requested, callback_window = _extract_callback(contact_turns)
-    captured_email, captured_email_unverified = _extract_email(persona_turns, contact_turns)
+    captured_email, captured_email_unverified = _extract_email(turns)
     refusal_topics = _extract_refusal_topics(contact_turns)
 
     return Extraction(
@@ -272,7 +271,11 @@ def _capture_window_fragment(text: str) -> str | None:
     day = day_re.search(text)
     hour = hour_re.search(text)
     if day and hour:
-        return text[day.start() : hour.end()].strip()
+        # The day and time may appear in either order ("Thursday at 2 PM" or
+        # "2 PM Thursday") — capture from the earliest span start to the latest end.
+        lo = min(day.start(), hour.start())
+        hi = max(day.end(), hour.end())
+        return text[lo:hi].strip()
     if day:
         return day.group(0)
     if hour:
@@ -280,18 +283,17 @@ def _capture_window_fragment(text: str) -> str | None:
     return None
 
 
-def _extract_email(
-    persona_turns: Sequence[ConversationTurn],
-    contact_turns: Sequence[ConversationTurn],
-) -> tuple[str | None, str | None]:
+def _extract_email(turns: Sequence[ConversationTurn]) -> tuple[str | None, str | None]:
     """Return (captured_email_verified, captured_email_unverified).
 
-    A captured email is VERIFIED iff the persona's next turn read it back AND a subsequent
-    contact turn confirms ("yes", "that's right", "correct"). Otherwise it's unverified.
-    The two are mutually exclusive (per FR-014).
+    A captured email is VERIFIED iff a persona turn read it back AND a LATER contact
+    turn confirms ("yes", "that's right", "correct"). Otherwise it's unverified. The
+    two are mutually exclusive (per FR-014).
     """
     candidate: str | None = None
-    for turn in contact_turns:
+    for turn in turns:
+        if turn.role != "contact":
+            continue
         match = _EMAIL_RE.search(turn.text)
         if match:
             candidate = match.group(0)
@@ -299,23 +301,32 @@ def _extract_email(
     if candidate is None:
         return None, None
 
-    # Verification: the persona must have read it back AND the contact must confirm.
-    confirmed = _was_email_read_back_and_confirmed(candidate, persona_turns, contact_turns)
-    if confirmed:
+    # Verification: a persona turn read it back AND a later contact turn confirmed.
+    if _was_email_read_back_and_confirmed(candidate, turns):
         return candidate, None
     return None, candidate
 
 
-def _was_email_read_back_and_confirmed(
-    candidate: str,
-    persona_turns: Sequence[ConversationTurn],
-    contact_turns: Sequence[ConversationTurn],
-) -> bool:
-    read_back = any(candidate in turn.text for turn in persona_turns)
-    if not read_back:
+def _was_email_read_back_and_confirmed(candidate: str, turns: Sequence[ConversationTurn]) -> bool:
+    """True iff a persona turn read the email back AND a LATER contact turn confirmed it.
+
+    Order matters: a confirmation that precedes the read-back (e.g. a "yes" to an
+    earlier, unrelated question) does not verify the address. The read-back match is
+    case-insensitive, so `Amy@Example.com` and `amy@example.com` are treated as equal.
+    """
+    cand = candidate.lower()
+    read_back_idx: int | None = None
+    for i, turn in enumerate(turns):
+        if turn.role == "persona" and cand in turn.text.lower():
+            read_back_idx = i
+            break
+    if read_back_idx is None:
         return False
     confirmations = ("yes", "that's right", "that is right", "correct", "yep", "yeah")
-    return any(_any_in(turn.text.lower(), confirmations) for turn in contact_turns[-3:])
+    return any(
+        turn.role == "contact" and _contains_word(turn.text.lower(), confirmations)
+        for turn in turns[read_back_idx + 1 :]
+    )
 
 
 def _extract_refusal_topics(contact_turns: Sequence[ConversationTurn]) -> list[RefusalTopic]:
@@ -354,3 +365,9 @@ def _lower_join(turns: Sequence[ConversationTurn]) -> str:
 
 def _any_in(haystack: str, needles: Sequence[str]) -> bool:
     return any(n in haystack for n in needles)
+
+
+def _contains_word(haystack: str, needles: Sequence[str]) -> bool:
+    """Like `_any_in`, but each needle must appear as a whole word/phrase rather than a
+    substring — so a confirmation token like "yes" is not matched inside "yesterday"."""
+    return any(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", haystack) is not None for n in needles)

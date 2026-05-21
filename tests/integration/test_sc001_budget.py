@@ -73,7 +73,7 @@ def test_sc001_per_fixture_under_60s(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -100,7 +100,7 @@ def test_sc001_terminal_paths_under_60s(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -141,7 +141,7 @@ def test_sc001_blocked_paths_under_60s(
     report = process_one_queue_item(
         qi.queue_item_id,
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),

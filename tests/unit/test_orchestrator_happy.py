@@ -122,7 +122,7 @@ def test_happy_path_callback_requested(
     report = process_one_queue_item(
         "q1",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
@@ -183,7 +183,7 @@ def test_block_path_dnc(
     report = process_one_queue_item(
         "q_dnc",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
@@ -224,7 +224,7 @@ def test_unknown_queue_item_raises(
         process_one_queue_item(
             "does_not_exist",
             conn=tmp_state_db,
-            config=_config(tmp_artifact_dir, tmp_path / "db"),
+            config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
             eligibility=BuiltinEligibilityEvaluator(),
             transport=FixtureDrivenTransport(tmp_path / "transport"),
             persona=ALFAppointmentSetterPersona(),

@@ -53,7 +53,11 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     """
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _restrict_permissions(path.parent, 0o700)
+    # Restrict the state directory to the owner — but only when db_path actually names
+    # a directory. A bare filename ("state.db") has parent ".", and chmod-ing the
+    # current working directory would change permissions for the whole checkout.
+    if path.parent != Path("."):
+        _restrict_permissions(path.parent, 0o700)
     conn = sqlite3.connect(str(path), isolation_level=None)
     _restrict_permissions(path, 0o600)
     conn.row_factory = sqlite3.Row

@@ -96,7 +96,7 @@ def test_us3_terminal_paths_no_persona_invocation(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -129,7 +129,7 @@ def test_us3_duplicate_connected_completed_attempt_count_increments_once(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -161,7 +161,7 @@ def test_us3_duplicate_callback_event_does_not_emit_second_task(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -195,7 +195,7 @@ def test_us3_conflicting_failed_after_completed_audited_not_applied(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -237,7 +237,7 @@ def test_us3_duplicate_conflicting_event_fr019_beats_fr020(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),

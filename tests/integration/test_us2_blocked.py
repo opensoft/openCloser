@@ -82,7 +82,7 @@ def test_us2_blocked_by_eligibility(
     report = process_one_queue_item(
         qi.queue_item_id,
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
         persona=ALFAppointmentSetterPersona(),
@@ -155,7 +155,7 @@ def test_us2_multi_rule_failure_lists_all_in_canonical_order(
     report = process_one_queue_item(
         "q_multi",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
         persona=ALFAppointmentSetterPersona(),

@@ -75,7 +75,7 @@ def _run(
     return process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -243,7 +243,7 @@ def test_us4_terminal_path_result_readability(
     report = process_one_queue_item(
         "alf-prospect-001",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),
@@ -281,7 +281,7 @@ def test_us4_blocked_result_readability(
     report = process_one_queue_item(
         qi.queue_item_id,
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(_TRANSPORT),
         persona=ALFAppointmentSetterPersona(),

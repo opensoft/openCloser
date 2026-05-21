@@ -101,7 +101,7 @@ def test_orchestrator_duplicate_events_are_no_ops(
     report = process_one_queue_item(
         "q1",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),
@@ -148,7 +148,7 @@ def test_orchestrator_late_conflicting_event_audited_only(
     report = process_one_queue_item(
         "q1",
         conn=tmp_state_db,
-        config=_config(tmp_artifact_dir, tmp_path / "db"),
+        config=_config(tmp_artifact_dir, tmp_path / "slice1.db"),
         eligibility=BuiltinEligibilityEvaluator(),
         transport=FixtureDrivenTransport(tmp_path / "transport"),
         persona=ALFAppointmentSetterPersona(),

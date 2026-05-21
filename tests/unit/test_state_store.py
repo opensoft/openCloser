@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +45,24 @@ def _make_session(sid: str = "ses_1", qid: str = "q1", **overrides: object) -> S
     }
     base.update(overrides)
     return Session(**base)
+
+
+# -- connection management ---------------------------------------------------
+
+
+def test_connect_with_bare_filename_does_not_chmod_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare DB filename has parent ".", and `connect()` must NOT chmod the CWD —
+    doing so would change permissions for the whole checkout."""
+    monkeypatch.chdir(tmp_path)
+    tmp_path.chmod(0o755)
+    conn = store.connect("bare.db")
+    try:
+        assert (tmp_path / "bare.db").exists()
+        assert tmp_path.stat().st_mode & 0o777 == 0o755  # CWD mode left untouched
+    finally:
+        conn.close()
 
 
 # -- schema bootstrapping ----------------------------------------------------

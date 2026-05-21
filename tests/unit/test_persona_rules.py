@@ -329,6 +329,52 @@ def test_extract_email_unverified_when_no_readback() -> None:
     assert extraction.captured_email_unverified == "alice@example.com"
 
 
+def test_extract_email_unverified_when_confirmation_precedes_readback() -> None:
+    """A 'yes' said BEFORE the persona reads the email back must not verify it."""
+    turns = [
+        ConversationTurn(role="persona", text="Are you the decision-maker?"),
+        ConversationTurn(role="contact", text="Yes. My email is alice@example.com."),
+        ConversationTurn(role="persona", text="Got it — alice@example.com, correct?"),
+    ]
+    extraction = extract_from_turns(turns)
+    assert extraction.captured_email is None
+    assert extraction.captured_email_unverified == "alice@example.com"
+
+
+def test_extract_email_not_verified_by_substring_yesterday() -> None:
+    """'yesterday' must not satisfy the 'yes' confirmation token (word match, not substring)."""
+    turns = [
+        ConversationTurn(role="contact", text="My email is alice@example.com."),
+        ConversationTurn(role="persona", text="Got it — alice@example.com, correct?"),
+        ConversationTurn(role="contact", text="I set that address up yesterday."),
+    ]
+    extraction = extract_from_turns(turns)
+    assert extraction.captured_email is None
+    assert extraction.captured_email_unverified == "alice@example.com"
+
+
+def test_extract_email_verified_with_case_insensitive_readback() -> None:
+    """Read-back match is case-insensitive: a lowercased read-back still confirms."""
+    turns = [
+        ConversationTurn(role="contact", text="My email is Alice@Example.com."),
+        ConversationTurn(role="persona", text="Got it — alice@example.com, correct?"),
+        ConversationTurn(role="contact", text="Yes, correct."),
+    ]
+    extraction = extract_from_turns(turns)
+    assert extraction.captured_email == "Alice@Example.com"
+    assert extraction.captured_email_unverified is None
+
+
+def test_capture_callback_window_handles_time_before_day() -> None:
+    """The callback window is captured even when the time precedes the weekday."""
+    turns = [ConversationTurn(role="contact", text="Call me back 2 PM Thursday works best.")]
+    extraction = extract_from_turns(turns)
+    assert extraction.callback_requested is True
+    assert extraction.preferred_callback_window is not None
+    assert "2 PM" in extraction.preferred_callback_window
+    assert "Thursday" in extraction.preferred_callback_window
+
+
 def test_decide_disposition_rule_priority() -> None:
     """DNC (rule 1) beats wrong-number (rule 2) if both somehow appear."""
     from opencloser.models import IntentClassification, RoleConfidence
