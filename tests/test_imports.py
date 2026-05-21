@@ -1,6 +1,6 @@
 """T067 — Dependency-direction lint (SC-009 module-isolation gate).
 
-Walks the AST of every `src/opencloser/*.py` and asserts the FR-033 boundary's
+Walks the AST of every `src/opencloser/**/*.py` and asserts the FR-033 boundary's
 dependency-allowed rules from `contracts/*.md` hold. Per boundary:
 
 - ``core`` may import any boundary module + state + models + artifacts.

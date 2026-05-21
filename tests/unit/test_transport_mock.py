@@ -48,6 +48,15 @@ def test_place_call_returns_globally_unique_id(tmp_path: Path) -> None:
     assert id_a.startswith("call_") and id_b.startswith("call_")
 
 
+@pytest.mark.parametrize("bad_id", ["../secret", "sub/dir", "a..b", "/etc/passwd"])
+def test_place_call_rejects_path_traversal_fixture_id(tmp_path: Path, bad_id: str) -> None:
+    """A fixture_id with path separators or parent refs is rejected before any file
+    read, so it cannot escape the fixtures directory."""
+    transport = FixtureDrivenTransport(tmp_path)
+    with pytest.raises(ValueError, match="invalid transport fixture id"):
+        transport.place_call(_qi(), bad_id)
+
+
 def test_event_stream_yields_events_in_fixture_order(tmp_path: Path) -> None:
     _write_fixture(
         tmp_path,

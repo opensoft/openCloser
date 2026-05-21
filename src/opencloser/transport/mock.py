@@ -28,7 +28,7 @@ class FixtureDrivenTransport:
 
     def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:
         """FR-007: assign a globally-unique mock_provider_call_id and stash the fixture path."""
-        del queue_item  # unused; the fixture itself carries the queue_item_ref
+        del queue_item  # unused — the mock transport is queue-item-agnostic
         fixture_path = self._resolve_fixture_path(fixture_id)
         if not fixture_path.exists():
             raise FileNotFoundError(f"Transport fixture not found: {fixture_path}")
@@ -87,6 +87,10 @@ class FixtureDrivenTransport:
 
     def _resolve_fixture_path(self, fixture_id: str) -> Path:
         # Accept either a bare fixture_id ("no_answer") or a full filename ("no_answer.json").
+        # Reject path separators / parent refs so a fixture_id cannot escape the fixtures
+        # directory (path traversal).
+        if "/" in fixture_id or "\\" in fixture_id or ".." in fixture_id:
+            raise ValueError(f"invalid transport fixture id: {fixture_id!r}")
         if fixture_id.endswith(".json"):
             return self._fixtures_dir / fixture_id
         return self._fixtures_dir / f"{fixture_id}.json"

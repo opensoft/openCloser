@@ -430,6 +430,17 @@ class CallWindowConfig(BaseModel):
     start: str = Field(pattern=r"^\d{2}:\d{2}$")  # "HH:MM"
     end: str = Field(pattern=r"^\d{2}:\d{2}$")
 
+    @model_validator(mode="after")
+    def _validate_hhmm_ranges(self) -> CallWindowConfig:
+        """Reject well-formed but out-of-range times (e.g. "99:99"): the field pattern
+        only checks the two-digit HH:MM shape, so a bad config would otherwise crash
+        eligibility evaluation instead of failing fast at config load."""
+        for label, value in (("start", self.start), ("end", self.end)):
+            hh, mm = (int(part) for part in value.split(":", 1))
+            if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                raise ValueError(f"call_window.{label} {value!r} is not a valid HH:MM time")
+        return self
+
 
 class EligibilityConfig(BaseModel):
     """`[eligibility]` section."""

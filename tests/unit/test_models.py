@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from opencloser.models import (
     CallableStatus,
+    CallWindowConfig,
     Disposition,
     EventType,
     Extraction,
@@ -27,6 +28,19 @@ from opencloser.models import (
 pytestmark = pytest.mark.module("models")
 
 _T = "2026-05-19T17:00:00.000Z"
+
+
+# -- Config validation --------------------------------------------------------
+
+
+def test_call_window_config_rejects_out_of_range_time() -> None:
+    """A syntactically valid HH:MM that is out of range (e.g. "99:99") fails config
+    validation, so a bad call_window crashes neither config load nor eligibility."""
+    CallWindowConfig(start="09:00", end="20:00")  # valid — no raise
+    with pytest.raises(ValidationError, match="not a valid HH:MM time"):
+        CallWindowConfig(start="99:99", end="20:00")
+    with pytest.raises(ValidationError, match="not a valid HH:MM time"):
+        CallWindowConfig(start="09:00", end="08:60")
 
 
 # -- Round-trip ---------------------------------------------------------------

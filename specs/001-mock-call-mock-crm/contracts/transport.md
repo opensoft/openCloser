@@ -110,6 +110,7 @@ The contract review at Slice 2 plan time verifies these are name-only changes, n
 ## Dependencies allowed
 
 - `opencloser.models` (for QueueItem and event shapes)
+- `opencloser.core` shared primitives — `ids` for `mock_provider_call_id` generation (the orchestrator contract permits `ids` / `clock` / `idempotency`)
 - stdlib `json`, `uuid`, `pathlib`
 
 ## Dependencies forbidden
