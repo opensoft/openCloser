@@ -11,6 +11,10 @@ dependency-allowed rules from `contracts/*.md` hold. Per boundary:
   explicitly forbids `core` for the write-back boundary.
 - ``artifacts`` writer may import `models` only.
 - ``state`` may import `models` only.
+
+Each group may also import its own submodules — intra-boundary imports
+(e.g. `opencloser.transport.mock` importing `opencloser.transport.base`) are not
+cross-boundary violations.
 """
 
 from __future__ import annotations
@@ -38,25 +42,30 @@ _ALLOWED: dict[str, set[str]] = {
     "eligibility": {
         "opencloser.models",
         "opencloser.core",
+        "opencloser.eligibility",  # intra-boundary submodules
     },
     "transport": {
         "opencloser.models",
         "opencloser.core",
+        "opencloser.transport",  # intra-boundary submodules
     },
     "persona": {
         "opencloser.models",
         "opencloser.core",
-        "opencloser.persona",  # internal submodules
+        "opencloser.persona",  # intra-boundary submodules
     },
     "crm": {
         "opencloser.models",
         "opencloser.state",  # adapter persists; allowed
+        "opencloser.crm",  # intra-boundary submodules
     },
     "state": {
         "opencloser.models",
+        "opencloser.state",  # intra-boundary submodules
     },
     "artifacts": {
         "opencloser.models",
+        "opencloser.artifacts",  # intra-boundary submodules
     },
 }
 

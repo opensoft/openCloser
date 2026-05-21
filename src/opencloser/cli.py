@@ -116,12 +116,11 @@ def run_one(
             transport_dir = Path("tests/fixtures/transport_events")
             transport_fixture_id = None
 
-        # Load conversation fixture if provided.
-        conversation = (
-            _load_conversation_fixture(conversation_fixture) if conversation_fixture else None
-        )
-
         try:
+            # Load conversation fixture if provided.
+            conversation = (
+                _load_conversation_fixture(conversation_fixture) if conversation_fixture else None
+            )
             report = process_one_queue_item(
                 queue_item_id,
                 conn=conn,
@@ -136,9 +135,10 @@ def run_one(
         except QueueItemNotFound as exc:
             typer.echo(f"error:       queue_item_id not found: {exc}", err=True)
             raise typer.Exit(code=2) from None
-        except ValueError as exc:
-            # process_one_queue_item raises ValueError for bad operator input
-            # (e.g. an allowed call with no --transport-fixture).
+        except (ValueError, OSError) as exc:
+            # Bad operator input: an allowed call with no --transport-fixture, a
+            # missing/unreadable fixture file, or invalid fixture JSON
+            # (JSONDecodeError is a ValueError subclass).
             typer.echo(f"error:       {exc}", err=True)
             raise typer.Exit(code=2) from None
 

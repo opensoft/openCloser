@@ -205,6 +205,41 @@ def test_cli_run_one_persona_version_mismatch_exits_2(tmp_path: Path) -> None:
     assert "persona.version" in out
 
 
+def test_cli_run_one_missing_transport_fixture_path_exits_2(tmp_path: Path) -> None:
+    """A --transport-fixture pointing at a nonexistent file surfaces a clean
+    `error:` line + exit code 2, not an uncaught FileNotFoundError traceback."""
+    config_path = _write_config(tmp_path)
+    assert _runner.invoke(app, ["init-state", "--config", str(config_path)]).exit_code == 0
+    load = _runner.invoke(
+        app,
+        [
+            "load-queue-item",
+            "--file",
+            str(_QUEUE_FIXTURES / "alf-prospect-001.json"),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert load.exit_code == 0, _combined_output(load)
+
+    run = _runner.invoke(
+        app,
+        [
+            "run-one",
+            "--queue-item-id",
+            "alf-prospect-001",
+            "--transport-fixture",
+            str(tmp_path / "nope.json"),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "error:" in out
+    assert "not found" in out.lower()
+
+
 def test_cli_no_args_shows_help() -> None:
     """`no_args_is_help=True`: invoking the app with no subcommand prints help."""
     result = _runner.invoke(app, [])
