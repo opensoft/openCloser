@@ -25,7 +25,7 @@ _TRANSPORT_FIXTURE = _REPO / "tests/fixtures/transport_events/connected.json"
 _runner = CliRunner()
 
 
-def _write_config(tmp_path: Path) -> Path:
+def _write_config(tmp_path: Path, persona_version: str = "alf-appointment-setter@0.1.0") -> Path:
     """Write a slice1.toml pointing state + artifacts at the test's temp dir.
 
     The call window is widened to the full day so the eligibility rule (c) outcome is
@@ -46,7 +46,7 @@ def _write_config(tmp_path: Path) -> Path:
         f'dir = "{artifacts_dir}"\n'
         'schema_version = "slice1-v1"\n\n'
         "[persona]\n"
-        'version = "alf-appointment-setter@0.1.0"\n\n'
+        f'version = "{persona_version}"\n\n'
         "[state]\n"
         f'db = "{state_db}"\n',
         encoding="utf-8",
@@ -161,6 +161,48 @@ def test_cli_run_one_unknown_queue_item_id_exits_2(tmp_path: Path) -> None:
     )
     assert run.exit_code == 2
     assert "queue_item_id not found" in _combined_output(run)
+
+
+def test_cli_run_one_missing_transport_fixture_exits_2(tmp_path: Path) -> None:
+    """An eligible record run without --transport-fixture surfaces the orchestrator's
+    ValueError as a clean `error:` line + exit code 2 — not an uncaught traceback."""
+    config_path = _write_config(tmp_path)
+    assert _runner.invoke(app, ["init-state", "--config", str(config_path)]).exit_code == 0
+    load = _runner.invoke(
+        app,
+        [
+            "load-queue-item",
+            "--file",
+            str(_QUEUE_FIXTURES / "alf-prospect-001.json"),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert load.exit_code == 0, _combined_output(load)
+
+    run = _runner.invoke(
+        app,
+        ["run-one", "--queue-item-id", "alf-prospect-001", "--config", str(config_path)],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "error:" in out
+    assert "transport_fixture_id is required" in out
+
+
+def test_cli_run_one_persona_version_mismatch_exits_2(tmp_path: Path) -> None:
+    """A config persona.version that doesn't match the available persona fails fast
+    with a clear error + exit code 2, before any state work."""
+    config_path = _write_config(tmp_path, persona_version="alf-appointment-setter@9.9.9")
+
+    run = _runner.invoke(
+        app,
+        ["run-one", "--queue-item-id", "alf-prospect-001", "--config", str(config_path)],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "error:" in out
+    assert "persona.version" in out
 
 
 def test_cli_no_args_shows_help() -> None:

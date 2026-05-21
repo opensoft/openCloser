@@ -98,6 +98,14 @@ def run_one(
 ) -> None:
     """Process exactly one queue record end-to-end (FR-025)."""
     config = load_config(config_path)
+    persona = ALFAppointmentSetterPersona()
+    if persona.version != config.persona.version:
+        typer.echo(
+            f"error:       config persona.version {config.persona.version!r} does not match "
+            f"the available persona {persona.version!r}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     conn = store.connect(config.state.db)
     try:
         # Locate transport fixtures dir + fixture id.
@@ -120,13 +128,18 @@ def run_one(
                 config=config,
                 eligibility=BuiltinEligibilityEvaluator(),
                 transport=FixtureDrivenTransport(transport_dir),
-                persona=ALFAppointmentSetterPersona(),
+                persona=persona,
                 crm=MockWriteBackAdapter(conn),
                 conversation_fixture=conversation,
                 transport_fixture_id=transport_fixture_id,
             )
         except QueueItemNotFound as exc:
             typer.echo(f"error:       queue_item_id not found: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        except ValueError as exc:
+            # process_one_queue_item raises ValueError for bad operator input
+            # (e.g. an allowed call with no --transport-fixture).
+            typer.echo(f"error:       {exc}", err=True)
             raise typer.Exit(code=2) from None
 
         # FR-027 operator output surface.

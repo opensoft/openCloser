@@ -4,9 +4,11 @@ Walks the AST of every `src/opencloser/*.py` and asserts the FR-033 boundary's
 dependency-allowed rules from `contracts/*.md` hold. Per boundary:
 
 - ``core`` may import any boundary module + state + models + artifacts.
-- ``eligibility`` / ``transport`` / ``persona`` / ``crm`` MAY import `models` and
-  shared `core` primitives (`ids`, `clock`, `idempotency` per orchestrator contract),
+- ``eligibility`` / ``transport`` / ``persona`` MAY import `models` and shared
+  `core` primitives (`ids`, `clock`, `idempotency` per orchestrator contract),
   but MUST NOT import each other.
+- ``crm`` may import `models` and `state` only — `contracts/crm-writeback.md`
+  explicitly forbids `core` for the write-back boundary.
 - ``artifacts`` writer may import `models` only.
 - ``state`` may import `models` only.
 """
@@ -49,7 +51,6 @@ _ALLOWED: dict[str, set[str]] = {
     "crm": {
         "opencloser.models",
         "opencloser.state",  # adapter persists; allowed
-        "opencloser.core",
     },
     "state": {
         "opencloser.models",
@@ -88,15 +89,26 @@ def _module_group(rel_path: Path) -> str | None:
     return None
 
 
-def _imported_names(tree: ast.AST) -> set[str]:
+def _collect_imports(tree: ast.AST) -> tuple[set[str], list[int]]:
+    """Return (absolute imported module names, line numbers of relative imports).
+
+    Relative imports (`from . import x` / `from ..bar import y`) carry no absolute
+    module path, so the allowlist match below cannot see them — a cross-boundary
+    `from ..persona import X` would silently bypass the SC-009 gate. They are
+    collected separately and rejected outright (the codebase uses absolute imports).
+    """
     names: set[str] = set()
+    relative_lines: list[int] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 names.add(alias.name)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.add(node.module)
-    return names
+        elif isinstance(node, ast.ImportFrom):
+            if node.level > 0:
+                relative_lines.append(node.lineno)
+            elif node.module:
+                names.add(node.module)
+    return names, relative_lines
 
 
 def test_dependency_directions_respect_contracts() -> None:
@@ -116,7 +128,13 @@ def test_dependency_directions_respect_contracts() -> None:
             continue
         allowed = _ALLOWED[group]
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for imp in _imported_names(tree):
+        imported, relative_lines = _collect_imports(tree)
+        for lineno in relative_lines:
+            violations.append(
+                f"{path.relative_to(_SRC)}:{lineno}: relative import bypasses the "
+                f"dependency-direction gate — use an absolute `opencloser.*` import"
+            )
+        for imp in imported:
             if not imp.startswith("opencloser."):
                 continue  # stdlib + third-party are unrestricted
             if not any(imp == ok or imp.startswith(ok + ".") for ok in allowed):
