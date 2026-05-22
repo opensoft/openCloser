@@ -33,6 +33,8 @@
 - **Lightweight live verification**: A read-only, non-mutating Dataverse check before write-enabled runs that confirms the mapped tables, fields, lookups, option-set values, idempotency-key fields, and configured owner/team identifiers still exist and match the recorded mapping artifact. It does not regenerate the mapping artifact.
 - **Operator-visible**: Surfaced through the CLI result, process exit status, and a local run report/error artifact. Messages MUST identify the failing rule, missing mapping, or retry/resume state without logging secrets or full CRM record contents.
 - **Attempt consumed**: A call attempt is consumed exactly once only after eligibility allows the item, write-enabled run-mode checks pass, metadata verification passes, and `place_call` succeeds with a pre-validated transport fixture and mock provider call ID. Blocked eligibility, dry-run, metadata/readiness failure, Dataverse-unreachable-at-start, and malformed fixture failure consume no attempt.
+- **Approved owner override**: A Dataverse owner/team ID supplied by a mapped queue-item field that is explicitly listed in the mapping artifact as an override source, resolves during metadata verification to an active enabled Dataverse user or team, and is permitted for the relevant Task kind. Invalid overrides MUST fall back to the configured default owner with an operator-visible warning; if the default owner is also missing or invalid, Task write-back is blocked.
+- **Local audit artifacts**: The session-result artifact, run report/error artifact, planned write-back artifacts, redacted transcript pointer, CRM correlation rows, and write-back progress records kept outside Dataverse for operator inspection and recovery.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -142,10 +144,13 @@ When the system writes a transcript artifact, the transcript text first passes t
 - **Transient Dataverse error mid-write-back**: e.g., the Phone Call activity is created but the Task create fails. Bounded in-run retries (initial attempt plus up to 3 retries with 1s / 2s / 4s default backoff, or capped `Retry-After`) reuse correlation identifiers to complete the missing writes without duplicating those that already succeeded; if the retry budget is exhausted the run exits with write-back progress persisted so a later CLI re-invocation resumes the missing writes.
 - **Dataverse unreachable at run start**: the run fails before session creation, claim, mock call placement, attempt increment, or CRM write, and surfaces a retryable startup failure.
 - **Dataverse queue item changed by a human between claim and write-back**: the system writes only the approved Slice 2 update fields and preserves other high-confidence values; if the human changed the queue item status away from the in-progress/session-owned state, write-back stops before final status update and reports a conflict for human review.
-- **Empty queue**: if no callable queue item exists for the configured campaign or explicit selector, the command exits as a clean no-op with an operator-visible "no callable queue item" result, creates no session, and writes no CRM records.
+- **Configured campaign not found**: if the configured campaign selector cannot be resolved in Dataverse, the run fails as a permanent configuration/readiness error before session creation, queue claim, mock call placement, attempt increment, or CRM write. This is not the FR-009 clean no-op path.
+- **Empty queue**: if the configured campaign exists but no callable queue item exists for that campaign or explicit selector, the command exits as a clean no-op with an operator-visible "no callable queue item" result, creates no session, and writes no CRM records.
 - **Multiple callable queue items**: a normal run must target one explicit queue item ID. If an explicit "next ready" selector is used, the selected item is deterministic: earliest `next_attempt_at`, then oldest CRM-created timestamp, then stable queue item ID as tie-breaker.
 - **Required Phone Call / Task field varies by environment**: a required field that the mapping does not cover is caught by metadata verification (Story 3), not discovered at write time.
 - **Non-E.164 / malformed phone number on the CRM record**: Slice 2 records a data-quality warning and continues (the mock transport does not dial); hard E.164 enforcement is deferred to Slice 3 real telephony.
+- **Structurally valid but semantically inconsistent fixture**: fixture pre-validation deliberately checks only FR-020 structural failures. A fixture whose events are out of timestamp order or semantically contradictory is allowed through so idempotency/conflict behavior can be tested; fixture semantic quality remains a test-authoring responsibility.
+- **Malformed redaction policy**: an invalid regex or malformed `[redaction]` configuration fails startup/readiness validation before transcript writing, session creation, queue claim, attempt increment, or CRM write.
 - **`preferred_callback_window` captured as a free-form phrase**: the phrase is preserved in the Dataverse Task text; Slice 2 does not parse it into a structured Dataverse due date.
 - **CRM queue item has no usable timezone**: the configured default timezone is applied and recorded in the eligibility decision, exactly as in Slice 1.
 - **Dry-run requested but write credentials are absent**: dry-run still runs and validates mapping; absence of write credentials is not an error in dry-run mode.
@@ -160,7 +165,7 @@ When the system writes a transcript artifact, the transcript text first passes t
 #### Dataverse metadata verification and CRM value safety
 
 - **FR-001**: Dataverse metadata MUST be established in two phases. (1) A one-time discovery step MUST inspect and record the live Dataverse metadata required for Slice 2 — the selected queue-item representation, Account, Contact (when present), Campaign (when present), Phone Call activity, Task, owner/team assignment, status values, DNC/opt-out fields, attempt counters, last disposition, last session ID, last error, and the idempotency-key field on the Phone Call activity and Task — and MUST produce or refresh the documented mapping artifact (FR-004). (2) Every write-enabled run MUST then perform lightweight live verification, as defined above, before any write.
-- **FR-002**: When a required Dataverse table, field, lookup, owner/team, idempotency-key field, or option-set value cannot be verified; when metadata drift is detected; when only part of the required metadata can be read; or when Dataverse is unreachable at run start, Slice 2 setup/readiness MUST fail before write-enabled processing and report the missing mapping or transient startup failure, without creating or updating any CRM record.
+- **FR-002**: When a required Dataverse table, field, lookup, configured campaign, owner/team, idempotency-key field, or option-set value cannot be verified; when metadata drift is detected; when only part of the required metadata can be read; or when Dataverse is unreachable at run start, Slice 2 setup/readiness MUST fail before write-enabled processing and report the missing mapping or transient startup failure, without creating or updating any CRM record.
 - **FR-003**: The system MUST leave non-empty high-confidence Dataverse values outside the approved Slice 2 update-field set unchanged, and those non-approved fields MUST be absent from the write-back payload. The adapter MAY read the current CRM row to enforce this preservation rule, but the read MUST be limited to mapped queue fields and fields listed in the mapping artifact as preserved.
 - **FR-004**: The recorded Dataverse field mapping (logical names, required fields, lookups, option-set values, the idempotency-key field, and approved update fields) MUST be captured as a documented Slice 2 mapping artifact.
 
@@ -168,7 +173,7 @@ When the system writes a transcript artifact, the transcript text first passes t
 
 - **FR-005**: The system MUST load Dataverse connection secrets from environment variables (or a secret manager) and MUST NOT write secrets to logs or exported artifacts.
 - **FR-006**: The system MUST read non-secret Dataverse mapping configuration (queue fields, status values, task owner mapping, run mode) from a configuration file.
-- **FR-007**: The system MUST run a startup/readiness validation that fails with a clear, operator-visible message when required Dataverse mappings or credentials are missing, invalid, or unreachable for the selected run mode.
+- **FR-007**: The system MUST run a startup/readiness validation that fails with a clear, operator-visible message when required Dataverse mappings, credentials, or redaction policy configuration are missing, invalid, or unreachable for the selected run mode.
 
 #### Dataverse queue intake
 
@@ -193,18 +198,18 @@ When the system writes a transcript artifact, the transcript text first passes t
 #### Mock transport hardening (GitHub issue #2)
 
 - **FR-019**: The mock call transport MUST validate the selected transport fixture during call placement, before the orchestrator mutates any session state, the Dataverse queue status, or the attempt count.
-- **FR-020**: When the selected transport fixture is invalid JSON, lacks an `events` array, or contains an event missing a required `type`, `event_id`, or `timestamp` field, the run MUST fail with an operator-visible error and MUST NOT create a session row, consume an attempt, or update the Dataverse queue item.
+- **FR-020**: When the selected transport fixture is invalid JSON, lacks an `events` array, or contains an event missing a required `type`, `event_id`, or `timestamp` field, the run MUST fail with an operator-visible error and MUST NOT create a session row, consume an attempt, or update the Dataverse queue item. Structurally valid but semantically inconsistent event sequences are not rejected by Slice 2 fixture pre-validation.
 
 #### Idempotency and error recovery
 
 - **FR-021**: Duplicate mock provider events, repeated CLI invocations for the same session, and write-back retries MUST NOT create duplicate Dataverse Phone Call activities, duplicate Tasks, duplicate queue-status transitions, or duplicate attempt-count increments. For write-enabled runs, the attempt count is incremented exactly once after eligibility allows the item, run-mode checks pass, metadata verification passes, and `place_call` succeeds with a pre-validated fixture and mock provider call ID; the Dataverse attempt field is updated idempotently as part of the queue-status write-back. Blocked eligibility, dry-run, metadata/readiness failure, Dataverse-unreachable-at-start, and malformed fixture failure MUST NOT increment the attempt count.
 - **FR-022**: A duplicate mock event (same event ID) for a CRM-backed session MUST be a no-op for both local session state and Dataverse write-back state.
-- **FR-023**: When a Dataverse write fails on a transient Dataverse error, the system MUST perform bounded in-run retries per write operation: the initial write attempt plus up to 3 retries, with 1s / 2s / 4s default backoff; if Dataverse returns `Retry-After`, that delay MAY replace the next delay but MUST be capped at 30s. Retries MUST reuse the existing idempotency key / CRM correlation identifier so no second Phone Call activity or Task is created. Permanent Dataverse errors MUST NOT be retried. When the in-run retry budget is exhausted, the run MUST exit with a resume-needed status and persist the correlation identifiers and write-back progress, so a later CLI re-invocation resumes only the missing CRM writes rather than re-running the whole item.
+- **FR-023**: When a Dataverse write fails on a transient Dataverse error, the system MUST perform bounded in-run retries per write operation: the initial write attempt plus up to 3 retries, with 1s / 2s / 4s default backoff; if Dataverse returns `Retry-After`, that delay MAY replace the next delay but MUST be capped at 30s. Retries MUST reuse the existing idempotency key / CRM correlation identifier so no second Phone Call activity or Task is created. Permanent Dataverse errors MUST NOT be retried. When the in-run retry budget is exhausted, the run MUST exit with a resume-needed status and persist the correlation identifiers and write-back progress, so a later CLI re-invocation resumes only the missing CRM writes rather than re-running the whole item. Persisted CRM correlation identifiers and write-back progress records MUST be retained for at least 90 days or until local audit-artifact retention expires, whichever is longer, unless deployment configuration sets a longer retention period.
 - **FR-024**: The system MUST stamp a stable idempotency key (the session ID, or a key deterministically derived from it) onto a metadata-verified Dataverse field of every Phone Call activity and Task it creates, and MUST pre-query Dataverse by that key before each create to detect an already-written record. The idempotency-key field MUST be a real Dataverse field verified by metadata discovery — not free text embedded in a description or note; when it cannot be verified, write-enabled processing MUST be blocked (per FR-002) until the schema/mapping is approved.
 
 #### Human follow-up task ownership
 
-- **FR-025**: The system MUST populate Dataverse callback and review Task ownership from a configured default-owner-per-task-kind mapping, unless the selected CRM queue item supplies an approved owner override.
+- **FR-025**: The system MUST populate Dataverse callback and review Task ownership from a configured default-owner-per-task-kind mapping, unless the selected CRM queue item supplies an approved owner override. An override is approved only when it meets the **Approved owner override** definition above; invalid overrides MUST NOT cause an unverified owner/team ID to be written.
 - **FR-026**: A review Task (final disposition `needs_human_review`) MUST be assigned to the configured review owner/team and MUST include the human-review reason code.
 - **FR-027**: A `do_not_call` disposition (or mid-call opt-out) MUST update the Dataverse DNC/opt-out and queue-status fields and MUST NOT create a callback or review Task.
 
@@ -223,6 +228,10 @@ When the system writes a transcript artifact, the transcript text first passes t
 #### Phone-number data quality
 
 - **FR-034**: When a Dataverse queue item carries a non-E.164 or otherwise malformed non-empty phone number, the system MUST record a data-quality warning in the local run report and planned/actual queue-status payload and continue processing; the warning MUST NOT change exit status by itself. A missing or blank phone number remains a blocked eligibility failure. Hard telephony-format (E.164) enforcement is deferred to Slice 3.
+
+#### Local audit retention
+
+- **FR-035**: Local audit artifacts MUST be retained for at least 90 days by default and MAY be configured for longer retention. Transcript retention remains controlled by FR-030 and may be summary-only; secrets MUST NOT be retained in any local audit artifact.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -256,6 +265,17 @@ When the system writes a transcript artifact, the transcript text first passes t
 - **SC-014**: When a forced transient Dataverse failure exhausts the 3-retry budget after one CRM write has already succeeded, a later CLI re-invocation completes only the missing writes and leaves Dynamics with exactly one copy of each required record.
 - **SC-015**: Write-enabled processing is blocked 100% of the time when the mapped idempotency-key field for Phone Call activity or Task cannot be verified as a real Dataverse field.
 
+### Requirement Coverage Notes
+
+- **FR-001–FR-004 and FR-024** are covered by User Story 3, SC-007, and SC-015.
+- **FR-005–FR-007** are covered by User Story 2 scenario 3, User Story 3 scenario 2, SC-002, and SC-007.
+- **FR-008–FR-011 and FR-034** are covered by User Story 1 scenario 5, the queue/phone edge cases, SC-001, and SC-008.
+- **FR-012–FR-014 and FR-019–FR-020** are covered by User Story 5, SC-006, SC-010, and SC-011.
+- **FR-015–FR-018 and FR-025–FR-027** are covered by User Story 1 scenarios 1–6, SC-003, SC-004, SC-008, and SC-012.
+- **FR-021–FR-023** are covered by User Story 4, SC-005, and SC-014.
+- **FR-028–FR-030** are covered by User Story 6 and SC-009.
+- **FR-031–FR-033 and FR-035** are covered by User Story 2, SC-002, SC-012, SC-013, and demo artifact inspection.
+
 ## Assumptions
 
 - **Slice scope**: Slice 2 explicitly excludes SignalWire, Pipecat / live audio, real-time model providers, real outbound traffic, custom product UI, campaign builder, custom task queue, CRM replacement, batch processing, scheduler, multi-worker locking, Redis / Celery / Kubernetes, generalized workflow engines, opportunity creation, automated sales qualification beyond task/write-back fields, and any multi-CRM abstraction. Dataverse is the only Slice 2 CRM target. These are deferred per the constitution and the OpenSpec change.
@@ -263,10 +283,12 @@ When the system writes a transcript artifact, the transcript text first passes t
 - **Single campaign, single item**: Slice 2 processes one queue item from one ALF campaign per run. Concurrent claims, batch processing, implicit multi-item selection, and multi-campaign handling are out of scope.
 - **Dataverse queue representation**: The exact table that represents the Slice 2 Call Queue Item (an existing custom table, a campaign/list record, or a new custom table) is determined during metadata discovery (FR-001) and recorded in the mapping artifact (FR-004); it is an implementation-discovery output, not a spec-level decision.
 - **Dataverse field logical names and option-set values**: The exact logical names and option-set values for queue status, DNC/opt-out, attempt count, max attempts, last disposition, last session ID, and last error are discovered and verified during metadata discovery; the requirement is verification-before-write, not a pre-named field list.
-- **Task ownership**: The specific Dynamics user or team that owns callback and review Tasks is deployment configuration (FR-025), not a spec decision. The spec requires owner assignment from configuration with an optional approved per-item override.
+- **Task ownership**: The specific Dynamics user or team that owns callback and review Tasks is deployment configuration (FR-025), not a spec decision. The spec requires owner assignment from configuration with an optional approved per-item override that resolves to an active enabled Dataverse user or team through a mapped, metadata-verified queue field.
 - **Non-E.164 phone numbers**: Slice 2 records a data-quality warning and continues, rather than hard-blocking, because the mock transport does not dial. Hard E.164 enforcement is mandatory before Slice 3 places a real call (per the MVP PRD).
 - **`preferred_callback_window`**: Slice 2 preserves the captured callback-window phrase as free-form text in the Dataverse Task description and does not parse it into a structured Dataverse due date; due-date population is deferred until a scheduling integration exists.
 - **Source of truth**: Dataverse is the source of truth for queue lifecycle (status, attempt count, DNC) in Slice 2. Local state is limited to session, audit, artifacts, and correlation identifiers.
+- **Compliance scope**: Slice 2 is a non-clinical ALF business-outreach demo that MUST NOT collect PHI or patient/resident health information. It is explicitly not a HIPAA-class patient-care or clinical workflow. If a deployment treats the CRM data as PHI or expands the workflow into patient-facing clinical use, a separate compliance and safety review is required before write-enabled operation.
+- **Local artifact retention**: Unless deployment configuration chooses a longer window, local audit artifacts and CRM correlation identifiers are retained for 90 days for demo inspection and recovery, while transcript files may still be disabled by summary-only retention.
 - **Demo posture**: The dry-run mode is the safe rehearsal and the default demo posture; the write-enabled demo runs against one dedicated test campaign and one dedicated test queue record, with documented manual cleanup/rollback for the demo record.
 - **GitHub issue #2**: The malformed-fixture pre-validation requirement (FR-019, FR-020) resolves GitHub issue #2; the issue is closed once that behavior is implemented and tested.
 - **Redaction default**: The transcript redaction layer is default-on for Slice 2 with a `[REDACTED]` replacement policy; it is configurable (including a no-op policy and summary-only retention) but MUST NOT be silently disabled.
