@@ -2,7 +2,7 @@
 
 Status: Draft
 
-Last updated: 2026-05-19
+Last updated: 2026-05-22
 
 ## Purpose
 
@@ -26,7 +26,7 @@ The smallest MVP build order is defined in [openCloser MVP](../prds/openCloser_M
 - Language/runtime: Python for API, worker, and voice runtime integration.
 - API framework: FastAPI.
 - Worker: simple async background worker process.
-- Voice runtime: Pipecat.
+- Voice runtime: scripted fixtures for Slices 1 and 2; Pipecat for Slice 3.
 - Mock call transport: used for Slices 1 and 2.
 - First production telephony transport: SignalWire.
 - First AI model path: OpenAI Realtime through the Pipecat pipeline.
@@ -98,8 +98,9 @@ The core must not contain hardcoded ALF, nurse, doctor, or sales logic.
 
 Transport adapters connect external media systems to the Interaction Core.
 
-Initial adapter:
+MVP adapters:
 
+- Mock call transport for Slices 1 and 2.
 - SignalWire PSTN/SIP outbound calling.
 
 Future adapters:
@@ -114,9 +115,13 @@ Transport adapters are responsible for provider-specific details such as call cr
 
 Runtime adapters execute the real-time conversation pipeline.
 
-Initial adapter:
+Initial live-call adapter:
 
 - Pipecat pipeline with provider-specific STT, LLM, TTS, or real-time model components.
+
+Slices 1 and 2 use scripted conversation fixtures instead of the live-call
+runtime so CRM integration can be validated before audio and model risk are
+introduced.
 
 Responsibilities:
 
@@ -359,6 +364,10 @@ The thin MVP is intentionally staged so CRM integration is proven before real te
 2. Mock call, real CRM.
 3. Real call, real CRM.
 
+Slice 2 is a Dataverse substitution slice only: the queue source and CRM
+write-back target become real, while the call transport and persona execution
+remain fixture-driven. SignalWire and Pipecat live audio enter in Slice 3.
+
 The sequence below represents the final Slice 3 path.
 
 ```mermaid
@@ -396,6 +405,11 @@ sequenceDiagram
 
 Use standard tables where possible and custom Dataverse tables where the standard model is too restrictive.
 
+Slice 2 MUST verify live Dataverse metadata before write-enabled processing.
+The implementation should document logical names, required fields, lookup
+targets, option-set values, and approved update fields for the selected queue
+representation before adding schema or updating records.
+
 Recommended initial mapping:
 
 - Account: facility or organization being called.
@@ -431,9 +445,15 @@ Recommended fields:
 - Always update queue item status after an attempt or block.
 - Create a Phone Call activity for connected calls.
 - Create a Task for callback requests and human-review outcomes.
+- Assign callback and review Tasks from the configured owner/team mapping unless
+  an approved queue-item owner override is present.
 - Update email only when the AI verifies or captures an email with sufficient confidence.
 - Update Account notes only for durable facts, not speculative summary text.
 - Create Opportunities only through explicit campaign qualification policy.
+
+The Dataverse adapter owns field-name translation and CRM-required lookup
+population. The Interaction Core continues to speak in normalized payloads and
+MUST NOT depend on Dataverse logical names.
 
 ## API Surface
 
@@ -456,11 +476,16 @@ Internal API or service methods:
 
 Provider webhooks must be authenticated where supported and deduplicated by provider event ID or derived idempotency key.
 
+Slice 2 does not require the SignalWire webhook endpoints for the demo path.
+Its external dependency is Dataverse Web API access for one queue item, Phone
+Call activity, Task, and queue-status update.
+
 ## Configuration
 
 Configuration should support:
 
 - CRM connection details.
+- Dataverse table, field, lookup, status, and owner/team mappings.
 - SignalWire project, space, token, and phone number.
 - AI provider credentials.
 - Campaign to persona mapping.
@@ -631,7 +656,7 @@ Doctor avatar rendering should be treated as a client and media-layer concern. T
 4. Build persona schema and ALF outreach persona.
 5. Build write-back job model with idempotency.
 6. Prove Slice 1 with mock call plus mock CRM.
-7. Add Dataverse queue and write-back adapter.
+7. Add Dataverse metadata discovery, queue intake, and write-back adapter.
 8. Prove Slice 2 with mock call plus real CRM.
 9. Add SignalWire outbound dialing and status callbacks.
 10. Add Pipecat runtime integration.
@@ -641,8 +666,10 @@ Doctor avatar rendering should be treated as a client and media-layer concern. T
 
 ## Open Architecture Decisions
 
-- Whether to store queue state primarily in Dataverse, PostgreSQL, or both.
-- Whether transcript storage should default to CRM, object storage, or summary-only.
+- Whether app-side session/audit state should stay SQLite through Slice 2 or move
+  to PostgreSQL before pilot.
+- Whether Slice 2 transcript storage should remain local pointer/summary-only or
+  write pointers to CRM notes.
 - Whether LiveKit should be the default app voice/video transport.
 - Whether persona schemas should be YAML, Python classes, database records, or a hybrid.
 - Whether the first dev console should be read-only monitoring or include campaign controls.

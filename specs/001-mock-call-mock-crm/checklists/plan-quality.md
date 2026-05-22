@@ -41,7 +41,7 @@
 
 ## Forward Compatibility
 
-- [x] CHK023 - Does the plan explicitly state which Slice 2 substitutions will hit which Slice 1 boundaries (SignalWire → transport.md contract; Dataverse → crm-writeback.md contract; real persona → persona.md contract)? [Forward-compat, Plan §Out-of-Scope + Contracts]
+- [x] CHK023 - Does the plan explicitly state which later-slice substitutions will hit which Slice 1 boundaries (Dataverse → crm-writeback.md contract in Slice 2; SignalWire → transport.md contract and real persona → persona.md contract in Slice 3+)? [Forward-compat, Plan §Out-of-Scope + Contracts]
 - [x] CHK024 - Is SC-008's "Slice 1-time verification" approach specified (interface review at plan time, not runtime check) and documented as such? [Forward-compat, Plan §Complexity Tracking + Spec §SC-008]
 
 ## Gaps & Carry-overs

@@ -165,7 +165,7 @@ The next command (`/speckit.tasks`) will derive an ordered task list from this p
 |---|---|---|
 | Multi-module coordination | Low — Slice 1 is single-record, single-process, no concurrency | Orchestrator is straightforward sequential code |
 | Idempotency correctness | Medium — FR-019/FR-020/FR-021 interaction has known sharp edges | Clarifications session locked the precedence; idempotency-key composition is pinned in FR-019; unit tests cover every duplicate/conflict path enumerated in Story 3 |
-| Future-slice forward-compat (SC-008) | Medium — must demonstrate without Slice 2 code | Contracts in `contracts/*.md` are language-neutral and reviewed against the future Dataverse / SignalWire intended methods; reviewed at Slice 2 plan time |
+| Future-slice forward-compat (SC-008) | Medium — must demonstrate without later-slice code | Contracts in `contracts/*.md` are language-neutral and reviewed against the future Dataverse / SignalWire intended methods; Dataverse is reviewed first in Slice 2 planning, and SignalWire is reviewed again before Slice 3 |
 | Persona determinism | Low — Slice 1 is scripted only | No randomization, no clock dependency in persona; deterministic precedence rules per FR-036 |
 | Cross-platform artifact readability | Low — pinned to UTF-8 / LF / no BOM / ISO 8601 UTC | Codified in `artifacts/writer.py` |
 
@@ -175,10 +175,10 @@ No constitutional gate violations to justify.
 
 These are not Slice 1 deliverables; they are recorded here so the Slice 2 plan can pick them up cleanly.
 
-- **Transcript `RedactionLayer`**: A new module on the transcript pipeline that runs before disk-write. Default policy: regex + named-entity strip on the PHI keyword set enumerated in FR-010, replaced with `[REDACTED]`. OFF in Slice 1 (no real conversation); ON by default in Slice 2 once real persona output may contain incidental PHI. Per-deployment configurable. Tracked as a Slice 2 backlog item.
-- **E.164 phone validation**: Slice 1 accepts "non-null + non-empty after trim" for FR-004(a); Slice 2 tightens to E.164 format validation when real telephony arrives (SignalWire mandates it).
-- **Weekday-aware call window**: Slice 1 applies the configured window all 7 days; Slice 2 may add weekday filtering via configuration.
-- **`preferred_callback_window` structured parsing**: Slice 1 stores the field verbatim as a free-form string; Slice 2 (scheduling integration) parses to a structured timestamp range.
+- **Transcript `RedactionLayer`**: A new module on the transcript pipeline that runs before disk-write. Default policy: regex + named-entity strip on the PHI keyword set enumerated in FR-010, replaced with `[REDACTED]`. OFF in Slice 1; ON by default in Slice 2 because real CRM data and real business contacts may appear in demo artifacts. Per-deployment configurable.
+- **E.164 phone validation**: Slice 1 accepts "non-null + non-empty after trim" for FR-004(a). Slice 2 may record phone-format data quality warnings from CRM, but hard E.164 blocking belongs before Slice 3 real telephony because SignalWire mandates it.
+- **Weekday-aware call window**: Slice 1 applies the configured window all 7 days; a later slice may add weekday filtering via configuration if CRM campaign policy requires it.
+- **`preferred_callback_window` structured parsing**: Slice 1 stores the field verbatim as a free-form string. Slice 2 should preserve that value in CRM Task text and may set a due date only when parseable; full scheduling integration remains later.
 
 ## Out-of-Scope (Explicit, for reviewer reassurance)
 

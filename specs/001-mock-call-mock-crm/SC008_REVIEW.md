@@ -8,7 +8,7 @@
 
 SC-008 mandates: "The mock CRM adapter's payload shapes and method surface are reused unchanged by the planned Slice 2 work, demonstrating that the conceptual contract held when swapping the mock CRM adapter for the real Dataverse adapter (forward-looking criterion verified at Slice 2 plan time)."
 
-This document is the Slice 1-time review of the conceptual contracts in `contracts/*.md`, evaluating each against the *intended* shape of the Slice 2 substitutions (real SignalWire transport + real Dataverse CRM + real persona runtime). Verification is name-only-vs-shape-only at this stage; the runtime check lands when Slice 2 actually arrives.
+This document is the Slice 1-time review of the conceptual contracts in `contracts/*.md`, evaluating each against the *intended* shape of later substitutions. Dataverse is the Slice 2 substitution; SignalWire and the real persona runtime are Slice 3+ substitutions. Verification is name-only-vs-shape-only at this stage; runtime checks land in the slice that introduces each real adapter.
 
 ## Methodology
 
@@ -26,11 +26,11 @@ For each Slice 2 substitution, walk the corresponding `contracts/*.md`'s **Publi
 | `place_call(queue_item, fixture_id) -> mock_provider_call_id` | sync fn returns string | `place_call(queue_item, dial_plan) -> provider_call_id` | **Name-only change** (fixture_id → dial_plan; mock_provider_call_id → provider_call_id) |
 | `event_stream(call_id) -> Iterator[MockCallEvent]` | sync generator over JSON fixture | same; backed by SignalWire webhook handler | **Name-only change** (MockCallEvent → CallEvent) |
 | `MockCallEvent` fields: `(session_id, event_id, event_type, received_at, payload)` — **5 fields** (authoritative: runtime `src/opencloser/models.py`) | fixed | Same field set; `payload` may add `provider_raw` sub-key | **Shape-stable** — Slice 2's `provider_raw` is additive |
-| Event types `{connected, no_answer, voicemail, failed, completed, callback_requested}` | enum | SignalWire produces a superset; Slice 2 maps to this enum at the transport boundary | **Shape-stable** — translation happens inside the adapter |
+| Event types `{connected, no_answer, voicemail, failed, completed, callback_requested}` | enum | SignalWire produces a superset; Slice 3 maps to this enum at the transport boundary | **Shape-stable** — translation happens inside the adapter |
 
-**Verdict**: ✅ The transport contract is forward-compatible. Slice 2 maps SignalWire webhooks into `MockCallEvent` shape; consumer code (orchestrator) needs no changes.
+**Verdict**: ✅ The transport contract is forward-compatible. Slice 2 continues to use the mock transport while the Dataverse adapter becomes real. Slice 3 maps SignalWire webhooks into `MockCallEvent` / `CallEvent` shape; consumer code (orchestrator) needs no changes.
 
-> **Doc-drift note (Slice 1 cleanup)**: the runtime `MockCallEvent` model (`src/opencloser/models.py`) carries **5 fields** — `session_id, event_id, event_type, received_at, payload`. The `contracts/transport.md` Public Surface still shows the pre-implementation 4-field sketch (`event_id, type, timestamp, payload`). This is a stale-doc discrepancy, not a shape regression — the table row above uses the authoritative runtime field set. `contracts/transport.md` should be reconciled to the 5-field runtime model at Slice 2 plan time.
+> **Doc-drift note (reconciled)**: the runtime `MockCallEvent` model (`src/opencloser/models.py`) carries **5 fields** — `session_id, event_id, event_type, received_at, payload`. `contracts/transport.md` now documents the same 5-field shape, so the remaining Slice 2 planning work is fixture validation and Dataverse integration rather than transport contract repair.
 
 ### 2. Mock CRM Write-back → Dataverse (per [contracts/crm-writeback.md](./contracts/crm-writeback.md))
 

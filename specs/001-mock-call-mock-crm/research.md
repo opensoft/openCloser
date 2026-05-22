@@ -13,7 +13,7 @@ Each decision below resolves an item from spec.md's `## Deferred to Implementati
 **Decision**: Python 3.12+ (target `>=3.12,<3.14`).
 
 **Rationale**:
-- The broader openCloser stack converges on Python: Pipecat (Slice 2+), SignalWire's Python SDK is first-class, healthcare-AI and NLP libraries are dominantly Python, future LLM integration is straightforward.
+- The broader openCloser stack converges on Python: Dataverse integration in Slice 2 and Pipecat / SignalWire in Slice 3 fit the same runtime, healthcare-AI and NLP libraries are dominantly Python, future LLM integration is straightforward.
 - Slice 1 needs SQLite + JSON + a CLI + scripted-state-machine persona — Python's stdlib covers most of this directly.
 - Python 3.12 gives `tomllib` (stdlib TOML reader), `datetime` with full UTC support, and improved type-narrowing for Pydantic-style validation. 3.13 is supported as well; 3.14 is too new to require.
 - Single-language repo simplifies the future Pipecat / SignalWire integration boundary.
@@ -295,7 +295,7 @@ Duplicate-event scenarios repeat the same `event_id`; conflicting-late-event sce
 
 **Decision**: no observability infrastructure beyond exported artifacts and CLI output in Slice 1; SC-001's 60-second budget is measured by the CLI emitting `wall_time_ms` in its final summary line.
 
-**Rationale**: spec.md is light on observability requirements beyond FR-023 / FR-027; that's intentional for Slice 1. Real logging / metrics / tracing land in Slice 2 alongside the real transport. The CLI's wall-time line is the minimal SC-001 instrumentation.
+**Rationale**: spec.md is light on observability requirements beyond FR-023 / FR-027; that's intentional for Slice 1. Real logging / metrics / tracing expand in Slice 2 alongside the real CRM adapter and again in Slice 3 alongside real transport. The CLI's wall-time line is the minimal SC-001 instrumentation.
 
 **Alternatives considered**: structured logging (`structlog`) — useful but premature for Slice 1.
 
