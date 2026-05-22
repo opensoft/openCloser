@@ -16,6 +16,13 @@ outreach. Read these project docs before creating or implementing specs:
 
 Spec Kit lives under `.specify/`. Feature work uses linked git worktrees.
 
+## OpenSpec/Speckit Bench Runtime
+
+Run OpenSpec and Speckit shell commands from the `py-bench` container when it is
+available. In that bench, the root checkout is
+`/workspace/projects/openCloser` and linked feature worktrees live under
+`/workspace/projects/openCloser-worktrees`.
+
 <!-- OPENSPEC-SPECKIT-GLOBAL:START -->
 ## Shared OpenSpec/Speckit Protocol
 
