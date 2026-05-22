@@ -1,10 +1,13 @@
 ---
 name: "speckit-checklist"
 description: "Generate a custom checklist for the current feature based on user requirements."
+argument-hint: "Domain or focus area for the checklist"
 compatibility: "Requires spec-kit project structure with .specify/ directory"
 metadata:
   author: "github-spec-kit"
   source: "templates/commands/checklist.md"
+user-invocable: true
+disable-model-invocation: false
 ---
 
 
@@ -37,6 +40,18 @@ $ARGUMENTS
 
 You **MUST** consider the user input before proceeding (if not empty).
 
+## No-Argument Default: Maximum Coverage Mode
+
+If `$ARGUMENTS` is empty or whitespace-only, the user is explicitly requesting the **broadest and deepest possible** checklist coverage. In this mode:
+
+- **Skip the clarifying-questions step (Step 2) entirely.** A no-argument invocation IS the instruction: generate everything, at maximum rigor. Do NOT ask scope/depth/audience questions and do NOT wait for answers.
+- **Widest coverage.** Do not cluster down to the top 2–4 focus areas. Instead, enumerate EVERY requirement-quality domain the feature touches by scanning `spec.md`, `plan.md`, and `tasks.md`, and generate a separate checklist file for each applicable domain. At minimum consider: `ux`, `api`, `data-model`, `security`, `performance`, `accessibility`, `error-handling`/resilience, `observability`, `integration`/contracts, `configuration`, `idempotency`, `testing-strategy`, `deployment`/rollback — plus any domain-specific area surfaced by the feature itself. Skip only domains that are genuinely inapplicable, and record which were skipped and why in the final report.
+- **Deepest rigor.** Treat the depth level as a formal **release gate**, not a lightweight sanity list. Lift the 40-item soft cap: include every distinct requirement-quality concern rather than pruning to a budget. Cover all five scenario classes (Primary, Alternate, Exception/Error, Recovery, Non-Functional) for every domain, and include resilience/rollback items wherever state mutation occurs.
+- **Cross-cutting checklist.** In addition to the per-domain files, generate (or append to) a `requirements.md` covering the cross-cutting dimensions: Completeness, Clarity, Consistency, Acceptance Criteria Quality, Dependencies & Assumptions, and Ambiguities & Conflicts.
+- All other rules in this skill (the "Unit Tests for English" principle, item phrasing, traceability, file handling, templates) still apply unchanged to every generated file.
+
+When `$ARGUMENTS` is non-empty, proceed normally: the named domain/focus scopes the run, and Step 2's clarifying questions apply as written.
+
 ## Pre-Execution Checks
 
 **Check for extension hooks (before checklist generation)**:
@@ -47,6 +62,7 @@ You **MUST** consider the user input before proceeding (if not empty).
 - For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
   - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
   - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
+- When constructing slash commands from hook command names, replace dots (`.`) with hyphens (`-`). For example, `speckit.git.commit` → `/speckit-git-commit`.
 - For each executable hook, output the following based on its `optional` flag:
   - **Optional hook** (`optional: true`):
     ```
@@ -77,7 +93,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - All file paths must be absolute.
    - For single quotes in args like "I'm Groot", use escape syntax: e.g 'I'\''m Groot' (or double-quote if possible: "I'm Groot").
 
-2. **Clarify intent (dynamic)**: Derive up to THREE initial contextual clarifying questions (no pre-baked catalog). They MUST:
+2. **Clarify intent (dynamic)**: *(Skipped entirely when `$ARGUMENTS` is empty — see "No-Argument Default: Maximum Coverage Mode" above.)* Derive up to THREE initial contextual clarifying questions (no pre-baked catalog). They MUST:
    - Be generated from the user's phrasing + extracted signals from spec/plan/tasks
    - Only ask about information that materially changes checklist content
    - Be skipped individually if already unambiguous in `$ARGUMENTS`
@@ -252,7 +268,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Actor/timing
    - Any explicit user-specified must-have items incorporated
 
-**Important**: Each `/speckit-checklist` command invocation uses a short, descriptive checklist filename and either creates a new file or appends to an existing one. This allows:
+**Important**: Each `/speckit.checklist` command invocation uses a short, descriptive checklist filename and either creates a new file or appends to an existing one. This allows:
 
 - Multiple checklists of different types (e.g., `ux.md`, `test.md`, `security.md`)
 - Simple, memorable filenames that indicate checklist purpose
@@ -344,6 +360,7 @@ Check if `.specify/extensions.yml` exists in the project root.
 - For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
   - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
   - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
+- When constructing slash commands from hook command names, replace dots (`.`) with hyphens (`-`). For example, `speckit.git.commit` → `/speckit-git-commit`.
 - For each executable hook, output the following based on its `optional` flag:
   - **Optional hook** (`optional: true`):
     ```
