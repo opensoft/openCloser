@@ -50,10 +50,10 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 - [X] T010 Create `src/opencloser/crm/dataverse/auth.py` — OAuth2 client-credentials token acquisition via `httpx` with in-process token caching (research.md §2)
 - [X] T011 Create `src/opencloser/crm/dataverse/client.py` — `DataverseClient` (httpx Web API client) with bounded transient retry: initial attempt + 3 retries, 1s/2s/4s backoff, `Retry-After` capped at 30s (FR-023)
 - [X] T012 [P] Create `src/opencloser/crm/dataverse/mapping.py` — `DataverseMapping` loader for `config/dataverse_mapping.json` plus conceptual-field → Dataverse-field translation (data-model.md §2)
-- [ ] T013 Create `src/opencloser/crm/dataverse/metadata.py` — `discover()` and read-only `verify()` per contracts/metadata-discovery-verification.md
-- [ ] T014 Create `src/opencloser/crm/dataverse/queue_loader.py` — `DataverseQueueLoader.load(selector)` mapping a Dataverse row → the unchanged `QueueItem` contract, including translating the Dataverse status so the reused eligibility evaluator records a blocked result for an item not in the configured callable status (FR-011); deterministic next-ready ordering; empty queue → `None` (FR-008, FR-011, contracts/dataverse-queue-loader.md)
-- [ ] T015 [P] Create the in-process Dataverse fake for tests in `tests/fixtures/dataverse/fake.py` — metadata, queue GET, activity/Task POST, queue PATCH, idempotency pre-query, and injectable transient/permanent failures (research.md §10)
-- [ ] T016 [P] Unit tests for foundational modules in `tests/unit/` — `test_dataverse_errors.py`, `test_dataverse_mapping.py`, `test_dataverse_client_retry.py`, `test_slice2_config.py`
+- [X] T013 Create `src/opencloser/crm/dataverse/metadata.py` — `discover()` and read-only `verify()` per contracts/metadata-discovery-verification.md
+- [X] T014 Create `src/opencloser/crm/dataverse/queue_loader.py` — `DataverseQueueLoader.load(selector)` mapping a Dataverse row → the unchanged `QueueItem` contract, including translating the Dataverse status so the reused eligibility evaluator records a blocked result for an item not in the configured callable status (FR-011); deterministic next-ready ordering; empty queue → `None` (FR-008, FR-011, contracts/dataverse-queue-loader.md)
+- [X] T015 [P] Create the in-process Dataverse fake for tests in `tests/fixtures/dataverse/fake.py` — metadata, queue GET, activity/Task POST, queue PATCH, idempotency pre-query, and injectable transient/permanent failures (research.md §10)
+- [X] T016 [P] Unit tests for foundational modules in `tests/unit/` — `test_dataverse_errors.py`, `test_dataverse_mapping.py`, `test_dataverse_client_retry.py`, `test_slice2_config.py`
 
 **Checkpoint**: Foundation ready — user-story implementation can begin.
 
