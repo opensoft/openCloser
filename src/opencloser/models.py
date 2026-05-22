@@ -213,6 +213,16 @@ _ALLOWED_PAYLOAD_KEYS: dict[EventType, frozenset[str]] = {
     EventType.CALLBACK_REQUESTED: frozenset({"window_hint"}),
 }
 
+# Q15 — expected value type for each known payload key. Once unknown keys are
+# stripped, retained values are checked so a malformed fixture (a non-int voicemail
+# length, an unrecognised failure_reason) fails validation rather than being
+# persisted/exported as valid. A StrEnum entry validates enum membership.
+_PAYLOAD_KEY_TYPES: dict[str, type] = {
+    "voicemail_length_seconds": int,
+    "failure_reason": FailureReason,
+    "window_hint": str,
+}
+
 
 class MockCallEvent(BaseModel):
     """FR-006 + Clarifications Round 2 Q15 — one transport-emitted event."""
@@ -227,9 +237,26 @@ class MockCallEvent(BaseModel):
 
     @model_validator(mode="after")
     def _allowlist_payload_keys(self) -> MockCallEvent:
-        """FR-024 + Q15 — retain only the payload keys this event type is defined to carry."""
+        """FR-024 + Q15 — retain only the payload keys this event type is defined to
+        carry, and reject any retained value whose type does not match the schema."""
         allowed = _ALLOWED_PAYLOAD_KEYS.get(self.event_type, frozenset())
         filtered = {k: v for k, v in self.payload.items() if k in allowed}
+        for key, value in filtered.items():
+            expected = _PAYLOAD_KEY_TYPES.get(key)
+            # `None` is an allowed "not provided" marker for any key; a present
+            # non-null value must match the schema type / enum.
+            if expected is None or value is None:
+                continue
+            if issubclass(expected, StrEnum):
+                allowed_values = sorted(m.value for m in expected)
+                if value not in allowed_values:
+                    raise ValueError(
+                        f"payload key {key!r} must be one of {allowed_values}, got {value!r}"
+                    )
+            elif not isinstance(value, expected):
+                raise ValueError(
+                    f"payload key {key!r} must be {expected.__name__}, got {type(value).__name__}"
+                )
         if len(filtered) != len(self.payload):
             self.payload = filtered
         return self

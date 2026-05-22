@@ -323,10 +323,12 @@ def _was_email_read_back_and_confirmed(candidate: str, turns: Sequence[Conversat
     if read_back_idx is None:
         return False
     confirmations = ("yes", "that's right", "that is right", "correct", "yep", "yeah")
-    return any(
-        turn.role == "contact" and _contains_word(turn.text.lower(), confirmations)
-        for turn in turns[read_back_idx + 1 :]
-    )
+    for turn in turns[read_back_idx + 1 :]:
+        if turn.role == "contact":
+            # Only the contact's DIRECT response to the read-back counts — a later
+            # "yes" to an unrelated question must not verify the address.
+            return _contains_word(turn.text.lower(), confirmations)
+    return False
 
 
 def _extract_refusal_topics(contact_turns: Sequence[ConversationTurn]) -> list[RefusalTopic]:

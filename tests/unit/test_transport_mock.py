@@ -57,6 +57,24 @@ def test_place_call_rejects_path_traversal_fixture_id(tmp_path: Path, bad_id: st
         transport.place_call(_qi(), bad_id)
 
 
+def test_event_stream_rejects_event_missing_required_keys(tmp_path: Path) -> None:
+    """An event missing type/event_id/timestamp raises ValueError, not a bare KeyError."""
+    _write_fixture(tmp_path, "bad", [{"type": "connected"}])  # missing event_id + timestamp
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "bad")
+    with pytest.raises(ValueError, match="malformed event"):
+        list(transport.event_stream(call_id))
+
+
+def test_event_stream_rejects_fixture_without_events_array(tmp_path: Path) -> None:
+    """A fixture JSON with no 'events' key raises ValueError, not a silent empty stream."""
+    (tmp_path / "noevents.json").write_text('{"fixture_id": "noevents"}', encoding="utf-8")
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "noevents")
+    with pytest.raises(ValueError, match="events"):
+        list(transport.event_stream(call_id))
+
+
 def test_event_stream_yields_events_in_fixture_order(tmp_path: Path) -> None:
     _write_fixture(
         tmp_path,

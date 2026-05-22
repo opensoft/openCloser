@@ -160,7 +160,15 @@ def run_one(
 
 def _load_conversation_fixture(path: Path) -> ConversationFixture:
     raw = json.loads(path.read_text(encoding="utf-8"))
-    turns = [ConversationTurn(role=t["role"], text=t["text"]) for t in raw.get("turns", [])]
+    if not isinstance(raw, dict):
+        raise ValueError(f"conversation fixture {path.name!r} is not a JSON object")
+    turns: list[ConversationTurn] = []
+    for t in raw.get("turns", []):
+        if not isinstance(t, dict) or "role" not in t or "text" not in t:
+            raise ValueError(
+                f"conversation fixture {path.name!r}: every turn needs 'role' and 'text'"
+            )
+        turns.append(ConversationTurn(role=t["role"], text=t["text"]))
     return ConversationFixture(
         fixture_id=raw.get("fixture_id", path.stem),
         expected_disposition=raw.get("expected_disposition", ""),

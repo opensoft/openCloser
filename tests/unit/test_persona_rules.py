@@ -375,6 +375,21 @@ def test_capture_callback_window_handles_time_before_day() -> None:
     assert "Thursday" in extraction.preferred_callback_window
 
 
+def test_extract_email_not_verified_by_unrelated_later_yes() -> None:
+    """Only the contact's DIRECT response to the read-back verifies the email — a
+    'yes' answering a later, unrelated question does not."""
+    turns = [
+        ConversationTurn(role="contact", text="My email is alice@example.com."),
+        ConversationTurn(role="persona", text="Got it — alice@example.com, correct?"),
+        ConversationTurn(role="contact", text="Actually, let me check on that."),
+        ConversationTurn(role="persona", text="Sure. Are you the decision-maker?"),
+        ConversationTurn(role="contact", text="Yes, I am."),
+    ]
+    extraction = extract_from_turns(turns)
+    assert extraction.captured_email is None
+    assert extraction.captured_email_unverified == "alice@example.com"
+
+
 def test_decide_disposition_rule_priority() -> None:
     """DNC (rule 1) beats wrong-number (rule 2) if both somehow appear."""
     from opencloser.models import IntentClassification, RoleConfidence

@@ -76,18 +76,17 @@ _ALLOWED: dict[str, set[str]] = {
 #   - `cli.py`    — the operator entrypoint; it composes the concrete implementations
 #                   of every boundary by design (that is its job, per FR-025).
 #   - `models.py` — the shared Pydantic layer that every boundary is allowed to import.
+#   - `__init__.py` — the `opencloser` package root; it carries no cross-boundary imports.
 # The exemption is explicit (not a silent `group is None` skip): any NEW top-level
 # file will fail `test_dependency_directions_respect_contracts` until a reviewer
 # either adds it here with a rationale or moves it into a boundary package.
-_TOP_LEVEL_EXEMPT: set[str] = {"cli.py", "models.py"}
+_TOP_LEVEL_EXEMPT: set[str] = {"cli.py", "models.py", "__init__.py"}
 
 
 def _python_files(root: Path) -> Iterable[Path]:
-    for p in root.rglob("*.py"):
-        if p.name == "__init__.py":
-            # Allow flexible re-exports in package roots; they typically just import for typing.
-            continue
-        yield p
+    # `__init__.py` files are NOT skipped — a forbidden cross-boundary import must not
+    # be able to hide in a package root (SC-009).
+    yield from root.rglob("*.py")
 
 
 def _module_group(rel_path: Path) -> str | None:
@@ -115,6 +114,12 @@ def _collect_imports(tree: ast.AST) -> tuple[set[str], list[int]]:
         elif isinstance(node, ast.ImportFrom):
             if node.level > 0:
                 relative_lines.append(node.lineno)
+            elif node.module == "opencloser":
+                # `from opencloser import X` — X names a submodule; expand to
+                # `opencloser.X` so the boundary check sees it (bare "opencloser"
+                # would otherwise slip past the `opencloser.` prefix filter).
+                for alias in node.names:
+                    names.add(f"opencloser.{alias.name}")
             elif node.module:
                 names.add(node.module)
     return names, relative_lines
@@ -134,20 +139,30 @@ def test_dependency_directions_respect_contracts() -> None:
             )
             continue
         if group not in _ALLOWED:
+            violations.append(
+                f"{rel}: unknown boundary group {group!r} — add it to _ALLOWED with its "
+                f"dependency rules, or move the file into an existing boundary package"
+            )
             continue
         allowed = _ALLOWED[group]
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imported, relative_lines = _collect_imports(tree)
         for lineno in relative_lines:
             violations.append(
-                f"{path.relative_to(_SRC)}:{lineno}: relative import bypasses the "
-                f"dependency-direction gate — use an absolute `opencloser.*` import"
+                f"{rel}:{lineno}: relative import bypasses the dependency-direction "
+                f"gate — use an absolute `opencloser.*` import"
             )
         for imp in imported:
+            if imp == "opencloser":
+                violations.append(
+                    f"{rel}: bare `import opencloser` — import the specific submodule so "
+                    f"the dependency-direction gate can see what is used"
+                )
+                continue
             if not imp.startswith("opencloser."):
                 continue  # stdlib + third-party are unrestricted
             if not any(imp == ok or imp.startswith(ok + ".") for ok in allowed):
-                violations.append(f"{path.relative_to(_SRC)}: imports {imp} (group={group})")
+                violations.append(f"{rel}: imports {imp} (group={group})")
     assert not violations, "Dependency-direction violations:\n" + "\n".join(violations)
 
 

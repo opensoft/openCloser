@@ -15,6 +15,7 @@ from opencloser.models import (
     Extraction,
     HumanReviewReason,
     IntentClassification,
+    MockCallEvent,
     NormalizedResult,
     QueueItem,
     QueueStatusUpdatePayload,
@@ -41,6 +42,26 @@ def test_call_window_config_rejects_out_of_range_time() -> None:
         CallWindowConfig(start="99:99", end="20:00")
     with pytest.raises(ValidationError, match="not a valid HH:MM time"):
         CallWindowConfig(start="09:00", end="08:60")
+
+
+def test_mock_call_event_rejects_bad_payload_value_types() -> None:
+    """Q15 — a payload value with the wrong type or an unknown enum value is rejected."""
+    with pytest.raises(ValidationError, match="voicemail_length_seconds"):
+        MockCallEvent(
+            session_id="s",
+            event_id="e",
+            event_type=EventType.VOICEMAIL,
+            received_at=_T,
+            payload={"voicemail_length_seconds": "abc"},
+        )
+    with pytest.raises(ValidationError, match="failure_reason"):
+        MockCallEvent(
+            session_id="s",
+            event_id="e",
+            event_type=EventType.FAILED,
+            received_at=_T,
+            payload={"failure_reason": "bogus"},
+        )
 
 
 # -- Round-trip ---------------------------------------------------------------

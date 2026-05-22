@@ -240,6 +240,30 @@ def test_cli_run_one_missing_transport_fixture_path_exits_2(tmp_path: Path) -> N
     assert "not found" in out.lower()
 
 
+def test_cli_run_one_malformed_conversation_fixture_exits_2(tmp_path: Path) -> None:
+    """A conversation fixture whose turn is missing 'role'/'text' surfaces a clean
+    error + exit code 2, not an uncaught KeyError traceback."""
+    config_path = _write_config(tmp_path)
+    bad = tmp_path / "bad_conv.json"
+    bad.write_text('{"turns": [{"role": "contact"}]}', encoding="utf-8")
+    run = _runner.invoke(
+        app,
+        [
+            "run-one",
+            "--queue-item-id",
+            "alf-prospect-001",
+            "--conversation-fixture",
+            str(bad),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "error:" in out
+    assert "turn" in out.lower()
+
+
 def test_cli_no_args_shows_help() -> None:
     """`no_args_is_help=True`: invoking the app with no subcommand prints help."""
     result = _runner.invoke(app, [])

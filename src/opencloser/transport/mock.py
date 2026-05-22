@@ -17,6 +17,9 @@ from opencloser.models import EventType, MockCallEvent, QueueItem
 
 logger = logging.getLogger(__name__)
 
+# Every transport fixture event object must carry these keys (FR-006 / Q15).
+_REQUIRED_EVENT_KEYS = frozenset({"type", "event_id", "timestamp"})
+
 
 class FixtureDrivenTransport:
     """Stateless transport that yields a fixture's events in order."""
@@ -61,7 +64,16 @@ class FixtureDrivenTransport:
         if fixture_path is None:
             raise ValueError(f"No fixture pending for {mock_provider_call_id!r}")
         data = json.loads(fixture_path.read_text(encoding="utf-8"))
-        for raw_event in data.get("events", []):
+        if not isinstance(data, dict) or "events" not in data:
+            raise ValueError(
+                f"transport fixture {fixture_path.name!r} is not a JSON object with an 'events' array"
+            )
+        for raw_event in data["events"]:
+            if not (isinstance(raw_event, dict) and raw_event.keys() >= _REQUIRED_EVENT_KEYS):
+                raise ValueError(
+                    f"transport fixture {fixture_path.name!r}: malformed event — each event "
+                    f"needs 'type', 'event_id', and 'timestamp'"
+                )
             event_type_str = raw_event["type"]
             try:
                 event_type = EventType(event_type_str)
