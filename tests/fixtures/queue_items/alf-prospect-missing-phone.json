@@ -1,0 +1,12 @@
+{
+  "queue_item_id": "alf-prospect-missing-phone",
+  "facility_name": "Riverside ALF",
+  "phone_number": null,
+  "timezone": "America/Los_Angeles",
+  "default_tz_applied": false,
+  "email": null,
+  "attempt_count": 0,
+  "dnc_flag": false,
+  "callable_status": "ready",
+  "last_decision_at": null
+}

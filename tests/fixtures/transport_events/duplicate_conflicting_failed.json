@@ -1,0 +1,29 @@
+{
+  "fixture_id": "duplicate_conflicting_failed",
+  "events": [
+    {
+      "event_id": "evt_connected_dcf",
+      "type": "connected",
+      "timestamp": "2026-05-19T17:00:01.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_completed_dcf",
+      "type": "completed",
+      "timestamp": "2026-05-19T17:00:45.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_late_x",
+      "type": "failed",
+      "timestamp": "2026-05-19T17:00:50.000Z",
+      "payload": { "failure_reason": "transport_error" }
+    },
+    {
+      "event_id": "evt_late_x",
+      "type": "failed",
+      "timestamp": "2026-05-19T17:00:50.000Z",
+      "payload": { "failure_reason": "transport_error" }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "queue_item_id": "alf-prospect-001",
+  "facility_name": "Sunset Ridge ALF",
+  "phone_number": "+15555550100",
+  "timezone": "America/Los_Angeles",
+  "default_tz_applied": false,
+  "email": null,
+  "attempt_count": 0,
+  "dnc_flag": false,
+  "callable_status": "ready",
+  "last_decision_at": null
+}

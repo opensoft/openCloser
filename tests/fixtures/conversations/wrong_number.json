@@ -1,0 +1,12 @@
+{
+  "fixture_id": "wrong_number",
+  "expected_disposition": "wrong_number",
+  "queue_item_ref": "alf-prospect-001",
+  "turns": [
+    { "role": "persona", "text": "Hi, this is an AI assistant calling on behalf of Medx, the senior-living placement service. Is this a good time to chat for two minutes?" },
+    { "role": "contact", "text": "You have the wrong number. This isn't a facility." }
+  ],
+  "expected_extraction": {
+    "intent_classification": "wrong_number"
+  }
+}

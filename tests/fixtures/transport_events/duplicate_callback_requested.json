@@ -1,0 +1,29 @@
+{
+  "fixture_id": "duplicate_callback_requested",
+  "events": [
+    {
+      "event_id": "evt_connected_002",
+      "type": "connected",
+      "timestamp": "2026-05-19T17:00:01.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_callback_001",
+      "type": "callback_requested",
+      "timestamp": "2026-05-19T17:00:20.000Z",
+      "payload": { "window_hint": "Thursday at 2 PM" }
+    },
+    {
+      "event_id": "evt_completed_002",
+      "type": "completed",
+      "timestamp": "2026-05-19T17:00:45.000Z",
+      "payload": {}
+    },
+    {
+      "event_id": "evt_callback_001",
+      "type": "callback_requested",
+      "timestamp": "2026-05-19T17:00:20.000Z",
+      "payload": { "window_hint": "Thursday at 2 PM" }
+    }
+  ]
+}

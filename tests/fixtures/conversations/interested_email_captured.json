@@ -1,0 +1,19 @@
+{
+  "fixture_id": "interested_email_captured",
+  "expected_disposition": "interested_email_captured",
+  "queue_item_ref": "alf-prospect-001",
+  "turns": [
+    { "role": "persona", "text": "Hi, this is an AI assistant calling on behalf of Medx, the senior-living placement service. Is this a good time to chat for two minutes?" },
+    { "role": "contact", "text": "Sure. I'm the director of Sunset Ridge. We're always looking for referrals." },
+    { "role": "persona", "text": "Great. The best way is to email you our info pack. What's the best email?" },
+    { "role": "contact", "text": "Send it to director@sunset.example.com please." },
+    { "role": "persona", "text": "Got it — director@sunset.example.com, correct?" },
+    { "role": "contact", "text": "Yes that's right. Thanks!" }
+  ],
+  "expected_extraction": {
+    "callback_requested": false,
+    "captured_email": "director@sunset.example.com",
+    "role_confidence": "confident_decision_maker",
+    "intent_classification": "interested"
+  }
+}

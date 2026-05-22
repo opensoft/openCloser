@@ -1,0 +1,11 @@
+{
+  "fixture_id": "voicemail",
+  "events": [
+    {
+      "event_id": "evt_voicemail_001",
+      "type": "voicemail",
+      "timestamp": "2026-05-19T17:00:40.000Z",
+      "payload": { "voicemail_length_seconds": 22 }
+    }
+  ]
+}

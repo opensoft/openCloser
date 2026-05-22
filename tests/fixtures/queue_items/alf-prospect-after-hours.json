@@ -1,0 +1,12 @@
+{
+  "queue_item_id": "alf-prospect-after-hours",
+  "facility_name": "Lakeside ALF",
+  "phone_number": "+15555550102",
+  "timezone": "America/Los_Angeles",
+  "default_tz_applied": false,
+  "email": null,
+  "attempt_count": 0,
+  "dnc_flag": false,
+  "callable_status": "ready",
+  "last_decision_at": null
+}
