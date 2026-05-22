@@ -29,10 +29,10 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 
 **Purpose**: Project initialization for the Slice 2 additions.
 
-- [ ] T001 Add the `httpx` runtime dependency to `pyproject.toml` and refresh `uv.lock`; bump the project description to mention Slice 2
-- [ ] T002 [P] Create `config/slice2.toml` with `[run]`, `[dataverse]`, `[retry]`, `[task_owners]`, `[redaction]` sections per data-model.md §3
-- [ ] T003 [P] Create `tests/fixtures/dataverse/` — fake-CRM seed records (one `ready` queue item, Account) and a verified fixture mapping artifact `dataverse_mapping.json`
-- [ ] T004 [P] Create package skeletons: `src/opencloser/crm/dataverse/__init__.py`, `src/opencloser/redaction/__init__.py`, `src/opencloser/slice2/__init__.py`
+- [X] T001 Add the `httpx` runtime dependency to `pyproject.toml` and refresh `uv.lock`; bump the project description to mention Slice 2
+- [X] T002 [P] Create `config/slice2.toml` with `[run]`, `[dataverse]`, `[retry]`, `[task_owners]`, `[redaction]` sections per data-model.md §3
+- [X] T003 [P] Create `tests/fixtures/dataverse/` — fake-CRM seed records (one `ready` queue item, Account) and a verified fixture mapping artifact `dataverse_mapping.json`
+- [X] T004 [P] Create package skeletons: `src/opencloser/crm/dataverse/__init__.py`, `src/opencloser/redaction/__init__.py`, `src/opencloser/slice2/__init__.py`
 
 ---
 

@@ -12,6 +12,12 @@
 
 # Local config overrides (per research.md §Configuration surface)
 config/slice1.local.toml
+config/slice2.local.toml
+
+# Dataverse secrets — Slice 2 loads connection secrets from the environment
+# (spec FR-005); a local .env file used to set them MUST NOT be committed.
+.env
+.env.*
 
 # Python
 __pycache__/
