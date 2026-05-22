@@ -1,0 +1,12 @@
+{
+  "queue_item_id": "alf-prospect-dnc",
+  "facility_name": "Bayview ALF",
+  "phone_number": "+15555550101",
+  "timezone": "America/Los_Angeles",
+  "default_tz_applied": false,
+  "email": null,
+  "attempt_count": 0,
+  "dnc_flag": true,
+  "callable_status": "ready",
+  "last_decision_at": null
+}

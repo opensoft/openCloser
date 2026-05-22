@@ -1,0 +1,12 @@
+{
+  "queue_item_id": "alf-prospect-max-attempts",
+  "facility_name": "Hillcrest ALF",
+  "phone_number": "+15555550103",
+  "timezone": "America/Los_Angeles",
+  "default_tz_applied": false,
+  "email": null,
+  "attempt_count": 5,
+  "dnc_flag": false,
+  "callable_status": "ready",
+  "last_decision_at": null
+}

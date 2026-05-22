@@ -1,0 +1,49 @@
+# Runtime artifacts (FR-023 — emitted per-session, not version-controlled)
+# Repo-root anchored so it doesn't catch src/opencloser/artifacts/ (the writer module).
+/artifacts/
+
+# Local state store (SQLite database — generated at runtime)
+# Repo-root anchored so it doesn't catch src/opencloser/state/ (the DAO module).
+/state/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local config overrides (per research.md §Configuration surface)
+config/slice1.local.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.installed.cfg
+.venv/
+venv/
+env/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# OS
+Thumbs.db

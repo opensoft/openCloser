@@ -1,0 +1,20 @@
+{
+  "fixture_id": "interested_email_and_callback",
+  "expected_disposition": "interested_callback_requested",
+  "queue_item_ref": "alf-prospect-001",
+  "turns": [
+    { "role": "persona", "text": "Hi, this is an AI assistant calling on behalf of Medx, the senior-living placement service. Is this a good time to chat for two minutes?" },
+    { "role": "contact", "text": "Sure. I'm the owner of Sunset Ridge." },
+    { "role": "persona", "text": "Great. We can either set up a follow-up call or send an info pack by email — both?" },
+    { "role": "contact", "text": "Both would work. Email me at owner@sunset.example.com and call me back Thursday at 2 PM." },
+    { "role": "persona", "text": "Confirming — owner@sunset.example.com and a callback Thursday at 2 PM, correct?" },
+    { "role": "contact", "text": "Yes that's right. Thanks!" }
+  ],
+  "expected_extraction": {
+    "callback_requested": true,
+    "captured_email": "owner@sunset.example.com",
+    "preferred_callback_window": "Thursday at 2 PM",
+    "role_confidence": "confident_decision_maker",
+    "intent_classification": "interested"
+  }
+}
