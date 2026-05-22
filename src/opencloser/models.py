@@ -513,3 +513,221 @@ class SliceConfig(BaseModel):
     artifacts: ArtifactsConfig
     persona: PersonaConfig
     state: StateConfig
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — Mock Call, Real CRM (data-model.md §4 — additive only)
+# ---------------------------------------------------------------------------
+
+
+class RunMode(StrEnum):
+    """FR-031 — CLI run mode. Dry-run is the default; write-enabled needs an explicit flag."""
+
+    DRY_RUN = "dry-run"
+    WRITE_ENABLED = "write-enabled"
+
+
+class RunStatus(StrEnum):
+    """`writeback_progress.run_status` — the resume-ledger state (FR-023)."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    RESUME_NEEDED = "resume_needed"
+    BLOCKED = "blocked"
+
+
+class CrmRecordKind(StrEnum):
+    """`crm_correlations.record_kind` — the CRM record kinds Slice 2 writes back."""
+
+    PHONE_CALL_ACTIVITY = "phone_call_activity"
+    TASK = "task"
+    QUEUE_STATUS = "queue_status"
+
+
+class CrmWriteStatus(StrEnum):
+    """`crm_correlations.write_status`."""
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    FAILED = "failed"
+
+
+class CrmCorrelation(BaseModel):
+    """FR-024 — local record tying a session to one Dataverse record (mirrors the
+    `crm_correlations` table)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    record_kind: CrmRecordKind
+    idempotency_key: str
+    dataverse_record_id: str | None = None
+    write_status: CrmWriteStatus
+    created_at: UtcMs
+    updated_at: UtcMs
+
+
+class WriteBackProgress(BaseModel):
+    """FR-023 — the per-session resume ledger (mirrors the `writeback_progress` table)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    phone_call_activity_done: bool = False
+    queue_status_update_done: bool = False
+    task_done: bool = False
+    run_status: RunStatus
+    last_error: str | None = None
+    updated_at: UtcMs
+
+
+class MetadataVerificationReport(BaseModel):
+    """FR-001/FR-002 — the result of lightweight live metadata verification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    missing: list[str] = Field(default_factory=list)
+    drift: list[str] = Field(default_factory=list)
+    checked_at: UtcMs
+
+
+class DataQualityWarning(BaseModel):
+    """FR-034 — a non-fatal data-quality warning (e.g. a non-E.164 phone number)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    field: str
+    message: str
+
+
+# ---- Dataverse mapping artifact (config/dataverse_mapping.json — data-model.md §2) ----
+
+
+class DataverseMappingMeta(BaseModel):
+    """`_meta` block of the mapping artifact (tolerates documentation keys)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str
+    discovered_at: str
+    dataverse_env_url: str
+    approved: bool = False
+
+
+class DataverseEntityRef(BaseModel):
+    """One entry of the mapping artifact's `entities` map."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    logical_name: str
+    primary_id: str | None = None
+
+
+class DataverseFieldRef(BaseModel):
+    """One entry of the mapping artifact's `fields` map."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    entity: str
+    logical_name: str
+    type: str
+    lookup_target: str | None = None
+    approved_update_field: bool = False
+
+
+class DataverseOptionSetRef(BaseModel):
+    """One entry of the mapping artifact's `option_sets` map."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    field: str
+    value: int
+
+
+class DataverseMapping(BaseModel):
+    """FR-004 — the documented, verified Dataverse field-mapping artifact."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    meta: DataverseMappingMeta = Field(alias="_meta")
+    entities: dict[str, DataverseEntityRef] = Field(default_factory=dict)
+    fields: dict[str, DataverseFieldRef] = Field(default_factory=dict)
+    option_sets: dict[str, DataverseOptionSetRef] = Field(default_factory=dict)
+    task_owner_override_field: str | None = None
+    preserve_if_present: list[str] = Field(default_factory=list)
+
+
+# ---- Slice 2 configuration (config/slice2.toml — data-model.md §3) ----
+
+
+class RunConfig(BaseModel):
+    """`[run]` section of slice2.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default_mode: RunMode = RunMode.DRY_RUN
+    campaign: str = ""
+
+
+class DataverseConfig(BaseModel):
+    """`[dataverse]` section of slice2.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    env_url: str
+    mapping_artifact: str
+    callable_status: str
+
+
+class RetryConfig(BaseModel):
+    """`[retry]` section — FR-023 bounded-retry tunables."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries: int = Field(ge=0)
+    backoff_seconds: list[float]
+    retry_after_cap_seconds: float = Field(gt=0)
+
+
+class TaskOwnersConfig(BaseModel):
+    """`[task_owners]` section — FR-025 default owner per Task kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    callback: str
+    review: str
+
+
+class RedactionPolicyConfig(BaseModel):
+    """`[redaction]` section (FR-028, FR-029, FR-030)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy: Literal["regex", "noop"] = "regex"
+    retention: Literal["full", "summary-only"] = "full"
+    patterns: list[str] = Field(default_factory=list)
+
+
+class Slice2Config(BaseModel):
+    """Root non-secret Slice 2 configuration loaded from config/slice2.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run: RunConfig
+    dataverse: DataverseConfig
+    retry: RetryConfig
+    task_owners: TaskOwnersConfig
+    redaction: RedactionPolicyConfig
+
+
+class DataverseSecrets(BaseModel):
+    """Dataverse connection secrets — loaded from environment variables only (FR-005)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    client_id: str
+    client_secret: str
+    env_url: str

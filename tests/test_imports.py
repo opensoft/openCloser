@@ -67,6 +67,26 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.models",
         "opencloser.artifacts",  # intra-boundary submodules
     },
+    # ---- Slice 2 boundaries (contracts/redaction-layer.md, contracts/cli-slice2.md) ----
+    "redaction": {
+        "opencloser.models",
+        "opencloser.redaction",  # intra-boundary submodules
+    },
+    "slice2": {
+        # The Slice 2 CLI-coordination layer wires the boundary modules together
+        # (contracts/cli-slice2.md §Dependencies allowed); it calls the unchanged
+        # orchestrator but never modifies it.
+        "opencloser.models",
+        "opencloser.state",
+        "opencloser.artifacts",
+        "opencloser.eligibility",
+        "opencloser.transport",
+        "opencloser.persona",
+        "opencloser.crm",
+        "opencloser.core",
+        "opencloser.redaction",
+        "opencloser.slice2",  # intra-boundary submodules
+    },
 }
 
 

@@ -19,6 +19,9 @@ from opencloser.models import (
     SCHEMA_VERSION,
     CallableStatus,
     ConflictingEventAuditRecord,
+    CrmCorrelation,
+    CrmRecordKind,
+    CrmWriteStatus,
     Disposition,
     EligibilityDecision,
     EventType,
@@ -28,9 +31,11 @@ from opencloser.models import (
     QueueItem,
     QueueStatusUpdatePayload,
     RuleCode,
+    RunStatus,
     Session,
     SessionState,
     TaskPayload,
+    WriteBackProgress,
 )
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -533,4 +538,110 @@ def insert_normalized_result(conn: sqlite3.Connection, result: NormalizedResult)
             result.started_at,
             result.ended_at,
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — CRM correlation + write-back progress (data-model.md §1)
+# ---------------------------------------------------------------------------
+
+
+def upsert_crm_correlation(conn: sqlite3.Connection, corr: CrmCorrelation) -> None:
+    """FR-024 — record or refresh the local correlation row for one CRM record kind."""
+    conn.execute(
+        """
+        INSERT INTO crm_correlations (
+            session_id, record_kind, idempotency_key, dataverse_record_id,
+            write_status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (session_id, record_kind) DO UPDATE SET
+            idempotency_key = excluded.idempotency_key,
+            dataverse_record_id = excluded.dataverse_record_id,
+            write_status = excluded.write_status,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            corr.session_id,
+            corr.record_kind.value,
+            corr.idempotency_key,
+            corr.dataverse_record_id,
+            corr.write_status.value,
+            corr.created_at,
+            corr.updated_at,
+        ),
+    )
+
+
+def get_crm_correlation(
+    conn: sqlite3.Connection, session_id: str, record_kind: CrmRecordKind
+) -> CrmCorrelation | None:
+    row = conn.execute(
+        "SELECT * FROM crm_correlations WHERE session_id = ? AND record_kind = ?;",
+        (session_id, record_kind.value),
+    ).fetchone()
+    return _row_to_crm_correlation(row) if row is not None else None
+
+
+def list_crm_correlations(conn: sqlite3.Connection, session_id: str) -> list[CrmCorrelation]:
+    rows = conn.execute(
+        "SELECT * FROM crm_correlations WHERE session_id = ? ORDER BY record_kind;",
+        (session_id,),
+    ).fetchall()
+    return [_row_to_crm_correlation(row) for row in rows]
+
+
+def _row_to_crm_correlation(row: sqlite3.Row) -> CrmCorrelation:
+    return CrmCorrelation(
+        session_id=row["session_id"],
+        record_kind=CrmRecordKind(row["record_kind"]),
+        idempotency_key=row["idempotency_key"],
+        dataverse_record_id=row["dataverse_record_id"],
+        write_status=CrmWriteStatus(row["write_status"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def upsert_writeback_progress(conn: sqlite3.Connection, progress: WriteBackProgress) -> None:
+    """FR-023 — record or refresh the per-session write-back resume ledger."""
+    conn.execute(
+        """
+        INSERT INTO writeback_progress (
+            session_id, phone_call_activity_done, queue_status_update_done,
+            task_done, run_status, last_error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (session_id) DO UPDATE SET
+            phone_call_activity_done = excluded.phone_call_activity_done,
+            queue_status_update_done = excluded.queue_status_update_done,
+            task_done = excluded.task_done,
+            run_status = excluded.run_status,
+            last_error = excluded.last_error,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            progress.session_id,
+            int(progress.phone_call_activity_done),
+            int(progress.queue_status_update_done),
+            int(progress.task_done),
+            progress.run_status.value,
+            progress.last_error,
+            progress.updated_at,
+        ),
+    )
+
+
+def get_writeback_progress(conn: sqlite3.Connection, session_id: str) -> WriteBackProgress | None:
+    row = conn.execute(
+        "SELECT * FROM writeback_progress WHERE session_id = ?;", (session_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return WriteBackProgress(
+        session_id=row["session_id"],
+        phone_call_activity_done=bool(row["phone_call_activity_done"]),
+        queue_status_update_done=bool(row["queue_status_update_done"]),
+        task_done=bool(row["task_done"]),
+        run_status=RunStatus(row["run_status"]),
+        last_error=row["last_error"],
+        updated_at=row["updated_at"],
     )
