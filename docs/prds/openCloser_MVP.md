@@ -6,7 +6,7 @@ Parent PRD: [openCloser PRD](./openCloser_PRD.md)
 
 Related PRD: [ALF Outbound Appointment Setter PRD](./ALF_Outbound_Appointment_Setter_PRD.md)
 
-Last updated: 2026-05-19
+Last updated: 2026-05-22
 
 ## MVP Definition
 
@@ -51,6 +51,7 @@ Slice 1:
 Slices 2 and 3:
 
 - Dynamics 365 / Dataverse custom Call Queue Item table.
+- Verified Dataverse field mapping before any write-enabled run.
 - One campaign.
 - One worker process.
 
@@ -78,11 +79,18 @@ The MVP includes only the minimum call-before-dial checks:
 
 The gate records allow or block with a reason. It does not need a full compliance rules engine yet.
 
+Slice 2 maps these checks from CRM fields and keeps real dialing disabled.
+Hard telephony-format validation such as E.164 becomes mandatory before Slice 3
+places a SignalWire call.
+
 ### Outbound Call
 
 The MVP stages telephony after the CRM loop is working.
 
 Slices 1 and 2 use a mock call transport that simulates connected, no-answer, failed, completed, and duplicate callback events. Slice 3 places one outbound call through SignalWire.
+
+Slice 2 must reject malformed mock transport fixtures before session state,
+attempt counts, or CRM queue status change.
 
 Required Slice 3 behavior:
 
@@ -126,6 +134,9 @@ Required fields:
 - Human-review reason when applicable.
 - Started and ended timestamps.
 
+For Slices 1 and 2, the provider call ID is the mock provider call ID. Slice 3
+renames the same concept to the real provider call ID when SignalWire is used.
+
 ### Dispositions
 
 The MVP should support this reduced disposition set:
@@ -153,9 +164,13 @@ Slice 1:
 
 Slices 2 and 3:
 
+- Dataverse metadata verification before field or option-set assumptions are
+  used in code.
 - Dynamics Phone Call activity for connected calls.
 - Dynamics Task for interested or review-needed outcomes.
 - Queue item status update.
+- Idempotency protection against duplicate activities, duplicate Tasks, and
+  duplicate attempt-count increments.
 
 The MVP does not create Opportunities.
 
@@ -173,6 +188,7 @@ Required task fields:
 - Preferred callback window.
 - Transcript pointer when available.
 - Reason a human should follow up.
+- Owner or team assignment from configuration for Slice 2 and Slice 3.
 
 ## UI Rails
 
@@ -235,9 +251,9 @@ Recommended stack:
 - CRM adapter: Dynamics 365 / Dataverse Web API.
 - HTTP client: `httpx`.
 - Telephony: mock transport for Slices 1 and 2; SignalWire outbound calls and status callbacks for Slice 3.
-- Voice runtime: Pipecat.
+- Voice runtime: Pipecat for Slice 3.
 - First AI model path: OpenAI Realtime through the Pipecat pipeline.
-- Tests: pytest with mocked CRM adapter, mocked SignalWire callbacks, and persona transcript fixtures.
+- Tests: pytest with mocked CRM adapter, Dataverse contract/integration tests, mocked SignalWire callbacks, and persona transcript fixtures.
 - Packaging and local development: `uv`.
 - Local services: Docker Compose only when needed.
 
@@ -300,7 +316,8 @@ This structure is intentionally smaller than the long-term architecture. It shou
 - Opportunity creation.
 - Real appointment scheduling integration.
 - Advanced retry orchestration.
-- Full transcript redaction pipeline.
+- Full transcript review console and production redaction workflow. Slice 2 still
+  includes a minimal configurable redaction layer before transcript disk writes.
 - Clinical safety engine.
 - Inbound callback handling.
 - Multi-worker scaling.
@@ -340,20 +357,29 @@ Input:
 
 - One Dynamics Call Queue Item from one ALF campaign.
 - Mock call transport.
+- Verified Dataverse field mapping and task owner mapping.
 
 Behavior:
 
+- Inspect Dataverse metadata before write-enabled processing.
 - Claim a Dynamics queue item.
 - Run eligibility checks.
 - Run the ALF persona against a simulated conversation or scripted transcript.
 - Write Phone Call activity, Task, and queue status back to Dynamics.
+- Redact transcript artifacts before disk write according to the Slice 2 policy.
 
 Done when:
 
 - A Dynamics queue item can move from `ready` to final disposition without manual intervention.
+- The same run can be exercised in dry-run mode with planned write-back artifacts
+  and no CRM writes.
 - Interested outcomes create callback Tasks in Dynamics.
+- Callback and review Tasks are assigned to the configured Dynamics owner or
+  team.
 - DNC outcomes prevent additional automated attempts.
 - Duplicate mock provider callbacks do not create duplicate CRM records.
+- Malformed mock transport fixtures fail before CRM state or attempt count
+  changes.
 - The CRM write-back path can be demonstrated without a live phone call.
 
 ### Slice 3: Real Call, Real CRM
@@ -424,9 +450,9 @@ The MVP should optimize for proving that loop with the least surface area possib
 
 ## Open Questions
 
-- Should the local queue use CSV, JSON, or SQLite for Slice 1? SQLite is the default unless CSV makes initial fixture loading materially simpler.
-- Should the first pilot write transcripts into Dynamics or store a pointer only?
 - What exact AI disclosure language should Medx approve?
 - What should "tomorrow morning" mean for callback Tasks?
 - Who owns callback Tasks in Dynamics by default?
 - Should voicemail leave a message or hang up?
+- Which Dataverse table or existing CRM construct should represent Slice 2 Call Queue Items?
+- Should Slice 2 populate a CRM Task due date when a callback window is parseable, or preserve the phrase only in task text until scheduling integration exists?

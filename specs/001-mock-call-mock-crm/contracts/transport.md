@@ -77,7 +77,7 @@ Event entity); the transport treats `payload` as opaque and yields it verbatim.
 public surface above names the second `place_call` parameter `fixture: TransportFixture`
 (a fixture object). The Slice 1 runtime signature is `place_call(queue_item, fixture_id: str)`:
 the transport receives only a fixture identifier and loads the fixture file from disk
-itself. This is a deliberate Slice 1 simplification — the Slice 2 SignalWire
+itself. This is a deliberate Slice 1 simplification — the later SignalWire
 implementation replaces this parameter with a `dial_plan: DialPlan` object (per the
 Forward-compat section). The SC-008 contract review (T075) verifies this is a
 parameter-shape change, not a contract-shape change.
@@ -98,12 +98,12 @@ The interface is deliberately minimal:
 1. `place_call(queue_item, fixture) -> mock_provider_call_id`
 2. `event_stream(mock_provider_call_id) -> Iterator[MockCallEvent]`
 
-The Slice 2 SignalWire implementation will:
+The Slice 3 SignalWire implementation will:
 - Replace `fixture: TransportFixture` with a `dial_plan: DialPlan` (or similar) parameter; the rest is unchanged.
-- Source `mock_provider_call_id` (renamed `provider_call_id` in Slice 2) from the SignalWire SDK.
-- Translate SignalWire webhook events into `MockCallEvent` shape (rename to `CallEvent` at Slice 2 time).
+- Source `mock_provider_call_id` (renamed `provider_call_id` in Slice 3) from the SignalWire SDK.
+- Translate SignalWire webhook events into `MockCallEvent` shape (rename to `CallEvent` at Slice 3 time).
 
-The contract review at Slice 2 plan time verifies these are name-only changes, not shape changes (per SC-008).
+The contract review before Slice 3 verifies these are name-only changes, not shape changes (per SC-008). Slice 2 keeps using this mock transport while the CRM adapter becomes real.
 
 ---
 

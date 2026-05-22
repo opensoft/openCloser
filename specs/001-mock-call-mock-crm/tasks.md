@@ -338,7 +338,7 @@ T074 [P] lint pass
 
 1. **Phase 1 + Phase 2 + Phase 3** = the MVP. After T038 passes, the team can demo the full happy-path loop end-to-end against fixtures and ship Slice 1's reference behavior to stakeholders. This is the smallest valuable deliverable.
 2. **Phase 4** = safety/eligibility hardening. Eligibility is the cheapest and most important safety gate — implement it second.
-3. **Phase 5** = idempotency/audit hardening. Required for forward-compatibility with real telephony (Slice 2's SignalWire).
+3. **Phase 5** = idempotency/audit hardening. Required for forward-compatibility with real CRM in Slice 2 and real telephony in Slice 3.
 4. **Phase 6** = coverage of remaining dispositions. Demonstrable to non-engineer stakeholders (SC-007).
 5. **Phase 7** = CI gates, lint, constitution doc, SC-008 review.
 
@@ -346,7 +346,7 @@ T074 [P] lint pass
 
 - **After Phase 3**: demo-ready MVP. Run `quickstart.md` step 3 in front of stakeholders.
 - **After Phase 4**: safety gate proved. DNC + call-window + max-attempts protections in place.
-- **After Phase 5**: idempotency invariants proved. Safe to plan Slice 2 (real telephony) on top.
+- **After Phase 5**: idempotency invariants proved. Safe to plan Slice 2 (real CRM) and later Slice 3 (real telephony) on top.
 - **After Phase 6**: every disposition in FR-013 reachable + readable. SC-003 + SC-007 met.
 - **After Phase 7**: every success criterion enforceable in CI. Slice 1 ready to hand off / archive.
 
@@ -373,10 +373,10 @@ All 75 tasks follow the strict checklist format: `- [ ] T### [P?] [US#?] Descrip
 
 Tasks for the following are intentionally absent — they belong to later slices:
 
-- Real telephony (SignalWire) — Slice 2
 - Real CRM (Dataverse) — Slice 2
+- Real telephony (SignalWire) — Slice 3
 - Live LLM-driven persona — Slice 3+
-- Pipecat integration — Slice 2+
+- Pipecat integration — Slice 3+
 - Admin UI / React / Next.js — deferred
 - Multi-worker scaling, Redis, Celery, Kubernetes — out of MVP
 - Clinical personas, PHI handling — explicitly excluded

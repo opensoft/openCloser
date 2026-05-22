@@ -195,7 +195,7 @@ Accept recommendation.
 
 FR-004(a) says "phone presence" passes eligibility. Is that "non-empty string", "non-null", or stricter (E.164 format, valid country code)?
 
-**Recommendation**: For Slice 1: non-null AND non-empty after trim (no whitespace-only strings). E.164 validation deferred to Slice 2 when real telephony arrives. Document in `eligibility/evaluator.py` rule (a).
+**Recommendation**: For Slice 1: non-null AND non-empty after trim (no whitespace-only strings). E.164 hard validation is deferred until the real-telephony slice because SignalWire requires it. Document in `eligibility/evaluator.py` rule (a).
 
 **Resolves**: eligibility.md CHK009
 
