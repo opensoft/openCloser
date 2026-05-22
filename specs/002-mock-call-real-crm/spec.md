@@ -243,6 +243,7 @@ When the system writes a transcript artifact, the transcript text first passes t
 - **Redaction Layer / Redaction Policy**: The configurable boundary that transforms transcript text before disk write (default: replace sensitive patterns with `[REDACTED]`; alternatives: no-op, or summary-only retention).
 - **Run Mode**: Dry-run (validate mapping, produce planned write-back artifacts, zero CRM writes) versus write-enabled (perform Dataverse writes). Dry-run is the default when no run-mode flag is supplied; write-enabled requires an explicit flag.
 - **CRM Correlation Identifier**: The stable idempotency key (the session ID, or a key derived from it) that is both recorded locally and stamped onto a metadata-verified Dataverse field of the Phone Call activity and Task, so duplicate or retried writes are detected by pre-querying Dataverse before each create.
+- **Write-Back Progress Ledger**: The local record of which of the four write-back operations have completed for a session and the run's resume status (`in_progress` / `completed` / `resume_needed` / `blocked`), so a re-invocation completes only the missing CRM writes after a transient failure (FR-023).
 - **Preserved Slice 1 Entities**: The queue-item contract, eligibility decision, session, mock call event, normalized result, write-back payloads, idempotency keys, and conversation/transport fixtures are reused unchanged; Slice 2 adds CRM-backed sources and a CRM-backed write-back target around them.
 
 ## Success Criteria *(mandatory)*

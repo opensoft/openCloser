@@ -132,7 +132,9 @@ src/opencloser/
 │   └── store.py                # MODIFIED — DAO for the two new tables
 ├── artifacts/
 │   └── writer.py               # MODIFIED — route transcript text through RedactionLayer
-├── core/                       # UNCHANGED — orchestrator, idempotency, ids, clock, config
+├── core/
+│   ├── config.py               # MODIFIED (additive) — load config/slice2.toml + Dataverse secrets
+│   └── orchestrator.py · idempotency.py · ids.py · clock.py   # UNCHANGED
 ├── eligibility/                # UNCHANGED
 ├── persona/                    # UNCHANGED
 └── models.py                   # MODIFIED (additive only) — Slice 2 Pydantic models
