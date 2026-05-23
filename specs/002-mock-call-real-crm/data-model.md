@@ -116,7 +116,8 @@ default_mode = "dry-run"          # FR-031: dry-run unless --write is passed
 campaign = ""                     # default ALF campaign selector (overridable on CLI)
 
 [dataverse]
-env_url = "https://example.crm.dynamics.com"
+# env_url is intentionally NOT here — it lives only in the DATAVERSE_ENV_URL
+# env var so the runtime has a single source of truth for the connection target.
 mapping_artifact = "config/dataverse_mapping.json"
 callable_status = "ready"         # FR-011: the queue status that is eligible to call
 

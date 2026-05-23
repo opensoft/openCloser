@@ -672,11 +672,16 @@ class RunConfig(BaseModel):
 
 
 class DataverseConfig(BaseModel):
-    """`[dataverse]` section of slice2.toml."""
+    """`[dataverse]` section of slice2.toml.
+
+    Note: the Dataverse environment URL is **not** here — it lives only in
+    `DataverseSecrets.env_url` (loaded from the `DATAVERSE_ENV_URL` env var) so the
+    runtime has a single authoritative source for the connection target. Keeping a
+    second copy in this config file risked the two values drifting.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    env_url: str
     mapping_artifact: str
     callable_status: str
 
