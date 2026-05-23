@@ -3,7 +3,9 @@
 Walks the AST of every `src/opencloser/**/*.py` and asserts the FR-033 boundary's
 dependency-allowed rules from `contracts/*.md` hold. Per boundary:
 
-- ``core`` may import any boundary module + state + models + artifacts.
+- ``core`` may import any boundary module + state + models + artifacts +
+  redaction (the orchestrator plumbs a configured ``RedactionLayer`` through
+  to the writer per ``contracts/redaction-layer.md``).
 - ``eligibility`` / ``transport`` / ``persona`` MAY import `models` and shared
   `core` primitives (`ids`, `clock`, `idempotency` per orchestrator contract),
   but MUST NOT import each other.
@@ -40,6 +42,11 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.transport",
         "opencloser.persona",
         "opencloser.crm",
+        # contracts/redaction-layer.md: the orchestrator accepts a configured
+        # RedactionLayer and plumbs it through to the artifact writer
+        # (FR-028..FR-030). Slice 1 callers omit it and get the writer's
+        # cached default-on layer.
+        "opencloser.redaction",
         "opencloser.core",
     },
     "eligibility": {

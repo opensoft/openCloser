@@ -14,16 +14,39 @@ the readiness-failure surface for a malformed redaction policy.
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from opencloser.artifacts.writer import write_session_artifacts
-from opencloser.models import RedactionPolicyConfig
+from opencloser.core.clock import FrozenClock
+from opencloser.core.orchestrator import process_one_queue_item
+from opencloser.crm.mock import MockWriteBackAdapter
+from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
+from opencloser.models import (
+    ArtifactsConfig,
+    CallWindowConfig,
+    EligibilityConfig,
+    PersonaConfig,
+    QueueItem,
+    RedactionPolicyConfig,
+    SliceConfig,
+    StateConfig,
+)
+from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
+from opencloser.persona.base import ConversationFixture, ConversationTurn
 from opencloser.redaction.layer import DEFAULT_REPLACEMENT, RedactionLayer
+from opencloser.state import store
+from opencloser.transport.mock import FixtureDrivenTransport
 from tests.fixtures.artifact_inputs import make_artifact_inputs
 
 pytestmark = pytest.mark.integration
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_QUEUE_ITEM_FIXTURE = _REPO_ROOT / "tests/fixtures/queue_items/alf-prospect-001.json"
+_TRANSPORT_FIXTURES = _REPO_ROOT / "tests/fixtures/transport_events"
 
 _SUMMARY = "Interested; callback requested for Thursday 14:00."
 _TRANSCRIPT_WITH_PII = (
@@ -163,3 +186,117 @@ def test_us6_malformed_policy_fails_readiness() -> None:
     bad_cfg = RedactionPolicyConfig(policy="regex", patterns=[r"(?P<bad"])
     with pytest.raises(ValueError, match="Invalid redaction regex"):
         RedactionLayer.from_config(bad_cfg)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator wiring — confirms the RedactionLayer passed into
+# ``process_one_queue_item`` reaches the artifact writer end-to-end.
+# ---------------------------------------------------------------------------
+
+
+def _slice1_config(artifact_dir: Path, db_path: Path) -> SliceConfig:
+    return SliceConfig(
+        call_window=CallWindowConfig(start="09:00", end="20:00"),
+        eligibility=EligibilityConfig(max_attempts=5, default_timezone="America/Los_Angeles"),
+        artifacts=ArtifactsConfig(dir=str(artifact_dir)),
+        persona=PersonaConfig(version="alf-appointment-setter@0.1.0"),
+        state=StateConfig(db=str(db_path)),
+    )
+
+
+def _conversation_with_pii() -> ConversationFixture:
+    return ConversationFixture(
+        fixture_id="us6_pii_conversation",
+        expected_disposition="interested_callback_requested",
+        queue_item_ref="alf-prospect-001",
+        turns=[
+            ConversationTurn(
+                role="persona",
+                text="Hi, this is an AI assistant from Medx. Is this a good time?",
+            ),
+            ConversationTurn(
+                role="contact",
+                text=(
+                    "Sure, I'm the owner. You can reach me at 555-123-4567 "
+                    "or owner@sunsetridge.example. Call me back Thursday at 2 PM please."
+                ),
+            ),
+            ConversationTurn(
+                role="persona",
+                text="Great — Thursday at 2 PM Pacific. Thanks for your time!",
+            ),
+        ],
+        expected_extraction={
+            "callback_requested": True,
+            "preferred_callback_window": "Thursday at 2 PM",
+            "role_confidence": "confident_decision_maker",
+            "intent_classification": "interested",
+        },
+    )
+
+
+def test_us6_orchestrator_passes_redaction_layer_to_writer(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
+) -> None:
+    """End-to-end wiring proof: a ``RedactionLayer`` built from Slice 2
+    ``[redaction]`` config and passed into ``process_one_queue_item`` reaches the
+    artifact writer, so operator-configured patterns / policy / retention actually
+    take effect in the production call path (addresses the layer-not-wired gap)."""
+    store.insert_queue_item(
+        tmp_state_db,
+        QueueItem.model_validate_json(_QUEUE_ITEM_FIXTURE.read_text(encoding="utf-8")),
+    )
+    layer = RedactionLayer.from_config(RedactionPolicyConfig())  # default-on regex
+
+    report = process_one_queue_item(
+        "alf-prospect-001",
+        conn=tmp_state_db,
+        config=_slice1_config(tmp_artifact_dir, tmp_path / "slice1.db"),
+        eligibility=BuiltinEligibilityEvaluator(),
+        transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
+        persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
+        conversation_fixture=_conversation_with_pii(),
+        transport_fixture_id="connected",
+        clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
+        redaction_layer=layer,
+    )
+
+    transcript_path = report.artifact_dir / "transcript.txt"
+    assert transcript_path.exists()
+    content = transcript_path.read_text(encoding="utf-8")
+    assert "555-123-4567" not in content
+    assert "owner@sunsetridge.example" not in content
+    assert DEFAULT_REPLACEMENT in content
+
+
+def test_us6_orchestrator_summary_only_retention_omits_transcript(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path, tmp_path: Path
+) -> None:
+    """When the orchestrator receives a summary-only layer, the writer emits no
+    transcript file and session-result.json carries a null transcript_pointer."""
+    store.insert_queue_item(
+        tmp_state_db,
+        QueueItem.model_validate_json(_QUEUE_ITEM_FIXTURE.read_text(encoding="utf-8")),
+    )
+    layer = RedactionLayer.from_config(
+        RedactionPolicyConfig(policy="regex", retention="summary-only")
+    )
+
+    report = process_one_queue_item(
+        "alf-prospect-001",
+        conn=tmp_state_db,
+        config=_slice1_config(tmp_artifact_dir, tmp_path / "slice1.db"),
+        eligibility=BuiltinEligibilityEvaluator(),
+        transport=FixtureDrivenTransport(_TRANSPORT_FIXTURES),
+        persona=ALFAppointmentSetterPersona(),
+        crm=MockWriteBackAdapter(tmp_state_db),
+        conversation_fixture=_conversation_with_pii(),
+        transport_fixture_id="connected",
+        clock=FrozenClock(datetime(2026, 5, 19, 19, 0, 0, tzinfo=UTC)),
+        redaction_layer=layer,
+    )
+
+    assert not (report.artifact_dir / "transcript.txt").exists()
+    sr = json.loads((report.artifact_dir / "session-result.json").read_text(encoding="utf-8"))
+    assert sr["transcript_pointer"] is None
