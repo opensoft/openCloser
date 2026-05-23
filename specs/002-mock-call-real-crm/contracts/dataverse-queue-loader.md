@@ -48,6 +48,23 @@ data-quality warning is raised downstream (FR-034).
 
 ---
 
+## Dataverse Web API addressing
+
+Dataverse exposes a table under two different names that the loader MUST keep
+distinct:
+
+- **Logical name** (singular, e.g. `account`, `medx_callqueueitem`) — used by the
+  metadata endpoints (`EntityDefinitions(LogicalName='...')`).
+- **Entity-set name** (often plural, e.g. `accounts`, `medx_callqueueitems`) — used
+  by record CRUD URLs (`/api/data/v9.2/<entity_set>(id)` and query collections).
+
+Both come from the `DataverseMapping` artifact's `entities` map (`logical_name` and
+`entity_set_name` fields). The loader uses `entity_set_name` for record GETs and
+falls back to `logical_name` only when the mapping omits the set name (legacy /
+minimal scaffolds).
+
+---
+
 ## Dependencies
 
 - **Allowed**: `opencloser.models` (`QueueItem`), `opencloser.crm.dataverse.client` /

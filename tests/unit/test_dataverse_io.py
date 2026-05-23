@@ -75,7 +75,50 @@ def test_token_transient_failure_raises() -> None:
         return httpx.Response(503, request=request)
 
     provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
-    with pytest.raises(errors.TransientDataverseError):
+    with pytest.raises(errors.TransientDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
+def test_token_permanent_failure_uses_auth_wording() -> None:
+    """A 401 from Entra ID must NOT be reported as a Dataverse Web API failure —
+    the operator needs to know which system rejected them (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
+def test_token_transport_error_uses_auth_wording() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.TransientDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
+def test_token_response_missing_access_token_raises_permanent() -> None:
+    """A 2xx body without `access_token` is an Entra ID protocol/config error, not
+    a successful auth — fail permanently with a clear message instead of leaking a
+    raw KeyError (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token_type": "Bearer"}, request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="access_token"):
+        provider.token(now=0.0)
+
+
+def test_token_response_non_json_raises_permanent() -> None:
+    """A 2xx with non-JSON content is also an Entra ID config error — surface it
+    permanently without echoing the body (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>upstream gateway</html>", request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="access_token"):
         provider.token(now=0.0)
 
 
@@ -221,6 +264,32 @@ def test_load_mapping_and_translate() -> None:
     assert translator.option_set_value("queue_status.ready") == 0
     assert translator.option_set_key_for_value("queue.status", 0) == "queue_status.ready"
     assert translator.option_set_key_for_value("queue.status", 99) is None
+
+
+def test_translator_entity_set_name_distinct_from_logical_name() -> None:
+    """Metadata URLs use logical names; record CRUD URLs use entity-set names.
+    The two differ for custom tables (Copilot PR #3 review)."""
+    translator = MappingTranslator(load_mapping(_MAPPING_FIXTURE))
+    assert translator.entity_logical_name("queue_item") == "medx_callqueueitem"
+    assert translator.entity_set_name("queue_item") == "medx_callqueueitems"
+    assert translator.entity_set_name("account") == "accounts"
+
+
+def test_translator_entity_set_name_falls_back_to_logical() -> None:
+    """A mapping that omits `entity_set_name` falls back to the logical name so
+    minimal/legacy scaffolds keep working."""
+    from opencloser.models import DataverseEntityRef, DataverseMapping, DataverseMappingMeta
+
+    mapping = DataverseMapping(
+        meta=DataverseMappingMeta(
+            schema_version="slice2-mapping-v1",
+            discovered_at="2026-05-22T00:00:00.000Z",
+            dataverse_env_url="https://fake.crm.dynamics.com",
+            approved=True,
+        ),
+        entities={"thing": DataverseEntityRef(logical_name="medx_thing")},
+    )
+    assert MappingTranslator(mapping).entity_set_name("thing") == "medx_thing"
 
 
 def test_mapping_approved_update_fields() -> None:

@@ -86,16 +86,24 @@ class DataverseQueueLoader:
         """Return the selected queue item mapped to `QueueItem`, or None for an empty
         queue (FR-009). Read-only — never claims or mutates the row.
 
-        A row not in the configured callable status is still returned (mapped to its
-        conceptual status) so the reused eligibility evaluator records the FR-011
-        blocked result — filtering it out here would hide that decision.
+        With an `ExplicitId` selector, a row not in the configured callable status is
+        still returned (mapped to its conceptual status) so the reused eligibility
+        evaluator records the FR-011 blocked result — filtering it out here would hide
+        that decision. The `NextReady` selector, by contrast, filters on the configured
+        callable status in the Dataverse query itself (so a non-callable row is never
+        a "next ready" candidate).
         """
-        entity = self._t.entity_logical_name("queue_item")
-        primary_id = self._t.mapping.entities["queue_item"].primary_id or f"{entity}id"
+        entity_logical = self._t.entity_logical_name("queue_item")
+        # Record CRUD URLs use the entity-set name (often plural); only metadata uses
+        # the singular logical name (Copilot PR #3 review).
+        entity_set = self._t.entity_set_name("queue_item")
+        primary_id = self._t.entity("queue_item").primary_id or f"{entity_logical}id"
 
         if isinstance(selector, ExplicitId):
             rows = self._query(
-                entity, flt=f"{primary_id} eq {_odata_token(selector.queue_item_id)}", top=1
+                entity_set,
+                flt=f"{primary_id} eq {_odata_token(selector.queue_item_id)}",
+                top=1,
             )
         else:
             status_field = self._t.logical_name(_QUEUE_STATUS_FIELD)
@@ -111,7 +119,7 @@ class DataverseQueueLoader:
                     f"{campaign_field} eq {_odata_token(selector.campaign)}"
                 )
             rows = self._query(
-                entity,
+                entity_set,
                 flt=" and ".join(filter_clauses),
                 # FR-008 deterministic next-ready ordering: earliest next_attempt_at,
                 # then oldest CRM-created (`createdon`), then stable primary id.
@@ -182,12 +190,24 @@ class DataverseQueueLoader:
         account_id = row.get(account_field.logical_name)
         if not account_id:
             return ""
-        account_entity = account_field.lookup_target or "account"
+        # `lookup_target` is the conceptual entity key. Prefer the mapped entity's
+        # entity-set name (and its primary id); fall back to the raw key string if no
+        # entry exists (single-source compatibility for minimal scaffold mappings).
+        account_entity_key = account_field.lookup_target or "account"
+        try:
+            account_ref = self._t.entity(account_entity_key)
+            account_set = account_ref.entity_set_name or account_ref.logical_name
+            account_primary_id = (
+                account_ref.primary_id or f"{account_ref.logical_name}id"
+            )
+        except MappingError:
+            account_set = account_entity_key
+            account_primary_id = f"{account_entity_key}id"
         accounts = (
             self._client.get(
-                account_entity,
+                account_set,
                 params={
-                    "$filter": f"accountid eq {_odata_token(account_id)}",
+                    "$filter": f"{account_primary_id} eq {_odata_token(account_id)}",
                     "$select": "name",
                     "$top": "1",
                 },

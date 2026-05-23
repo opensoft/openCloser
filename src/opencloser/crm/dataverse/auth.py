@@ -11,7 +11,13 @@ import time
 
 import httpx
 
-from opencloser.crm.dataverse.errors import raise_for_dataverse_response, wrap_transport_error
+from opencloser.crm.dataverse.errors import (
+    DataverseError,
+    PermanentDataverseError,
+    TransientDataverseError,
+    _parse_retry_after,
+    is_transient_status,
+)
 from opencloser.models import DataverseSecrets
 
 _TOKEN_ENDPOINT = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
@@ -54,10 +60,22 @@ class DataverseTokenProvider:
         try:
             response = self._http.post(endpoint, data=form)
         except httpx.HTTPError as exc:
-            raise wrap_transport_error(exc) from exc
-        raise_for_dataverse_response(response)
-        body = response.json()
-        self._token = body["access_token"]
+            raise _wrap_auth_transport_error(exc, endpoint) from exc
+        if not response.is_success:
+            raise _auth_status_error(response, endpoint)
+        try:
+            body = response.json()
+            access_token = body["access_token"]
+        except (ValueError, KeyError, TypeError) as exc:
+            # A 2xx without a usable `access_token` is an Entra ID protocol/config
+            # error — surface it as permanent so operators see the auth source instead
+            # of a bare JSON/KeyError traceback. The body is NOT echoed: token-endpoint
+            # diagnostics may include request echoes (Copilot review on PR #3).
+            raise PermanentDataverseError(
+                f"Entra ID token endpoint returned a 2xx response without a usable "
+                f"`access_token` field ({type(exc).__name__})"
+            ) from exc
+        self._token = access_token
         lifetime = float(body.get("expires_in", _DEFAULT_EXPIRES_IN))
         self._expires_at = clock + lifetime - _EXPIRY_SKEW_SECONDS
 
@@ -65,3 +83,29 @@ class DataverseTokenProvider:
         """Close the owned httpx client (no-op when an external client was injected)."""
         if self._owns_http:
             self._http.close()
+
+
+# Auth-aware error wrappers — keep the Entra ID/OAuth source visible in messages so
+# operators don't mis-diagnose a token-endpoint outage as a Dataverse Web API outage
+# (Copilot review on PR #3). Same transient/permanent classification as the Dataverse
+# Web API path; only the message changes.
+def _wrap_auth_transport_error(exc: httpx.HTTPError, endpoint: str) -> DataverseError:
+    if isinstance(exc, httpx.TransportError):
+        return TransientDataverseError(
+            f"Entra ID token endpoint unreachable ({endpoint}): {exc!r}"
+        )
+    return PermanentDataverseError(
+        f"Entra ID token endpoint error ({endpoint}): {exc!r}"
+    )
+
+
+def _auth_status_error(response: httpx.Response, endpoint: str) -> DataverseError:
+    status = response.status_code
+    detail = f"Entra ID token endpoint returned HTTP {status} ({endpoint})"
+    if is_transient_status(status):
+        return TransientDataverseError(
+            detail,
+            retry_after=_parse_retry_after(response.headers.get("Retry-After")),
+            status_code=status,
+        )
+    return PermanentDataverseError(detail, status_code=status)

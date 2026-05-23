@@ -617,11 +617,26 @@ class DataverseMappingMeta(BaseModel):
 
 
 class DataverseEntityRef(BaseModel):
-    """One entry of the mapping artifact's `entities` map."""
+    """One entry of the mapping artifact's `entities` map.
+
+    Dataverse Web API addresses tables under TWO names that may differ:
+
+    - `logical_name` — the singular table logical name used by metadata endpoints
+      (e.g. `EntityDefinitions(LogicalName='account')`).
+    - `entity_set_name` — the (often plural) entity-set name used in record CRUD
+      URLs (e.g. `/api/data/v9.2/accounts(id)`). Many publisher-prefixed custom
+      tables pluralize differently (e.g. `medx_callqueueitem` → `medx_callqueueitems`),
+      so we cannot derive it by appending `s`.
+
+    `entity_set_name` is optional and falls back to `logical_name` for backward
+    compatibility, but every mapping intended for live Dataverse SHOULD set both
+    explicitly (Copilot PR #3 review).
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     logical_name: str
+    entity_set_name: str | None = None
     primary_id: str | None = None
 
 

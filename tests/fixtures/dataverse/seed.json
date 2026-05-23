@@ -21,7 +21,7 @@
       "medx_lasterror": null,
       "medx_nextattemptat": "2026-05-22T16:00:00.000Z",
       "medx_assignedownerid": null,
-      "_campaign": "alf-q2-davis"
+      "medx_campaignid": "alf-q2-davis"
     }
   ]
 }

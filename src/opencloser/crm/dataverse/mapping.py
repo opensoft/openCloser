@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from opencloser.models import DataverseFieldRef, DataverseMapping
+from opencloser.models import DataverseEntityRef, DataverseFieldRef, DataverseMapping
 
 
 class MappingError(RuntimeError):
@@ -45,12 +45,24 @@ class MappingTranslator:
         """True when the mapping artifact has been PR-reviewed and approved (FR-024)."""
         return self._mapping.meta.approved
 
-    def entity_logical_name(self, entity_key: str) -> str:
-        """The Dataverse table logical name for a conceptual entity (e.g. `queue_item`)."""
-        entity = self._mapping.entities.get(entity_key)
-        if entity is None:
+    def entity(self, entity_key: str) -> DataverseEntityRef:
+        """The full entity-ref entry for a conceptual entity (e.g. `queue_item`)."""
+        ref = self._mapping.entities.get(entity_key)
+        if ref is None:
             raise MappingError(f"no Dataverse entity mapping for {entity_key!r}")
-        return entity.logical_name
+        return ref
+
+    def entity_logical_name(self, entity_key: str) -> str:
+        """The Dataverse table logical name for a conceptual entity — used by metadata
+        endpoints (`EntityDefinitions(LogicalName='...')`)."""
+        return self.entity(entity_key).logical_name
+
+    def entity_set_name(self, entity_key: str) -> str:
+        """The Dataverse entity-set name for a conceptual entity — used by record CRUD
+        URLs (`/api/data/v9.2/{entity_set}`). Falls back to the logical name when the
+        mapping artifact does not specify a separate entity-set name."""
+        ref = self.entity(entity_key)
+        return ref.entity_set_name or ref.logical_name
 
     def field(self, conceptual: str) -> DataverseFieldRef:
         """The full field mapping entry for a conceptual field name."""

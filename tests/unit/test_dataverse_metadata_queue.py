@@ -36,8 +36,20 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
         attrs = {eref.primary_id} if eref.primary_id else set()
         attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
         entities[eref.logical_name] = attrs
-    entities["account"] = {"accountid", "name"}
+    # Ensure the account table is present even if a test deletes its mapping.
+    entities.setdefault("account", set()).update({"accountid", "name"})
     return entities
+
+
+def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
+    """Build the fake's record-collection alias map (logical_name → entity_set_name)
+    from a mapping artifact. Tests that exercise record CRUD must pass this so the
+    fake recognises the entity-set URLs the loader/adapter emit."""
+    return {
+        eref.logical_name: eref.entity_set_name
+        for eref in mapping.entities.values()
+        if eref.entity_set_name
+    }
 
 
 def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
@@ -155,6 +167,7 @@ def _loader(records: dict[str, list[dict]]) -> DataverseQueueLoader:
         entities=_entities(_MAPPING),
         records=records,
         option_sets=_option_sets(_MAPPING),
+        entity_sets=_entity_sets(_MAPPING),
     )
     return DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(_MAPPING))
 
@@ -252,6 +265,7 @@ def test_load_next_ready_uses_configured_callable_status() -> None:
         entities=_entities(_MAPPING),
         records=loader_args_in_progress,
         option_sets=_option_sets(_MAPPING),
+        entity_sets=_entity_sets(_MAPPING),
     )
     loader = DataverseQueueLoader(
         fake.client(_RETRY), MappingTranslator(_MAPPING), callable_status="in_progress"
@@ -326,6 +340,7 @@ def test_load_missing_facility_mapping_returns_empty() -> None:
         entities=_entities(mapping),
         records={"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")]},
         option_sets=_option_sets(mapping),
+        entity_sets=_entity_sets(mapping),
     )
     loader = DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
     item = loader.load(ExplicitId(_QUEUE_GUID))

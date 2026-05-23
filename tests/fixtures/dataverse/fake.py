@@ -54,6 +54,7 @@ class DataverseFake:
         entities: dict[str, Iterable[str]],
         records: dict[str, list[dict[str, Any]]] | None = None,
         option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
+        entity_sets: dict[str, str] | None = None,
         env_url: str = "https://fake.crm.dynamics.com",
     ) -> None:
         self.env_url = env_url
@@ -61,11 +62,23 @@ class DataverseFake:
         self._records = {name: [dict(r) for r in recs] for name, recs in (records or {}).items()}
         # (entity_logical, attribute_logical) -> set of valid option-set integer values
         self._option_sets = {k: set(v) for k, v in (option_sets or {}).items()}
+        # Record-URL collection-name → internal logical key. Real Dataverse uses the
+        # entity-set name (e.g. `accounts`) for record CRUD URLs but the logical name
+        # for metadata URLs; the fake accepts EITHER as a record-URL collection so
+        # legacy tests (logical-only) keep working alongside set-name-driven tests
+        # (Copilot PR #3 review on `queue_loader.py`).
+        self._collection_to_logical: dict[str, str] = {name: name for name in self._entities}
+        for logical, set_name in (entity_sets or {}).items():
+            self._collection_to_logical[set_name] = logical
         self._fail_remaining = 0
         self._fail_status = 503
         self.created: list[tuple[str, dict[str, Any]]] = []  # (entity, record) — POST log
         self.patched: list[tuple[str, str, dict[str, Any]]] = []  # (entity, id, changes)
         self.request_count = 0
+
+    def _resolve_collection(self, url_name: str) -> str | None:
+        """URL record-collection name → internal logical key, or None if unknown."""
+        return self._collection_to_logical.get(url_name)
 
     # -- failure injection -------------------------------------------------
 
@@ -150,9 +163,10 @@ class DataverseFake:
         )
 
     def _handle_query(self, request: httpx.Request, entity: str) -> httpx.Response:
-        if entity not in self._entities:
+        logical = self._resolve_collection(entity)
+        if logical is None:
             return httpx.Response(404, request=request)
-        rows = list(self._records.get(entity, []))
+        rows = list(self._records.get(logical, []))
         params = request.url.params
 
         flt = params.get("$filter")
@@ -167,7 +181,7 @@ class DataverseFake:
         select = params.get("$select")
         if select:
             keys = [k.strip() for k in select.split(",")]
-            unknown = [k for k in keys if k not in self._entities[entity]]
+            unknown = [k for k in keys if k not in self._entities[logical]]
             if unknown:  # a $select of an unmapped field is a Dataverse 400
                 return httpx.Response(
                     400, json={"error": {"message": f"unknown field(s): {unknown}"}},
@@ -177,25 +191,27 @@ class DataverseFake:
         return httpx.Response(200, json={"value": rows}, request=request)
 
     def _handle_create(self, request: httpx.Request, entity: str) -> httpx.Response:
-        if entity not in self._entities:
+        logical = self._resolve_collection(entity)
+        if logical is None:
             return httpx.Response(404, request=request)
         body = json.loads(request.content or b"{}")
         record_id = str(uuid.uuid4())
-        body.setdefault(f"{entity}id", record_id)
-        self._records.setdefault(entity, []).append(dict(body))
-        self.created.append((entity, dict(body)))
+        body.setdefault(f"{logical}id", record_id)
+        self._records.setdefault(logical, []).append(dict(body))
+        self.created.append((logical, dict(body)))
         entity_uri = f"{self.env_url}{_API_PREFIX}{entity}({record_id})"
         return httpx.Response(204, headers={"OData-EntityId": entity_uri}, request=request)
 
     def _handle_patch(self, request: httpx.Request, entity: str, record_id: str) -> httpx.Response:
-        if entity not in self._entities:
+        logical = self._resolve_collection(entity)
+        if logical is None:
             return httpx.Response(404, request=request)
         changes = json.loads(request.content or b"{}")
         rid = record_id.strip("'")
-        for row in self._records.get(entity, []):
-            if row.get(f"{entity}id") == rid:
+        for row in self._records.get(logical, []):
+            if row.get(f"{logical}id") == rid:
                 row.update(changes)
-                self.patched.append((entity, rid, dict(changes)))
+                self.patched.append((logical, rid, dict(changes)))
                 return httpx.Response(204, request=request)
         return httpx.Response(404, request=request)
 
