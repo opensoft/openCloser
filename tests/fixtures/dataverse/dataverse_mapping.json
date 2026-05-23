@@ -23,6 +23,7 @@
     "queue.last_session_id": { "entity": "queue_item", "logical_name": "medx_lastsessionid", "type": "string", "approved_update_field": true },
     "queue.last_error": { "entity": "queue_item", "logical_name": "medx_lasterror", "type": "string", "approved_update_field": true },
     "queue.next_attempt_at": { "entity": "queue_item", "logical_name": "medx_nextattemptat", "type": "datetime" },
+    "queue.campaign": { "entity": "queue_item", "logical_name": "medx_campaignid", "type": "lookup", "lookup_target": "campaign" },
     "phone_call.idempotency_key": { "entity": "phone_call_activity", "logical_name": "medx_idempotencykey", "type": "string" },
     "task.idempotency_key": { "entity": "task", "logical_name": "medx_idempotencykey", "type": "string" },
     "task.owner": { "entity": "task", "logical_name": "ownerid", "type": "lookup", "lookup_target": "systemuser,team" }

@@ -11,8 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opencloser.crm.dataverse.client import DataverseClient
-from opencloser.crm.dataverse.mapping import MappingTranslator
+from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
 from opencloser.models import CallableStatus, QueueItem
+
+# The Dataverse system-field name that every table carries — used as the
+# next-ready tie-breaker between two rows with the same next_attempt_at
+# (FR-008, contracts/dataverse-queue-loader.md).
+_DATAVERSE_CREATED_AT_FIELD = "createdon"
 
 
 class QueueLoadError(RuntimeError):
@@ -39,9 +44,18 @@ QueueSelector = ExplicitId | NextReady
 class DataverseQueueLoader:
     """Loads one ALF queue item from Dataverse into the Slice 1 `QueueItem` contract."""
 
-    def __init__(self, client: DataverseClient, translator: MappingTranslator) -> None:
+    def __init__(
+        self,
+        client: DataverseClient,
+        translator: MappingTranslator,
+        *,
+        callable_status: str = "ready",
+    ) -> None:
         self._client = client
         self._t = translator
+        # The configured callable status (FR-011 / config/slice2.toml [dataverse]
+        # callable_status). The conceptual option-set key is `queue_status.<name>`.
+        self._callable_status = callable_status
 
     def load(self, selector: QueueSelector) -> QueueItem | None:
         """Return the selected queue item mapped to `QueueItem`, or None for an empty
@@ -58,19 +72,38 @@ class DataverseQueueLoader:
             rows = self._query(entity, flt=f"{primary_id} eq {selector.queue_item_id}", top=1)
         else:
             status_field = self._t.logical_name("queue.status")
-            ready_value = self._t.option_set_value("queue_status.ready")
+            callable_value = self._t.option_set_value(f"queue_status.{self._callable_status}")
             order_field = self._t.logical_name("queue.next_attempt_at")
-            # Deterministic next-ready ordering (FR-008): earliest next_attempt_at,
-            # then the stable primary id as tie-breaker.
+            filter_clauses = [f"{status_field} eq {callable_value}"]
+            # FR-009 single-campaign scoping: filter on the mapped campaign field when
+            # the deployment maps one. A mapping without `queue.campaign` is treated as
+            # a single-campaign queue table where this filter is unnecessary.
+            campaign_field = self._optional_logical_name("queue.campaign")
+            if campaign_field and selector.campaign:
+                filter_clauses.append(f"{campaign_field} eq {selector.campaign}")
             rows = self._query(
                 entity,
-                flt=f"{status_field} eq {ready_value}",
-                orderby=f"{order_field} asc,{primary_id} asc",
+                flt=" and ".join(filter_clauses),
+                # FR-008 deterministic next-ready ordering: earliest next_attempt_at,
+                # then oldest CRM-created (`createdon`), then stable primary id.
+                orderby=(
+                    f"{order_field} asc,"
+                    f"{_DATAVERSE_CREATED_AT_FIELD} asc,"
+                    f"{primary_id} asc"
+                ),
                 top=1,
             )
         if not rows:
             return None
         return self._to_queue_item(rows[0], primary_id)
+
+    def _optional_logical_name(self, conceptual: str) -> str | None:
+        """The Dataverse logical name for a conceptual field, or None when the mapping
+        does not include it (callers fall back to default behavior)."""
+        try:
+            return self._t.logical_name(conceptual)
+        except MappingError:
+            return None
 
     def _query(
         self,

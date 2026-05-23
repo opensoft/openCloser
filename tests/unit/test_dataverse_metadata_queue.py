@@ -39,7 +39,15 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     return entities
 
 
-def _queue_record(*, status: int = 0, attempt: int = 0, next_at: str, qid: str = _QUEUE_GUID) -> dict:
+def _queue_record(
+    *,
+    status: int = 0,
+    attempt: int = 0,
+    next_at: str,
+    qid: str = _QUEUE_GUID,
+    campaign: str = "alf-q2-davis",
+    created: str = "2026-05-22T00:00:00.000Z",
+) -> dict:
     return {
         "medx_callqueueitemid": qid,
         "medx_accountid": _ACCOUNT_GUID,
@@ -50,6 +58,8 @@ def _queue_record(*, status: int = 0, attempt: int = 0, next_at: str, qid: str =
         "medx_donotcall": False,
         "medx_callstatus": status,
         "medx_nextattemptat": next_at,
+        "medx_campaignid": campaign,
+        "createdon": created,
     }
 
 
@@ -138,6 +148,72 @@ def test_load_next_ready_is_deterministic() -> None:
     item = loader.load(NextReady("alf-q2-davis"))
     assert item is not None
     assert item.queue_item_id == "q-early"  # earliest next_attempt_at wins
+
+
+def test_load_next_ready_honors_campaign_filter() -> None:
+    """FR-009 single-campaign scoping — a queue item in a different campaign MUST NOT
+    be returned even when its next_attempt_at is earlier."""
+    loader = _loader(
+        {
+            "medx_callqueueitem": [
+                _queue_record(
+                    qid="q-other-camp",
+                    next_at="2026-05-22T08:00:00.000Z",
+                    campaign="other-camp",
+                ),
+                _queue_record(
+                    qid="q-mine",
+                    next_at="2026-05-22T16:00:00.000Z",
+                    campaign="alf-q2-davis",
+                ),
+            ],
+            "account": [_ACCOUNT],
+        }
+    )
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None
+    assert item.queue_item_id == "q-mine"  # earlier other-campaign row filtered out
+
+
+def test_load_next_ready_uses_created_at_tiebreaker() -> None:
+    """FR-008 deterministic ordering — when next_attempt_at ties, the older CRM-created
+    timestamp wins."""
+    same_time = "2026-05-22T16:00:00.000Z"
+    loader = _loader(
+        {
+            "medx_callqueueitem": [
+                _queue_record(
+                    qid="q-newer", next_at=same_time, created="2026-05-20T00:00:00.000Z"
+                ),
+                _queue_record(
+                    qid="q-older", next_at=same_time, created="2026-05-15T00:00:00.000Z"
+                ),
+            ],
+            "account": [_ACCOUNT],
+        }
+    )
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None
+    assert item.queue_item_id == "q-older"  # older createdon wins on tie
+
+
+def test_load_next_ready_uses_configured_callable_status() -> None:
+    """FR-011 — the configured callable status MUST drive next-ready selection, not a
+    hardcoded `ready` value."""
+    loader_args_in_progress = {
+        "medx_callqueueitem": [
+            _queue_record(qid="q-ready", status=0, next_at="2026-05-22T08:00:00.000Z"),
+            _queue_record(qid="q-inprog", status=1, next_at="2026-05-22T16:00:00.000Z"),
+        ],
+        "account": [_ACCOUNT],
+    }
+    fake = DataverseFake(entities=_entities(_MAPPING), records=loader_args_in_progress)
+    loader = DataverseQueueLoader(
+        fake.client(_RETRY), MappingTranslator(_MAPPING), callable_status="in_progress"
+    )
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None
+    assert item.queue_item_id == "q-inprog"  # the configured callable status wins
 
 
 def test_load_empty_queue_returns_none() -> None:
