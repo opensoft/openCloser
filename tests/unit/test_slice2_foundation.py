@@ -183,6 +183,20 @@ def test_load_slice2_config() -> None:
     assert len(cfg.redaction.patterns) == 2
 
 
+def test_load_slice2_config_applies_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPENCLOSER_<SECTION>_<KEY> overrides each scalar key in slice2.toml — same
+    loader pattern as Slice 1 (research.md §5)."""
+    monkeypatch.setenv("OPENCLOSER_DATAVERSE_CALLABLE_STATUS", "in_progress")
+    monkeypatch.setenv("OPENCLOSER_RETRY_MAX_RETRIES", "7")
+    monkeypatch.setenv("OPENCLOSER_RETRY_RETRY_AFTER_CAP_SECONDS", "12.5")
+    monkeypatch.setenv("OPENCLOSER_REDACTION_RETENTION", "summary-only")
+    cfg = config.load_slice2_config(_REPO_ROOT / "config/slice2.toml")
+    assert cfg.dataverse.callable_status == "in_progress"
+    assert cfg.retry.max_retries == 7
+    assert cfg.retry.retry_after_cap_seconds == 12.5
+    assert cfg.redaction.retention == "summary-only"
+
+
 def test_missing_dataverse_secrets_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in config._DATAVERSE_SECRET_ENV:
         monkeypatch.delenv(name, raising=False)
