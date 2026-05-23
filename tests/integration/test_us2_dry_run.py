@@ -291,3 +291,41 @@ def test_us2_dry_run_readiness_continues_when_verify_fails(
     assert isinstance(result, _ReadinessResult)
     assert result.metadata_report.ok is True
     assert result.metadata_report.checked_at == _CLOCK.now_utc_ms()
+
+
+def test_us2_dry_run_readiness_blocks_on_403_permission_regression(
+    tmp_path: Path,
+) -> None:
+    """Codex PR #7 round-3 P1: dry-run MUST NOT silently treat a 403 from
+    `verify()` (e.g. permission regression on `EntityDefinitions` while queue
+    reads still work) as success. Only auth-401 and transient failures are
+    tolerated; 403/permission failures STILL block dry-run."""
+    from opencloser.crm.dataverse.errors import PermanentDataverseError
+    from opencloser.slice2.runner import _verify_readiness
+
+    cfg = _slice2_config()
+
+    class _ForbiddenToken:
+        def token(self, *, now: float | None = None) -> str:
+            raise PermanentDataverseError(
+                "EntityDefinitions returned HTTP 403 — test stub for permission regression",
+                status_code=403,
+            )
+
+    forbidden_client = DataverseClient(
+        "https://forbidden.crm.dynamics.com",
+        _ForbiddenToken(),
+        RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0),
+        http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(403))),
+        sleep=lambda _seconds: None,
+    )
+
+    result = _verify_readiness(cfg, forbidden_client, _CLOCK, dry_run=True)
+
+    # A 403 is NOT a tolerable verify failure — must surface as a structured
+    # blocked report, not a synthetic ok-report.
+    from opencloser.slice2.runner import CrmRunReport
+
+    assert isinstance(result, CrmRunReport)
+    assert result.exit_status == "blocked"
+    assert result.message is not None and "metadata verification failed" in result.message

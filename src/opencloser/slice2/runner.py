@@ -33,7 +33,11 @@ from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
 from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
 from opencloser.crm.dataverse.client import DataverseClient
-from opencloser.crm.dataverse.errors import DataverseError
+from opencloser.crm.dataverse.errors import (
+    DataverseError,
+    PermanentDataverseError,
+    TransientDataverseError,
+)
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator, load_mapping
 from opencloser.crm.dataverse.metadata import MetadataError, verify
 from opencloser.crm.dataverse.queue_loader import (
@@ -91,6 +95,29 @@ class CrmRunReport:
 class _ReadinessResult:
     translator: MappingTranslator
     metadata_report: MetadataVerificationReport
+
+
+def _is_dry_run_tolerable_verify_failure(exc: Exception) -> bool:
+    """Per `contracts/metadata-discovery-verification.md` §5 + spec §Edge Cases
+    "Dry-run requested but write credentials are absent", dry-run readiness
+    tolerates ONLY two narrow classes of `verify()` failure:
+
+    1. A `PermanentDataverseError` with HTTP 401 — the OAuth token-acquire
+       failed because credentials are absent or invalid. This is the
+       "missing write credentials" scenario the spec explicitly carves out.
+    2. A `TransientDataverseError` — network unreachable, 5xx, timeout. The
+       runtime cannot determine whether the configured metadata is valid;
+       dry-run should not fail-hard on environmental flakiness.
+
+    Anything else — 403/permission regression, 404 entity not found, a
+    `MetadataError` from a missing-mapping read — is a REAL verification
+    failure that must block dry-run too, so an operator does not approve a
+    rehearsal whose write-enabled counterpart would immediately fail
+    (Codex PR #7 round-3 P1).
+    """
+    if isinstance(exc, TransientDataverseError):
+        return True
+    return isinstance(exc, PermanentDataverseError) and exc.status_code == 401
 
 
 def run_one_crm_item(
@@ -226,12 +253,27 @@ def run_one_crm_item(
     # `writeback.json` / `task.json` under their usual filenames (its writer
     # call is unchanged per FR-014), so an inspector cannot tell from the
     # filenames alone that no Dataverse write was issued. The marker file
-    # makes the dry-run nature unambiguous (SC-002, SC-013).
+    # makes the dry-run nature unambiguous (SC-002, SC-013). A filesystem
+    # failure here MUST NOT crash the run — convert to a structured `failed`
+    # report so the operator sees a stable exit-status (Codex PR #7 round-3:
+    # don't introduce a new uncaught-exception path with the marker step).
     if is_dry_run and orchestrator_report.artifact_dir is not None:
-        write_dry_run_marker(
-            artifact_root=orchestrator_report.artifact_dir.parent,
-            session_id=orchestrator_report.session_id,
-        )
+        try:
+            write_dry_run_marker(
+                artifact_root=orchestrator_report.artifact_dir.parent,
+                session_id=orchestrator_report.session_id,
+            )
+        except OSError as exc:
+            return CrmRunReport(
+                exit_status="failed",
+                session_id=orchestrator_report.session_id,
+                final_disposition=orchestrator_report.final_disposition,
+                artifact_dir=orchestrator_report.artifact_dir,
+                queue_item_id=queue_item.queue_item_id,
+                metadata_report=report,
+                warnings=adapter.warnings(),
+                message=f"dry-run marker write failed: {exc}",
+            )
 
     exit_status: ExitStatus = (
         "blocked" if orchestrator_report.final_disposition is Disposition.BLOCKED else "completed"
@@ -291,14 +333,16 @@ def _verify_readiness(
     try:
         report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
     except (DataverseError, MetadataError) as exc:
-        if dry_run:
+        if dry_run and _is_dry_run_tolerable_verify_failure(exc):
             # spec §Edge Cases "Dry-run requested but write credentials are
             # absent" + contracts/metadata-discovery-verification.md §5:
-            # dry-run still runs `verify()` but auth/connectivity failures are
-            # NOT a dry-run error. Continue with a synthetic placeholder report
-            # so downstream still has a non-None report (Copilot PR #7 review).
-            # Genuine `ok=False` reports (real missing/drift) below STILL block
-            # dry-run — only the connectivity failure path is tolerated here.
+            # dry-run still runs `verify()` AND surfaces gaps; ONLY missing
+            # write credentials (auth 401) and pure connectivity failures
+            # (`TransientDataverseError`) are tolerated. A 403 / 404 / real
+            # `MetadataError` (missing mapping) MUST still block dry-run
+            # (Codex PR #7 round-3 P1: a 403 on EntityDefinitions while
+            # queue reads still work is a real verification gap, not a
+            # missing-credentials story).
             return _ReadinessResult(
                 translator=translator,
                 metadata_report=MetadataVerificationReport(
@@ -308,10 +352,10 @@ def _verify_readiness(
                     checked_at=clk.now_utc_ms(),
                 ),
             )
-        # An unreachable Dataverse (auth failure, 5xx, timeout) or unverifiable
-        # metadata at startup in write-enabled mode is operator-visible-blocked
-        # rather than an unhandled exception. The CLI prints the message and
-        # exits with the documented `blocked` exit code.
+        # All other paths (write-enabled, OR dry-run with a non-tolerable
+        # error) are operator-visible-blocked rather than an unhandled
+        # exception. The CLI prints the message and exits with the documented
+        # `blocked` exit code.
         return CrmRunReport(
             exit_status="blocked",
             message=f"metadata verification failed: {exc}",

@@ -197,10 +197,15 @@ class DataverseWriteBackAdapter:
         # row before re-raising.
         if self._dry_run:
             # Validate every LOCAL mapping lookup the write-enabled path would
-            # do (Codex PR #7 review); skip the GET pre-query and the PATCH;
-            # capture the conceptual payload (FR-031, FR-010 — dry-run MUST
-            # NOT mutate the CRM queue item).
+            # do — `_entity_set`, `_primary_id`, the body builder (Codex PR #7
+            # round-3 review: `_fetch_queue_last_session` calls
+            # `_primary_id("queue_item")` in the write-enabled path, so a
+            # mapping missing `entities['queue_item'].primary_id` MUST surface
+            # in dry-run too). Skip the GET pre-query and the PATCH; capture
+            # the conceptual payload (FR-031, FR-010 — dry-run MUST NOT
+            # mutate the CRM queue item).
             self._entity_set("queue_item")
+            self._primary_id("queue_item")
             self._queue_status_body(payload)
             self._aggregate(payload.session_id).queue_status_update = payload
             return
