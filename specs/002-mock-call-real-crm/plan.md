@@ -206,7 +206,7 @@ to the user-story-organized phases that actually appear in `tasks.md`):
 9. **Slice 2 runner & resume** — run-mode coordination + resume coordinator. → tasks.md US1 (T019, T022), US2 (T025), US3 (T028, T029a, T029b), US4 (T032, T045).
 10. **CLI** — `discover-crm` + `run-crm` commands; dry-run default. → tasks.md Phase 3 / US1 (T020, T021); resume routing in Phase 6 / US4 (T033).
 11. **Integration** — US1–US6 against the Dataverse fake; SC-001…SC-015. → tasks.md US1–US6 integration-test slots (T023, T027, T030, T034, T036, T039, T046).
-12. **Docs & polish** — `quickstart.md` finalization, demo cleanup runbook, close GitHub issue #2, boundary test, retention enforcement, no-secrets assertion, full ruff+pytest pass. → tasks.md Phase 9 (T040–T044, T047).
+12. **Docs & polish** — `quickstart.md` finalization, demo cleanup runbook, close GitHub issue #2, boundary test, retention enforcement, no-secrets assertion, run-report schema documentation, write-back state-machine documentation, full ruff+pytest pass. → tasks.md Phase 9 (T040–T044, T047, T049, T050).
 
 The user-story phase ordering in `tasks.md` is preferred over a strict
 groupings-1-to-12 sequence because each user story is independently

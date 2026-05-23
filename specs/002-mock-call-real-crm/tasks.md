@@ -213,6 +213,7 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 - **US6** depends only on Phase 2 — touches `redaction/` and `artifacts/writer.py`; no Dataverse code. Can run in parallel with US1–US4.
 - **`artifacts/writer.py` is edited by three tasks** — T026 (US2, planned-artifact writing), T038 (US6, redaction routing), and T041 (Polish, retention). Sequence or merge these edits so they do not conflict.
 - **`src/opencloser/slice2/runner.py` is edited by multiple tasks** — T019 (US1 write-enabled path), T022 (US1 FR-034 warning), T025 (US2 dry-run path), T028 (US3 readiness), T029a / T029b (US3 failure behaviors), and T045 (US4 conflict detection). Sequence or merge these edits so they do not conflict.
+- **`src/opencloser/crm/dataverse/adapter.py` is edited by multiple tasks** — T018 (US1 write-back implementation), T024 (US2 dry-run capture path), T031 (US4 idempotency pre-query + `crm_correlations` recording), and T045 (US4 conflict-detection supporting checks). T048 reads it via unit tests but does not modify it. Sequence or merge these edits so they do not conflict.
 
 **Within Phase 2**: T005 and T007 are sequential (T007 uses T006's schema); T010 → T011 (client uses auth); T013 and T014 depend on T011/T012. `[P]`-marked tasks touch separate files.
 

@@ -286,6 +286,8 @@ When the system writes a transcript artifact, the transcript text first passes t
 - **FR-031–FR-033** are covered by **User Story 1** (write-enabled CLI), **User Story 2** (dry-run default), SC-002, SC-012, and SC-013.
 - **FR-035** (local audit retention, no secrets in artifacts) is covered by the Phase 9 polish task and by demo-artifact inspection per SC-012.
 
+Audit-data inventory (§Constitution Alignment §Auditability) and the **Write-Back Progress Ledger** key entity are not numbered FRs but carry implicit requirements; their formal documentation lives in tasks T049 (run-report schema in `contracts/cli-slice2.md`) and T050 (state-machine specification in `data-model.md` §1 and `contracts/cli-slice2.md` exit-status mapping).
+
 ## Assumptions
 
 - **Slice scope**: Slice 2 explicitly excludes SignalWire, Pipecat / live audio, real-time model providers, real outbound traffic, custom product UI, campaign builder, custom task queue, CRM replacement, batch processing, scheduler, multi-worker locking, Redis / Celery / Kubernetes, generalized workflow engines, opportunity creation, automated sales qualification beyond task/write-back fields, and any multi-CRM abstraction. Dataverse is the only Slice 2 CRM target. These are deferred per the constitution and the OpenSpec change.
