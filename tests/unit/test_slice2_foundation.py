@@ -158,6 +158,23 @@ def test_raise_for_dataverse_response_permanent() -> None:
     assert exc_info.value.status_code == 404  # callers can narrow on 404 vs. 401/403
 
 
+def test_raise_for_dataverse_response_strips_query_string() -> None:
+    """Dataverse `$filter` predicates carry session/campaign/record GUIDs that we do
+    not want echoed into operator-visible error messages (Copilot review on PR #3)."""
+    request = httpx.Request(
+        "GET",
+        "https://fake.crm.dynamics.com/api/data/v9.2/medx_callqueueitems"
+        "?$filter=_medx_campaignid_value%20eq%20deadbeef-cafe-1234"
+        "&$select=name",
+    )
+    with pytest.raises(errors.PermanentDataverseError) as exc_info:
+        errors.raise_for_dataverse_response(httpx.Response(404, request=request))
+    message = str(exc_info.value)
+    assert "deadbeef" not in message  # the GUID inside the $filter MUST NOT leak
+    assert "$filter" not in message
+    assert "medx_callqueueitems" in message  # path itself is still useful
+
+
 def test_raise_for_dataverse_response_success_is_noop() -> None:
     request = httpx.Request("GET", "https://fake.crm.dynamics.com/api/data/v9.2/x")
     errors.raise_for_dataverse_response(httpx.Response(200, request=request))

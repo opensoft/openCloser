@@ -93,6 +93,15 @@ class DataverseTokenProvider:
             raise PermanentDataverseError(
                 "Entra ID token endpoint returned a non-numeric `expires_in` value"
             ) from exc
+        # A 0/negative lifetime would make `_expires_at` <= `clock`, so `token()`
+        # would re-acquire on every call — a tight loop of auth traffic. That can
+        # only happen on a malformed token payload; refuse it permanently
+        # (Copilot follow-up review on PR #3).
+        if lifetime <= 0:
+            raise PermanentDataverseError(
+                f"Entra ID token endpoint returned a non-positive `expires_in` "
+                f"value ({lifetime!r})"
+            )
         self._token = access_token
         self._expires_at = clock + lifetime - _EXPIRY_SKEW_SECONDS
 

@@ -172,6 +172,22 @@ def test_token_response_non_numeric_expires_in_raises_permanent() -> None:
         provider.token(now=0.0)
 
 
+@pytest.mark.parametrize("bad_lifetime", [0, -1, -3600])
+def test_token_response_non_positive_expires_in_raises_permanent(bad_lifetime: int) -> None:
+    """A 0/negative `expires_in` would make every subsequent token() call re-acquire
+    (tight loop of auth traffic). Reject it permanently (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "tok-X", "expires_in": bad_lifetime},
+            request=request,
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="non-positive"):
+        provider.token(now=0.0)
+
+
 # ---------------------------------------------------------------------------
 # T011 — Web API client with bounded transient retry
 # ---------------------------------------------------------------------------

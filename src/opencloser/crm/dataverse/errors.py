@@ -76,9 +76,13 @@ def raise_for_dataverse_response(response: httpx.Response) -> None:
     if response.is_success:
         return
     status = response.status_code
+    # Strip the query string from the URL: Dataverse `$filter` predicates often
+    # carry session IDs, campaign GUIDs, or record GUIDs that we do not want to
+    # echo into operator logs / persisted error messages (Copilot review on PR #3).
+    safe_url = response.request.url.copy_with(query=None)
     detail = (
         f"Dataverse returned HTTP {status} for "
-        f"{response.request.method} {response.request.url}"
+        f"{response.request.method} {safe_url}"
     )
     if is_transient_status(status):
         raise TransientDataverseError(
