@@ -70,13 +70,25 @@ class DataverseFake:
             attr_set = set(attrs)
             self._entities.setdefault(name, attr_set)
             self._entities.setdefault(name + "s", attr_set)
+        # Pre-allocate ONE shared list per registered entity (even those without
+        # seed records), then alias both `<name>` and `<name>s` to it. A later
+        # POST under the entity-set name and a subsequent GET under the
+        # singular form (or vice versa) observe the same list — without this,
+        # entities like `phonecall`/`task` that start empty in the seed would
+        # diverge between their singular and plural keys after the first
+        # create.
         self._records: dict[str, list[dict[str, Any]]] = {}
+        for name in entities:
+            shared: list[dict[str, Any]] = []
+            self._records[name] = shared
+            self._records[name + "s"] = shared
         for name, recs in (records or {}).items():
-            rec_list = [dict(r) for r in recs]
-            # Share the SAME list reference between `<name>` and `<name>s` so a
-            # PATCH/POST on either alias is observable through the other.
-            self._records.setdefault(name, rec_list)
-            self._records.setdefault(name + "s", rec_list)
+            target = self._records.get(name)
+            if target is None:
+                target = []
+                self._records[name] = target
+                self._records[name + "s"] = target
+            target.extend(dict(r) for r in recs)
         self._fail_remaining = 0
         self._fail_status = 503
         self.created: list[tuple[str, dict[str, Any]]] = []  # (entity, record) — POST log

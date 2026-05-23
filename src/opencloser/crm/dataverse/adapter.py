@@ -23,7 +23,11 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 
 from opencloser.crm.dataverse.client import DataverseClient
-from opencloser.crm.dataverse.errors import PermanentDataverseError, odata_string_literal
+from opencloser.crm.dataverse.errors import (
+    DataverseError,
+    PermanentDataverseError,
+    odata_string_literal,
+)
 from opencloser.crm.dataverse.mapping import (
     MappingError,
     MappingTranslator,
@@ -110,7 +114,7 @@ class DataverseWriteBackAdapter:
                 idempotency_value=payload.session_id,
                 body=self._phone_call_body(payload, idempotency_field),
             )
-        except (PermanentDataverseError, DataverseWriteBackError, MappingError) as exc:
+        except (DataverseError, DataverseWriteBackError, MappingError) as exc:
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.PHONE_CALL_ACTIVITY,
@@ -128,28 +132,32 @@ class DataverseWriteBackAdapter:
         self._aggregate(payload.session_id).phone_call_activity = payload
 
     def emit_queue_status_update(self, payload: QueueStatusUpdatePayload) -> None:
-        entity_set = self._entity_set("queue_item")
         # PATCH is keyed by the queue row's primary id directly; the FR-024 idempotency
         # signal lives in the `last_session_id` column rather than a synthetic key
         # column. A row whose `last_session_id` already equals this session has been
         # patched in a prior run — record/refresh the correlation and skip the PATCH.
-        existing = self._fetch_queue_last_session(payload.queue_item_id)
-        if existing == payload.session_id:
-            self._record_correlation(
-                session_id=payload.session_id,
-                record_kind=CrmRecordKind.QUEUE_STATUS,
-                idempotency_key=payload.session_id,
-                dataverse_record_id=payload.queue_item_id,
-            )
-            self._mark_progress(payload.session_id, queue_status_update_done=True)
-            self._aggregate(payload.session_id).queue_status_update = payload
-            return
-
-        body = self._queue_status_body(payload)
-        path = f"{entity_set}({payload.queue_item_id})"
+        # Mapping resolution + the idempotency pre-query + the PATCH all run inside
+        # the same failure-recording try/except so any Dataverse access error in
+        # this path persists a consistent `crm_correlations(write_status=failed)`
+        # row before re-raising.
         try:
+            entity_set = self._entity_set("queue_item")
+            existing = self._fetch_queue_last_session(payload.queue_item_id)
+            if existing == payload.session_id:
+                self._record_correlation(
+                    session_id=payload.session_id,
+                    record_kind=CrmRecordKind.QUEUE_STATUS,
+                    idempotency_key=payload.session_id,
+                    dataverse_record_id=payload.queue_item_id,
+                )
+                self._mark_progress(payload.session_id, queue_status_update_done=True)
+                self._aggregate(payload.session_id).queue_status_update = payload
+                return
+
+            body = self._queue_status_body(payload)
+            path = f"{entity_set}({payload.queue_item_id})"
             self._client.patch(path, json=body)
-        except (PermanentDataverseError, MappingError) as exc:
+        except (DataverseError, MappingError) as exc:
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.QUEUE_STATUS,
@@ -168,7 +176,7 @@ class DataverseWriteBackAdapter:
         self._aggregate(payload.session_id).queue_status_update = payload
 
     def emit_task(self, payload: TaskPayload) -> None:
-        # FR-018 belt-and-suspenders.
+        # FR-018 belt-and-suspenders — runs entirely before any Dataverse access.
         session = store.get_session(self._conn, payload.session_id)
         if session is None or session.final_disposition is None:
             return
@@ -178,29 +186,34 @@ class DataverseWriteBackAdapter:
         entity_key = "task"
         idempotency_field = self._t.logical_name("task.idempotency_key")
 
-        # Resolve ownership BEFORE constructing the payload so the resolved owner is
-        # stamped on TaskPayload.assigned_to too (Slice 1 left it null; data-model §5
-        # makes it the Slice 2 wiring point). FR-025: an unverifiable default blocks
-        # the Task emission rather than writing an unverified owner id.
-        resolved = self._resolve_task_owner(payload)
-        if resolved is None:
-            return
-        owner_id, owner_entity_set = resolved
-        body = self._task_body(
-            payload,
-            idempotency_field=idempotency_field,
-            owner_id=owner_id,
-            owner_entity_set=owner_entity_set,
-        )
-
+        # Owner-resolution + body construction + the POST all run inside the same
+        # try/except so a Dataverse failure ANYWHERE in the emit_task path (override
+        # lookup, owner verification, or the create itself) records a
+        # `crm_correlations(write_status=failed)` row and stamps
+        # `writeback_progress(run_status=blocked)` before re-raising — keeping the
+        # audit/resume ledger consistent. `MappingError` (from `_primary_id`) and
+        # transient `DataverseError` are caught too: the runner normalizes both
+        # into operator-visible `exit_status=failed` reports.
         try:
+            resolved = self._resolve_task_owner(payload)
+            if resolved is None:
+                # FR-025 unverifiable-default branch already recorded an
+                # operator-visible warning; nothing to write to the ledger.
+                return
+            owner_id, owner_entity_set = resolved
+            body = self._task_body(
+                payload,
+                idempotency_field=idempotency_field,
+                owner_id=owner_id,
+                owner_entity_set=owner_entity_set,
+            )
             record_id = self._idempotent_create(
                 entity_key=entity_key,
                 idempotency_field=idempotency_field,
                 idempotency_value=payload.session_id,
                 body=body,
             )
-        except (PermanentDataverseError, DataverseWriteBackError, MappingError) as exc:
+        except (DataverseError, DataverseWriteBackError, MappingError) as exc:
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.TASK,
