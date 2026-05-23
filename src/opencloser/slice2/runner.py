@@ -24,6 +24,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from re import error as re_error
 from typing import Literal
 
 from pydantic import ValidationError
@@ -58,6 +59,7 @@ from opencloser.models import (
 )
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import ConversationFixture, ConversationTurn, Persona
+from opencloser.redaction.layer import RedactionLayer
 from opencloser.state import store
 from opencloser.transport.mock import FixtureDrivenTransport
 
@@ -335,7 +337,40 @@ def _verify_readiness(
     *,
     dry_run: bool = False,
 ) -> _ReadinessResult | CrmRunReport:
-    # 1) Readiness — load + validate the mapping artifact, then verify live metadata.
+    """FR-007 startup/readiness validation (T028, T029a, T029b).
+
+    Validation order (each gate blocks before the next, all produce
+    operator-visible messages per spec §Definitions §"Operator-visible"):
+
+    1. **Mapping artifact**: file present, valid schema, ``_meta.approved == true``.
+    2. **Redaction policy** (T028): the configured ``[redaction]`` patterns
+       compile and the retention mode is valid (spec §Edge Cases "Malformed
+       redaction policy"). Validated for BOTH dry-run and write-enabled
+       because the redaction layer is default-on in both modes (FR-028).
+    3. **Live metadata verification** (T029a): for write-enabled, runs
+       ``verify()`` and blocks on any missing entity / field / option-set
+       (FR-002). Dry-run also calls ``verify()`` per
+       ``contracts/metadata-discovery-verification.md`` §5 but tolerates
+       auth-401/400 and transient failures per spec §Edge Cases "Dry-run
+       requested but write credentials are absent".
+    4. **Idempotency-key fields** (T029a, SC-015): the mapping MUST declare
+       both ``phone_call.idempotency_key`` and ``task.idempotency_key``. An
+       unmapped key field is explicitly surfaced here rather than failing
+       deep inside the adapter at write time.
+
+    Dataverse-unreachable-at-start (T029b operational gate) is handled by
+    the ``verify()`` exception path: a transient/auth failure on the
+    startup ``verify()`` call produces a blocked report (write-enabled) or
+    a tolerated placeholder (dry-run + 401/400/transient).
+
+    Configured-campaign-not-found (T029b operational gate) is currently
+    indistinguishable from FR-009 empty-queue-no-op because the
+    queue-loader's campaign filter is opaque to mapping-time validation
+    (the campaign value may be a free-form string OR a GUID lookup-target
+    depending on the mapping). Tracked as a known gap; see
+    ``test_us3_metadata_block.py`` for the documented behavior.
+    """
+    # 1) Mapping artifact load + approval gate.
     try:
         mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
     except MappingError as exc:
@@ -348,6 +383,19 @@ def _verify_readiness(
                 "re-run `discover-crm` and have a reviewer flip _meta.approved to true"
             ),
         )
+
+    # 2) T028 — redaction-policy validation. Default-on in both modes
+    # (FR-028); a malformed regex MUST fail readiness before any transcript
+    # write, session creation, or attempt increment (spec §Edge Cases
+    # "Malformed redaction policy").
+    try:
+        RedactionLayer.from_config(slice2_config.redaction)
+    except (ValueError, re_error) as exc:
+        return CrmRunReport(
+            exit_status="blocked",
+            message=f"redaction policy invalid: {exc}",
+        )
+
     translator = MappingTranslator(mapping)
     try:
         report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
@@ -388,6 +436,29 @@ def _verify_readiness(
             message="metadata verification failed: " + "; ".join(report.missing),
             metadata_report=report,
         )
+
+    # T029a + SC-015 — explicit idempotency-key field check. Without these
+    # mapping entries the adapter's `_idempotent_create` would fail at write
+    # time; SC-015 requires the block to be 100% at startup. `verify()` already
+    # checks fields THAT ARE MAPPED exist in Dataverse, but here we require
+    # the mapping to declare the two idempotency-key entries at all.
+    missing_keys = [
+        key for key in ("phone_call.idempotency_key", "task.idempotency_key")
+        if key not in mapping.fields
+    ]
+    if missing_keys:
+        return CrmRunReport(
+            exit_status="blocked",
+            message=(
+                "idempotency-key field(s) not mapped: "
+                f"{', '.join(missing_keys)} — SC-015 requires every "
+                "write-enabled run to verify these key fields as real "
+                "Dataverse fields. Add them to `config/dataverse_mapping.json` "
+                "and re-run `discover-crm`."
+            ),
+            metadata_report=report,
+        )
+
     return _ReadinessResult(translator=translator, metadata_report=report)
 
 
