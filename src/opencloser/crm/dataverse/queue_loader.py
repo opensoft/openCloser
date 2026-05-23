@@ -20,6 +20,10 @@ from opencloser.models import CallableStatus, QueueItem
 # (FR-008, contracts/dataverse-queue-loader.md).
 _DATAVERSE_CREATED_AT_FIELD = "createdon"
 
+# Conceptual mapping keys this module references repeatedly — extracted so a typo
+# fails once and the key is a single source of truth.
+_QUEUE_STATUS_FIELD = "queue.status"
+
 # Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we accept any
 # value matching this safe alphanumeric+dash+underscore pattern (which covers real
 # GUIDs and the test fixture ids) and reject anything containing OData reserved or
@@ -94,7 +98,7 @@ class DataverseQueueLoader:
                 entity, flt=f"{primary_id} eq {_odata_token(selector.queue_item_id)}", top=1
             )
         else:
-            status_field = self._t.logical_name("queue.status")
+            status_field = self._t.logical_name(_QUEUE_STATUS_FIELD)
             callable_value = self._t.option_set_value(f"queue_status.{self._callable_status}")
             order_field = self._t.logical_name("queue.next_attempt_at")
             filter_clauses = [f"{status_field} eq {callable_value}"]
@@ -146,9 +150,9 @@ class DataverseQueueLoader:
         return self._client.get(entity, params=params).json().get("value", [])
 
     def _to_queue_item(self, row: dict, primary_id: str) -> QueueItem:
-        status_logical = self._t.logical_name("queue.status")
+        status_logical = self._t.logical_name(_QUEUE_STATUS_FIELD)
         raw_status = row.get(status_logical)
-        status_key = self._t.option_set_key_for_value("queue.status", raw_status)
+        status_key = self._t.option_set_key_for_value(_QUEUE_STATUS_FIELD, raw_status)
         if status_key is None:
             raise QueueLoadError(
                 f"queue item {row.get(primary_id)!r} carries an unmapped "

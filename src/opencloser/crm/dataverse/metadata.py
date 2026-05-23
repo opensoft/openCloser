@@ -58,23 +58,25 @@ def _entity_attributes(client: DataverseClient, logical_name: str) -> set[str] |
     return {row["LogicalName"] for row in response.json().get("value", [])}
 
 
-def verify(
-    client: DataverseClient, mapping: DataverseMapping, *, now_utc_ms: str
-) -> MetadataVerificationReport:
-    """Lightweight, read-only verification that every mapped table and field still
-    exists in live Dataverse (FR-001 phase 2, FR-002).
-
-    Transient failures propagate (an unreachable Dataverse fails the run); a missing
-    table or field is reported in the result, not raised.
-    """
-    missing: list[str] = []
+def _check_entities(
+    client: DataverseClient, mapping: DataverseMapping
+) -> tuple[dict[str, set[str] | None], list[str]]:
+    """Verify every mapped entity exists; return (attributes_by_entity, missing)."""
     attributes_by_entity: dict[str, set[str] | None] = {}
+    missing: list[str] = []
     for entity_key, entity_ref in mapping.entities.items():
         attrs = _entity_attributes(client, entity_ref.logical_name)
         attributes_by_entity[entity_key] = attrs
         if attrs is None:
             missing.append(f"entity {entity_key!r} (table '{entity_ref.logical_name}')")
+    return attributes_by_entity, missing
 
+
+def _check_fields(
+    mapping: DataverseMapping, attributes_by_entity: dict[str, set[str] | None]
+) -> list[str]:
+    """Verify every mapped field's logical name appears on its entity's attribute list."""
+    missing: list[str] = []
     for field_key, field_ref in mapping.fields.items():
         if field_ref.entity not in mapping.entities:
             missing.append(
@@ -83,17 +85,24 @@ def verify(
             continue
         attrs = attributes_by_entity.get(field_ref.entity)
         if attrs is None:
-            continue  # the entity is missing — already reported above
+            continue  # the entity is missing — already reported by _check_entities
         if field_ref.logical_name not in attrs:
             missing.append(
                 f"field {field_key!r} (column '{field_ref.logical_name}' "
                 f"on '{mapping.entities[field_ref.entity].logical_name}')"
             )
+    return missing
 
-    # Option-set value validation — for each mapped option-set member, confirm its
-    # integer value is present in the live Dataverse picklist (FR-001/FR-002,
-    # contracts/metadata-discovery-verification.md). Cache per attribute so each
-    # picklist is only fetched once even when many option_sets share a field.
+
+def _check_option_set_values(
+    client: DataverseClient,
+    mapping: DataverseMapping,
+    attributes_by_entity: dict[str, set[str] | None],
+) -> list[str]:
+    """Verify each mapped option-set integer is present in the live Dataverse picklist."""
+    missing: list[str] = []
+    # Cache per attribute so each picklist is only fetched once even when many
+    # option_sets share a field.
     picklist_cache: dict[tuple[str, str], set[int] | None] = {}
     for option_key, option_ref in mapping.option_sets.items():
         field_ref = mapping.fields.get(option_ref.field)
@@ -104,10 +113,10 @@ def verify(
             )
             continue
         if field_ref.entity not in mapping.entities:
-            continue  # entity already reported above
+            continue  # entity already reported by _check_entities
         attrs = attributes_by_entity.get(field_ref.entity)
         if attrs is None or field_ref.logical_name not in attrs:
-            continue  # field already reported above — picklist would 404
+            continue  # field already reported by _check_fields — picklist would 404
         entity_logical = mapping.entities[field_ref.entity].logical_name
         cache_key = (entity_logical, field_ref.logical_name)
         if cache_key not in picklist_cache:
@@ -127,7 +136,21 @@ def verify(
                 f"Dataverse picklist '{field_ref.logical_name}' "
                 f"(live values: {sorted(live_values)})"
             )
+    return missing
 
+
+def verify(
+    client: DataverseClient, mapping: DataverseMapping, *, now_utc_ms: str
+) -> MetadataVerificationReport:
+    """Lightweight, read-only verification that every mapped entity, field, and
+    option-set value still exists in live Dataverse (FR-001 phase 2, FR-002).
+
+    Transient failures propagate (an unreachable Dataverse fails the run); a missing
+    table or field is reported in the result, not raised.
+    """
+    attributes_by_entity, missing = _check_entities(client, mapping)
+    missing.extend(_check_fields(mapping, attributes_by_entity))
+    missing.extend(_check_option_set_values(client, mapping, attributes_by_entity))
     return MetadataVerificationReport(
         ok=not missing, missing=missing, drift=[], checked_at=now_utc_ms
     )
