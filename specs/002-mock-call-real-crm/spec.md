@@ -268,14 +268,23 @@ When the system writes a transcript artifact, the transcript text first passes t
 
 ### Requirement Coverage Notes
 
-- **FR-001–FR-004 and FR-024** are covered by User Story 3, SC-007, and SC-015.
-- **FR-005–FR-007** are covered by User Story 2 scenario 3, User Story 3 scenario 2, SC-002, and SC-007.
-- **FR-008–FR-011 and FR-034** are covered by User Story 1 scenario 5, the queue/phone edge cases, SC-001, and SC-008.
-- **FR-012–FR-014 and FR-019–FR-020** are covered by User Story 5, SC-006, SC-010, and SC-011.
-- **FR-015–FR-018 and FR-025–FR-027** are covered by User Story 1 scenarios 1–6, SC-003, SC-004, SC-008, and SC-012.
-- **FR-021–FR-023** are covered by User Story 4, SC-005, and SC-014.
-- **FR-028–FR-030** are covered by User Story 6 and SC-009.
-- **FR-031–FR-033 and FR-035** are covered by User Story 2, SC-002, SC-012, SC-013, and demo artifact inspection.
+- **FR-001** (two-phase metadata) is covered by **User Story 1** (the `discover-crm` command produces the mapping artifact) **and User Story 3** (the per-run lightweight verification gate), SC-001, SC-007.
+- **FR-002** (block on unverified metadata) is covered by **User Story 3**, SC-007.
+- **FR-003** (preserve high-confidence values) is covered by **User Story 1 scenario 6 and User Story 3 scenario 3**, the "Dataverse queue item changed by a human between claim and write-back" edge case, and SC-011.
+- **FR-004** (mapping artifact) is covered by **User Story 1** (artifact produced) and **User Story 3** (artifact re-verified live before each write).
+- **FR-005** (secrets handling) is covered by **User Story 2 scenario 3, User Story 3 scenario 2**, and a dedicated boundary assertion that no secret value appears in produced run reports or artifacts (see the Phase 9 polish task).
+- **FR-006–FR-007** (config + readiness) are covered by **User Story 3 scenario 2** and SC-007; the dry-run readiness path (missing write credentials is NOT an error in dry-run) is covered by **User Story 2 scenario 1** and the "Dry-run requested but write credentials are absent" edge case.
+- **FR-008–FR-011 and FR-034** are covered by **User Story 1 scenario 5**, the queue/phone edge cases, SC-001, and SC-008.
+- **FR-012–FR-014** are covered by **User Story 1** (Slice 1 contracts reused unchanged), **User Story 5** (the FR-014 allowed exception for fixture pre-validation), SC-010, and SC-011.
+- **FR-015–FR-018** are covered by **User Story 1 scenarios 1–6**, SC-003, SC-004, SC-008, and SC-011.
+- **FR-019–FR-020** are covered by **User Story 5** and SC-006.
+- **FR-021–FR-022** (duplicate-event idempotency) are covered by **User Story 4 scenarios 1, 4**, and SC-005.
+- **FR-023** (bounded retry + resume + ≥90-day correlation/progress retention) is covered by **User Story 4 scenarios 2, 3** and SC-014; the retention floor is also enforced by the Phase 9 polish task alongside FR-035.
+- **FR-024** (idempotency-key stamping + pre-query) is split: **User Story 3** verifies the key field exists in metadata (SC-015), and **User Story 4 scenarios 1–4** verify the stamp + pre-query behavior end-to-end.
+- **FR-025–FR-027** (task ownership / review owner / DNC-no-task) are covered by **User Story 1 scenarios 1–4**, SC-003, and SC-004.
+- **FR-028–FR-030** are covered by **User Story 6** and SC-009.
+- **FR-031–FR-033** are covered by **User Story 1** (write-enabled CLI), **User Story 2** (dry-run default), SC-002, SC-012, and SC-013.
+- **FR-035** (local audit retention, no secrets in artifacts) is covered by the Phase 9 polish task and by demo-artifact inspection per SC-012.
 
 ## Assumptions
 

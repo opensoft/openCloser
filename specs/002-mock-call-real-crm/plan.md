@@ -192,20 +192,25 @@ contract are **reused unchanged** — Slice 2 adds concrete implementations behi
 
 ## Phase 2 — Task Generation (handoff to `/speckit-tasks`)
 
-`/speckit-tasks` will derive an ordered `tasks.md`. Expected groupings:
+`/speckit-tasks` will derive an ordered `tasks.md`. Expected groupings (which map
+to the user-story-organized phases that actually appear in `tasks.md`):
 
-1. **Bootstrap** — add `httpx` dependency; `config/slice2.toml`; `tests/fixtures/dataverse/`.
-2. **State store** — `crm_correlations` + `writeback_progress` schema + DAO.
-3. **Dataverse client** — `auth.py` (client-credentials), `client.py` (Web API + transient retry), `errors.py`.
-4. **Metadata** — discovery + lightweight verification; mapping-artifact load/write.
-5. **Queue loader** — Dataverse row → `QueueItem`; selector semantics; empty-queue no-op.
-6. **Write-back adapter** — `DataverseWriteBackAdapter` + idempotency pre-query; **contract tests** (SC-011).
-7. **Transport hardening** — FR-019/FR-020 fixture pre-validation (issue #2).
-8. **Redaction** — `RedactionLayer` + policies; artifact-writer integration.
-9. **Slice 2 runner & resume** — run-mode coordination + resume coordinator.
-10. **CLI** — `discover-crm` + `run-crm` commands; dry-run default.
-11. **Integration** — US1–US6 against the Dataverse fake; SC-001…SC-015.
-12. **Docs** — `quickstart.md` finalization, demo cleanup runbook, close GitHub issue #2.
+1. **Bootstrap** — add `httpx` dependency; `config/slice2.toml`; `tests/fixtures/dataverse/`. → tasks.md Phase 1 (Setup, T001–T004).
+2. **State store** — `crm_correlations` + `writeback_progress` schema + DAO. → tasks.md Phase 2 (T005–T007).
+3. **Dataverse client** — `auth.py` (client-credentials), `client.py` (Web API + transient retry), `errors.py`. → tasks.md Phase 2 (T008–T011).
+4. **Metadata** — discovery + lightweight verification; mapping-artifact load/write. → tasks.md Phase 2 (T012, T013) for the modules; tasks.md Phase 3 (T020 `discover-crm` command) wires them.
+5. **Queue loader** — Dataverse row → `QueueItem`; selector semantics; empty-queue no-op. → tasks.md Phase 2 (T014).
+6. **Write-back adapter** — `DataverseWriteBackAdapter` + idempotency pre-query; **contract tests** (SC-011). → tasks.md Phase 3 / US1 (T017–T018, T023, T048); idempotency pre-query in Phase 6 / US4 (T031).
+7. **Transport hardening** — FR-019/FR-020 fixture pre-validation (issue #2). → tasks.md Phase 7 / US5 (T035, T036).
+8. **Redaction** — `RedactionLayer` + policies; artifact-writer integration. → tasks.md Phase 8 / US6 (T037–T039).
+9. **Slice 2 runner & resume** — run-mode coordination + resume coordinator. → tasks.md US1 (T019, T022), US2 (T025), US3 (T028, T029a, T029b), US4 (T032, T045).
+10. **CLI** — `discover-crm` + `run-crm` commands; dry-run default. → tasks.md Phase 3 / US1 (T020, T021); resume routing in Phase 6 / US4 (T033).
+11. **Integration** — US1–US6 against the Dataverse fake; SC-001…SC-015. → tasks.md US1–US6 integration-test slots (T023, T027, T030, T034, T036, T039, T046).
+12. **Docs & polish** — `quickstart.md` finalization, demo cleanup runbook, close GitHub issue #2, boundary test, retention enforcement, no-secrets assertion, full ruff+pytest pass. → tasks.md Phase 9 (T040–T044, T047).
+
+The user-story phase ordering in `tasks.md` is preferred over a strict
+groupings-1-to-12 sequence because each user story is independently
+demonstrable and parallelizable per the constitution's Thin-Slice principle.
 
 ## Complexity Tracking
 
