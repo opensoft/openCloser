@@ -62,9 +62,21 @@ class DataverseQueueLoader:
             order_field = self._t.logical_name("queue.next_attempt_at")
             # Deterministic next-ready ordering (FR-008): earliest next_attempt_at,
             # then the stable primary id as tie-breaker.
+            #
+            # Scope by `selector.campaign` when the mapping carries a `queue.campaign`
+            # field (contracts/dataverse-queue-loader.md). When the mapping omits the
+            # field the loader cannot translate the campaign to a Dataverse column,
+            # so the CLI gate in `run-crm` (which already requires a non-empty
+            # campaign for --next-ready) is the user-facing signal; the query stays
+            # campaign-agnostic for the unmapped case rather than blocking the run.
+            clauses = [f"{status_field} eq {ready_value}"]
+            campaign_field_ref = self._t.mapping.fields.get("queue.campaign")
+            if campaign_field_ref is not None and selector.campaign:
+                campaign_field = campaign_field_ref.logical_name
+                clauses.append(f"{campaign_field} eq '{selector.campaign}'")
             rows = self._query(
                 entity,
-                flt=f"{status_field} eq {ready_value}",
+                flt=" and ".join(clauses),
                 orderby=f"{order_field} asc,{primary_id} asc",
                 top=1,
             )

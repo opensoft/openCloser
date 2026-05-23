@@ -140,6 +140,55 @@ def test_load_next_ready_is_deterministic() -> None:
     assert item.queue_item_id == "q-early"  # earliest next_attempt_at wins
 
 
+def test_load_next_ready_filters_by_campaign_when_mapped() -> None:
+    """When the mapping carries `queue.campaign`, NextReady scopes the query to
+    the selector's campaign — contracts/dataverse-queue-loader.md."""
+    # Augment the mapping with a campaign field (additive — extra: ignore models).
+    mapping_with_campaign = _MAPPING.model_copy(deep=True)
+    mapping_with_campaign.fields["queue.campaign"] = type(
+        next(iter(_MAPPING.fields.values()))
+    )(
+        entity="queue_item",
+        logical_name="medx_campaign",
+        type="string",
+    )
+    entities = _entities(mapping_with_campaign)
+    # Add campaign to known attrs so the fake $filter doesn't reject it.
+    entities["medx_callqueueitem"].add("medx_campaign")
+    rec_in = _queue_record(qid="q-in", next_at="2026-05-22T09:00:00.000Z")
+    rec_in["medx_campaign"] = "alf-q2-davis"
+    rec_out = _queue_record(qid="q-out", next_at="2026-05-22T08:00:00.000Z")
+    rec_out["medx_campaign"] = "other-campaign"
+    fake = DataverseFake(
+        entities=entities,
+        records={"medx_callqueueitem": [rec_in, rec_out], "account": [_ACCOUNT]},
+    )
+    loader = DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping_with_campaign))
+
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None
+    # `q-out` has an earlier next_attempt_at but is in the wrong campaign — it
+    # must be excluded by the campaign filter.
+    assert item.queue_item_id == "q-in"
+
+
+def test_load_next_ready_unfiltered_when_campaign_unmapped() -> None:
+    """If the mapping omits `queue.campaign`, the loader falls back to the
+    campaign-agnostic query (the CLI gate at run-crm is the user-facing signal
+    in that case — the loader does NOT silently fail)."""
+    loader = _loader(
+        {
+            "medx_callqueueitem": [
+                _queue_record(qid="q-only", next_at="2026-05-22T09:00:00.000Z")
+            ],
+            "account": [_ACCOUNT],
+        }
+    )
+    item = loader.load(NextReady("any-campaign"))
+    assert item is not None
+    assert item.queue_item_id == "q-only"
+
+
 def test_load_empty_queue_returns_none() -> None:
     loader = _loader({"medx_callqueueitem": [], "account": [_ACCOUNT]})
     assert loader.load(ExplicitId("does-not-exist")) is None

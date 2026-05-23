@@ -206,11 +206,14 @@ def run_one_crm_item(
             message=str(exc),
             warnings=adapter.warnings(),
         )
-    except (DataverseError, DataverseWriteBackError) as exc:
-        # A permanent Dataverse write failure mid-run is operator-visible-failed.
-        # The adapter has already recorded `writeback_progress.run_status=blocked`
-        # with the error before re-raising, so the resume coordinator can pick up
-        # in a later slice (US4).
+    except (DataverseError, DataverseWriteBackError, MappingError) as exc:
+        # A permanent Dataverse write failure mid-run, or a missing/invalid
+        # mapping entry surfaced by the adapter (e.g. `primary_id` not set), is
+        # operator-visible-failed. The adapter has already recorded a
+        # `crm_correlations(write_status=failed)` row plus
+        # `writeback_progress.run_status=blocked` with the error before
+        # re-raising, so the resume coordinator can pick up in a later slice
+        # (US4).
         return CrmRunReport(
             exit_status="failed",
             message=f"dataverse write failed: {exc}",
