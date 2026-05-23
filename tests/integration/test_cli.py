@@ -337,6 +337,7 @@ def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
     # per Codex PR #7 review + spec §Edge Cases.
     assert "warning" in out.lower() and "missing required dataverse secret" in out.lower()
     # Run reaches the dry-run path; the placeholder credentials fail later on
-    # the queue load, which produces exit_status="failed" (CLI exit code 1).
-    # The exact code is less important than that we're past secret loading.
+    # the queue load, which produces exit_status="failed" (CLI exit code 2 per
+    # `_EXIT_CODE` in cli.py). The exact code is less important than the fact
+    # that we're past secret loading and into the dry-run flow.
     assert run.exit_code != 0

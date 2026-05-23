@@ -97,17 +97,27 @@ class _ReadinessResult:
     metadata_report: MetadataVerificationReport
 
 
+_DRY_RUN_TOLERABLE_AUTH_STATUS_CODES: frozenset[int] = frozenset({400, 401})
+
+
 def _is_dry_run_tolerable_verify_failure(exc: Exception) -> bool:
     """Per `contracts/metadata-discovery-verification.md` §5 + spec §Edge Cases
     "Dry-run requested but write credentials are absent", dry-run readiness
-    tolerates ONLY two narrow classes of `verify()` failure:
+    tolerates a NARROW set of `verify()` failures that correspond to
+    "no working credentials" or "environment temporarily unreachable":
 
-    1. A `PermanentDataverseError` with HTTP 401 — the OAuth token-acquire
-       failed because credentials are absent or invalid. This is the
-       "missing write credentials" scenario the spec explicitly carves out.
+    1. A `PermanentDataverseError` with HTTP 400 (Microsoft Entra
+       `invalid_request` for malformed tenant/client when the operator has
+       placeholder secrets) or HTTP 401 (`invalid_client` / bad
+       client_secret). Both are the "missing/invalid write credentials"
+       scenario the spec carves out (Codex PR #7 round-4 P1: a placeholder
+       tenant typically returns 400, not 401, so 401-only was too narrow).
     2. A `TransientDataverseError` — network unreachable, 5xx, timeout. The
        runtime cannot determine whether the configured metadata is valid;
-       dry-run should not fail-hard on environmental flakiness.
+       dry-run should not fail-hard on environmental flakiness (this is a
+       deliberate liberalization vs. strictly the contract wording — a
+       transient 5xx blocking dry-run rehearsal is worse UX than letting
+       the operator notice their environment is flaky and retry).
 
     Anything else — 403/permission regression, 404 entity not found, a
     `MetadataError` from a missing-mapping read — is a REAL verification
@@ -117,7 +127,10 @@ def _is_dry_run_tolerable_verify_failure(exc: Exception) -> bool:
     """
     if isinstance(exc, TransientDataverseError):
         return True
-    return isinstance(exc, PermanentDataverseError) and exc.status_code == 401
+    return (
+        isinstance(exc, PermanentDataverseError)
+        and exc.status_code in _DRY_RUN_TOLERABLE_AUTH_STATUS_CODES
+    )
 
 
 def run_one_crm_item(
