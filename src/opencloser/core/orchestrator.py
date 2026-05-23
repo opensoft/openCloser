@@ -141,14 +141,15 @@ def process_one_queue_item(
         raise ValueError("transport_fixture_id is required when eligibility allows the call")
 
     # FR-019/FR-020 (Slice 2 / GitHub issue #2 / FR-014 allowed exception):
-    # place the call NOW, before any session/decision/queue-status row is written.
-    # `place_call` internally calls `validate_fixture`, so a malformed fixture
-    # raises MalformedFixtureError here — leaving no session row, no eligibility-
-    # decision row, no attempt consumed, and no Dataverse queue change (SC-006).
-    mock_call_id: str | None = None
+    # structurally pre-validate the transport fixture BEFORE any session/decision/
+    # queue-status row is written, so a malformed fixture raises MalformedFixtureError
+    # here — leaving no session row, no eligibility-decision row, no attempt consumed,
+    # and no Dataverse queue change (SC-006). The hook is side-effect-free (no call
+    # id allocated, no real call dialed) so the long-standing "session row before
+    # call attempt" ordering contract is preserved for any future real transport.
     if decision.outcome != "block":
         assert transport_fixture_id is not None  # narrowed by the check above
-        mock_call_id = transport.place_call(queue_item, transport_fixture_id)
+        transport.pre_validate_fixture(transport_fixture_id)
 
     # ----- step 3: create session row (always, per Q3) ----------------------
     session_id = ids.new_session_id()
@@ -165,7 +166,7 @@ def process_one_queue_item(
         state=initial_state,
         final_disposition=final_disp_at_start,
         blocked_reason=blocked_reason,
-        mock_provider_call_id=mock_call_id,
+        mock_provider_call_id=None,
         started_at=started_at,
         ended_at=started_at if decision.outcome == "block" else None,
     )
@@ -191,7 +192,6 @@ def process_one_queue_item(
         return report
 
     # ----- allow branch -----------------------------------------------------
-    assert mock_call_id is not None  # place_call ran above for the allow path
     return _run_allowed_session(
         conn=conn,
         session=initial_session,
@@ -204,7 +204,7 @@ def process_one_queue_item(
         persona=persona,
         crm=crm,
         conversation_fixture=conversation_fixture,
-        mock_call_id=mock_call_id,
+        transport_fixture_id=transport_fixture_id,
         start_ts_monotonic=start_ts_monotonic,
     )
 
@@ -303,21 +303,29 @@ def _run_allowed_session(
     persona: Persona,
     crm: WriteBackAdapter,
     conversation_fixture: ConversationFixture | None,
-    mock_call_id: str,
+    transport_fixture_id: str | None,
     start_ts_monotonic: float,
 ) -> RunReport:
     del eligibility  # already used; kept for signature symmetry
 
-    # Transition session to eligibility_evaluated, then in_flight. The mock_call_id
-    # was already obtained by process_one_queue_item via transport.place_call (which
-    # also pre-validated the fixture per FR-019/FR-020), and was recorded on the
-    # session row at insert time.
+    # transport_fixture_id was pre-validated (None-check + structural via
+    # transport.pre_validate_fixture) by process_one_queue_item before the session
+    # row was created — by here it is guaranteed present and structurally sound.
+    assert transport_fixture_id is not None
+
+    # Transition session to eligibility_evaluated.
     with store.transaction(conn):
         store.update_session(conn, session.session_id, state=SessionState.ELIGIBILITY_EVALUATED)
+
+    # Place call. place_call re-runs validate_fixture as defense in depth (idempotent
+    # with pre_validate_fixture in process_one_queue_item), then allocates the
+    # mock_provider_call_id and stashes the validated event snapshot.
+    mock_call_id = transport.place_call(queue_item, transport_fixture_id)
     with store.transaction(conn):
         store.update_session(
             conn,
             session.session_id,
+            mock_provider_call_id=mock_call_id,
             state=SessionState.IN_FLIGHT,
         )
 

@@ -11,8 +11,14 @@ Resolves GitHub issue #2. Covers each FR-020 rejection class:
 These tests drive ``process_one_queue_item`` directly — the entry point that creates
 sessions, mutates queue state, and increments attempts — and assert that on a malformed
 fixture the orchestrator fails *before* writing any of those rows. This is the real
-SC-006 anchor: if the orchestrator's pre-session ``place_call`` gate ever regresses,
-these assertions catch it (a direct ``validate_fixture`` call would not).
+SC-006 anchor: if the orchestrator's pre-session ``transport.pre_validate_fixture``
+gate ever regresses, these assertions catch it (a direct ``validate_fixture`` call
+would not).
+
+The pre-validation hook is deliberately side-effect-free (no call id allocated, no
+real call dialed), preserving the long-standing "session row before call attempt"
+ordering contract for any future real transport — ``place_call`` itself still runs
+after session insert.
 """
 
 from __future__ import annotations

@@ -15,6 +15,15 @@ from opencloser.models import MockCallEvent, QueueItem
 class CallTransport(Protocol):
     """FR-008 conceptual contract — the only path through which call-level events enter the Core."""
 
+    def pre_validate_fixture(self, fixture_id: str) -> None:  # pragma: no cover - protocol
+        """FR-019/FR-020 (Slice 2 addendum): side-effect-free structural pre-validation
+        of the selected transport fixture. MUST be safe to call before any DB write so
+        the orchestrator can gate session/decision/attempt persistence on it without
+        placing a (future-real) call attempt. Raises ``MalformedFixtureError``
+        (a ``ValueError`` subclass) on any structural failure.
+        """
+        ...
+
     def place_call(
         self, queue_item: QueueItem, fixture_id: str
     ) -> str:  # pragma: no cover - protocol

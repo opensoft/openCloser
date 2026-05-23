@@ -51,22 +51,37 @@ def validate_fixture(fixture_path: str | Path) -> list[dict[str, Any]]:
 
     Callers that only want pure validation can ignore the return value.
 
-    Raises :class:`MalformedFixtureError` if any of the following holds:
+    Raises :class:`MalformedFixtureError` (a ``ValueError`` subclass) when:
 
-    - the fixture file does not exist,
+    - the fixture path does not exist, is not a regular file, or cannot be read
+      (permission, encoding, etc.),
     - the file's contents are not valid JSON,
     - the parsed JSON is not an object with an ``events`` list,
     - any event lacks ``type``, ``event_id``, or ``timestamp``.
+
+    All read/decode failures are normalized to ``MalformedFixtureError`` so callers
+    get a single rejection class to handle regardless of *why* the fixture is bad.
 
     Structurally valid but semantically inconsistent event sequences (e.g. out-of-order
     timestamps, late conflicting events) are intentionally accepted; that is a
     test-authoring concern, not a Slice 2 fixture-validation concern (spec §Edge Cases).
     """
     path = Path(fixture_path)
-    if not path.exists():
-        raise MalformedFixtureError(f"transport fixture not found: {path}")
+    if not path.is_file():
+        # Covers nonexistent paths, directories, broken symlinks, and special files —
+        # all of which would otherwise surface as different exception types from
+        # read_text. A uniform message keeps the FR-020 contract single-class.
+        raise MalformedFixtureError(f"transport fixture not found or not a regular file: {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # PermissionError, IsADirectoryError, UnicodeDecodeError, etc. all fold into
+        # MalformedFixtureError so operator handling is uniform (FR-020).
+        raise MalformedFixtureError(
+            f"transport fixture {path.name!r} could not be read: {exc}"
+        ) from exc
+    try:
+        data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise MalformedFixtureError(
             f"transport fixture {path.name!r} is not valid JSON ({exc.msg})"
@@ -103,6 +118,19 @@ class FixtureDrivenTransport:
         # rather than re-reading the file (closes the TOCTOU window between place_call's
         # validation and event_stream's iteration). Consumed (one-shot) by event_stream.
         self._pending: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+
+    def pre_validate_fixture(self, fixture_id: str) -> None:
+        """FR-019/FR-020 side-effect-free pre-validation hook for the orchestrator.
+
+        Resolves and validates the fixture without allocating a call id or stashing
+        any pending state. This is what the orchestrator calls *before* writing any
+        session/decision row so a malformed fixture leaves no DB trail (SC-006),
+        while ``place_call``'s real side effect (call-id allocation, plus — for
+        future real transports — actually dialing) stays after session insert per
+        the long-standing "session row before call attempt" ordering contract.
+        Idempotent with the validation already inside ``place_call``.
+        """
+        validate_fixture(self._resolve_fixture_path(fixture_id))
 
     def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:
         """FR-007 + FR-019: assign a globally-unique mock_provider_call_id and stash

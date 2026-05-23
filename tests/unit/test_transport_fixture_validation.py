@@ -125,8 +125,51 @@ def test_validate_fixture_accepts_semantically_inconsistent_fixture(tmp_path: Pa
 
 def test_validate_fixture_rejects_missing_file(tmp_path: Path) -> None:
     """FR-020: a missing fixture file is a MalformedFixtureError."""
-    with pytest.raises(MalformedFixtureError, match="not found"):
+    with pytest.raises(MalformedFixtureError, match="not found or not a regular file"):
         validate_fixture(tmp_path / "does_not_exist.json")
+
+
+def test_validate_fixture_rejects_directory_at_fixture_path(tmp_path: Path) -> None:
+    """FR-020 (defensive): a path that exists but is a directory (not a regular file)
+    folds into MalformedFixtureError so callers don't see a stray IsADirectoryError
+    bubble through the FR-020 contract."""
+    dir_path = tmp_path / "actually_a_dir"
+    dir_path.mkdir()
+    with pytest.raises(MalformedFixtureError, match="not found or not a regular file"):
+        validate_fixture(dir_path)
+
+
+def test_validate_fixture_rejects_non_utf8_bytes(tmp_path: Path) -> None:
+    """FR-020 (defensive): a fixture file containing non-UTF-8 bytes raises
+    MalformedFixtureError (not UnicodeDecodeError), preserving the single-class
+    rejection contract operators rely on."""
+    path = tmp_path / "binary.json"
+    # Latin-1 byte 0xC0 is invalid as a UTF-8 start byte.
+    path.write_bytes(b"\xc0\xc1\xc2 not utf-8")
+    with pytest.raises(MalformedFixtureError, match="could not be read"):
+        validate_fixture(path)
+
+
+def test_validate_fixture_rejects_unreadable_file(tmp_path: Path) -> None:
+    """FR-020 (defensive): an unreadable fixture (chmod 000 / PermissionError) folds
+    into MalformedFixtureError instead of bubbling OSError. Skipped on platforms where
+    the test process can read regardless of file mode (e.g. running as root)."""
+    path = tmp_path / "unreadable.json"
+    path.write_text(json.dumps({"events": []}), encoding="utf-8")
+    path.chmod(0)
+    try:
+        # If the process can still read the file (e.g. root), the harden-OSError path
+        # cannot be exercised — skip rather than spuriously fail.
+        try:
+            path.read_text(encoding="utf-8")
+            pytest.skip("test process can read mode-0 files (running as root?)")
+        except OSError:
+            pass
+        with pytest.raises(MalformedFixtureError, match="could not be read"):
+            validate_fixture(path)
+    finally:
+        # Restore so pytest's tmp_path cleanup can delete the file.
+        path.chmod(0o600)
 
 
 def test_validate_fixture_rejects_invalid_json(tmp_path: Path) -> None:
@@ -236,8 +279,73 @@ def test_place_call_propagates_missing_fixture_as_malformed_fixture_error(
     """A missing fixture file surfaces as ``MalformedFixtureError`` (same no-mutation
     outcome as invalid JSON / missing events / missing identity field)."""
     transport = FixtureDrivenTransport(tmp_path)
-    with pytest.raises(MalformedFixtureError, match="not found"):
+    with pytest.raises(MalformedFixtureError, match="not found or not a regular file"):
         transport.place_call(_qi(), "missing_one")
+
+
+# ---------------------------------------------------------------------------
+# pre_validate_fixture — side-effect-free orchestrator hook (FR-019/FR-020/SC-006)
+#
+# Lets the orchestrator gate session/decision/queue-status writes on fixture
+# validity *without* dialing a (future-real) call. The "session row before call
+# attempt" ordering contract is preserved for any future real transport.
+# ---------------------------------------------------------------------------
+
+
+def test_pre_validate_fixture_passes_for_well_formed_fixture(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "ok.json",
+        json.dumps({"events": [{"event_id": "e1", "type": "no_answer", "timestamp": _T}]}),
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    # Returns None; must not raise.
+    assert transport.pre_validate_fixture("ok") is None
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [
+        lambda d: (d / "bad.json").write_text("not json at all", encoding="utf-8"),
+        lambda d: (d / "bad.json").write_text(
+            json.dumps({"fixture_id": "no_events"}), encoding="utf-8"
+        ),
+        lambda d: (d / "bad.json").write_text(
+            json.dumps({"events": [{"type": "connected"}]}), encoding="utf-8"
+        ),
+        lambda d: None,  # missing file
+    ],
+    ids=["invalid_json", "no_events_array", "event_missing_identity", "missing_file"],
+)
+def test_pre_validate_fixture_rejects_malformed_fixture(tmp_path: Path, writer) -> None:
+    """Each FR-020 rejection class surfaces through pre_validate_fixture as
+    MalformedFixtureError, without allocating a call id."""
+    writer(tmp_path)
+    transport = FixtureDrivenTransport(tmp_path)
+    with pytest.raises(MalformedFixtureError):
+        transport.pre_validate_fixture("bad")
+    # The hook MUST be side-effect-free: no pending call binding may exist.
+    assert transport._pending == {}
+
+
+def test_pre_validate_fixture_does_not_allocate_call_id(tmp_path: Path) -> None:
+    """pre_validate_fixture is purely a check — it MUST NOT allocate a
+    mock_provider_call_id or stash any pending fixture binding (so the orchestrator
+    can call it before deciding whether to commit a session row)."""
+    _write(
+        tmp_path / "ok.json",
+        json.dumps({"events": [{"event_id": "e1", "type": "no_answer", "timestamp": _T}]}),
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    transport.pre_validate_fixture("ok")
+    assert transport._pending == {}, "pre_validate_fixture must not register a pending call"
+
+
+def test_pre_validate_fixture_rejects_path_traversal_fixture_id(tmp_path: Path) -> None:
+    """Path-traversal protection in the resolver applies to pre_validate_fixture too —
+    a fixture_id with ``..`` or path separators is rejected before any read attempt."""
+    transport = FixtureDrivenTransport(tmp_path)
+    with pytest.raises(ValueError, match="invalid transport fixture id"):
+        transport.pre_validate_fixture("../escape")
 
 
 # ---------------------------------------------------------------------------
