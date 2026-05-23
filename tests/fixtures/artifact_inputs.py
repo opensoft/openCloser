@@ -19,6 +19,7 @@ from opencloser.models import (
 )
 
 _T = "2026-05-19T17:00:00.000Z"
+_PERSONA_VERSION = "alf-appointment-setter@0.1.0"
 
 DEFAULT_TRANSCRIPT = "[persona] Hi, this is an AI assistant.\n[contact] Sure.\n"
 
@@ -39,7 +40,7 @@ def make_artifact_inputs(
         session_id=session_id,
         queue_item_id="q1",
         mock_provider_call_id="call_x",
-        persona_version="alf-appointment-setter@0.1.0",
+        persona_version=_PERSONA_VERSION,
         final_disposition=Disposition.INTERESTED_CALLBACK_REQUESTED,
         summary=summary,
         # Mirror what an orchestrator would carry: when callers supply transcript
@@ -58,7 +59,7 @@ def make_artifact_inputs(
         session_id=session_id,
         queue_item_id="q1",
         mock_provider_call_id="call_x",
-        persona_version="alf-appointment-setter@0.1.0",
+        persona_version=_PERSONA_VERSION,
         final_disposition=Disposition.INTERESTED_CALLBACK_REQUESTED,
         summary=summary,
         started_at=_T,
@@ -80,7 +81,7 @@ def make_artifact_inputs(
         subject="Callback Thursday 14:00",
         preferred_callback_window="Thursday 14:00",
         captured_email=captured_email,
-        persona_version="alf-appointment-setter@0.1.0",
+        persona_version=_PERSONA_VERSION,
         created_at=_T,
     )
     writeback = WriteBack(
