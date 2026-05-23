@@ -9,7 +9,10 @@ dependency-allowed rules from `contracts/*.md` hold. Per boundary:
   but MUST NOT import each other.
 - ``crm`` may import `models` and `state` only — `contracts/crm-writeback.md`
   explicitly forbids `core` for the write-back boundary.
-- ``artifacts`` writer may import `models` only.
+- ``artifacts`` writer may import `models` and `redaction` — per
+  `contracts/redaction-layer.md`, the writer calls the redaction layer
+  immediately before any transcript disk write (FR-028..FR-030).
+- ``redaction`` may import `models` only.
 - ``state`` may import `models` only.
 
 Each group may also import its own submodules — intra-boundary imports

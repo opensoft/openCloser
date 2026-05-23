@@ -32,6 +32,10 @@ _TASK_FILENAME = "task.json"
 _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
 
+# Cached so repeated calls without an explicit layer don't re-compile the built-in
+# redaction patterns on every session write.
+_DEFAULT_REDACTION_LAYER = RedactionLayer.default()
+
 
 @dataclass(frozen=True, slots=True)
 class ArtifactPaths:
@@ -68,6 +72,16 @@ def write_session_artifacts(
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    # Decide retention BEFORE writing session-result, so the exported pointer never
+    # advertises a transcript file that summary-only retention is about to skip
+    # (contracts/redaction-layer.md §Behavior; FR-030).
+    effective_layer = redaction_layer or _DEFAULT_REDACTION_LAYER
+    summary_only = (
+        transcript_text is not None and effective_layer.retention_mode() == "summary-only"
+    )
+    if summary_only and normalized_result.transcript_pointer is not None:
+        normalized_result = normalized_result.model_copy(update={"transcript_pointer": None})
+
     session_result_path = session_dir / _SESSION_RESULT_FILENAME
     _write_json_atomic(session_result_path, normalized_result)
 
@@ -80,12 +94,9 @@ def write_session_artifacts(
         _write_json_atomic(task_path, task)
 
     transcript_path: Path | None = None
-    if transcript_text is not None:
-        effective_layer = redaction_layer or RedactionLayer.default()
-        if effective_layer.retention_mode() == "full":
-            transcript_path = session_dir / _TRANSCRIPT_FILENAME
-            _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
-        # else summary-only retention (FR-030): no transcript file is written.
+    if transcript_text is not None and not summary_only:
+        transcript_path = session_dir / _TRANSCRIPT_FILENAME
+        _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
     _write_json_atomic(eligibility_path, eligibility_decision)
