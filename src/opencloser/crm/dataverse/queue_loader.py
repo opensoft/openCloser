@@ -36,25 +36,37 @@ def _lookup_value_name(field_ref: DataverseFieldRef) -> str:
     return field_ref.logical_name
 
 
-# Field types whose `$filter` RHS is a bare literal in OData (GUID, integer, boolean).
+# Field types whose `$filter` RHS is a bare literal that goes through the strict
+# token validator (GUID, integer). Booleans need their own special-case path
+# because OData requires lowercase `true`/`false` (not Python's `True`/`False`).
 # Everything else is treated as a quoted string ('value'). Adding more types here
 # (e.g. `datetime`) is a deliberate decision — datetimes need their own RFC3339 form.
-_BARE_LITERAL_TYPES = frozenset({"lookup", "integer", "boolean"})
+_BARE_LITERAL_TYPES = frozenset({"lookup", "integer"})
 
 
 def _odata_value(field_type: str, value: object) -> str:
     """Render `value` as an OData `$filter` RHS appropriate for `field_type`.
 
-    Lookups (`_<name>_value` GUIDs), integers, and booleans go in bare and ARE
+    Booleans render as lowercase `true`/`false` (the OData literal form;
+    Python's `str(True)` = `"True"` would be invalid OData — Copilot review on
+    PR #3). Lookups (`_<name>_value` GUIDs) and integers go in bare and ARE
     routed through `_odata_token` — those types really shouldn't carry reserved
     characters and the strict validator catches typos and injection attempts.
-
     String values use the OData string-literal form: escape `'` → `''` and wrap
-    in single quotes. Validation isn't needed — the single-quote wrapping confines
-    the value, and legitimate campaign names commonly contain spaces, periods, or
-    apostrophes that the strict token validator would reject (Codex follow-up
-    review on PR #3).
+    in single quotes. Validation isn't needed for strings — the single-quote
+    wrapping confines the value, and legitimate campaign names commonly contain
+    spaces, periods, or apostrophes that the strict token validator would reject
+    (Codex follow-up review on PR #3).
     """
+    if field_type == "boolean":
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        text = str(value).lower()
+        if text not in ("true", "false"):
+            raise QueueLoadError(
+                f"invalid OData boolean value {value!r} — expected true/false"
+            )
+        return text
     if field_type in _BARE_LITERAL_TYPES:
         return _odata_token(value)
     text = str(value)

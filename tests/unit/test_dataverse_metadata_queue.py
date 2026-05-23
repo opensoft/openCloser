@@ -403,6 +403,21 @@ def test_load_next_ready_string_campaign_accepts_common_characters(
     assert item is not None and item.queue_item_id == _QUEUE_GUID
 
 
+def test_odata_value_renders_boolean_lowercase() -> None:
+    """OData boolean literals are lowercase `true`/`false`; Python's `str(True)`
+    would emit `True` which is not a valid OData boolean (Copilot review on PR #3)."""
+    from opencloser.crm.dataverse.queue_loader import _odata_value
+
+    assert _odata_value("boolean", True) == "true"
+    assert _odata_value("boolean", False) == "false"
+    # String forms are normalised the same way so a TOML/JSON loader emitting
+    # "True" or "FALSE" still produces valid OData.
+    assert _odata_value("boolean", "True") == "true"
+    assert _odata_value("boolean", "FALSE") == "false"
+    with pytest.raises(QueueLoadError, match="invalid OData boolean"):
+        _odata_value("boolean", "yes")
+
+
 def test_verify_reports_entity_set_name_mismatch() -> None:
     """A mapping `entity_set_name` that doesn't match the live `EntitySetName` is
     silent runtime poison — every record CRUD URL 404s after startup. The
