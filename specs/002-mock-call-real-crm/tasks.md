@@ -91,13 +91,13 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 
 ### Tests for User Story 2
 
-- [ ] T027 [P] [US2] Integration test — US2 dry-run produces planned artifacts with zero Dataverse writes; an incomplete mapping still surfaces the gap; and a dry-run with `DATAVERSE_CLIENT_SECRET` / write credentials absent still succeeds (per spec §Edge Cases "Dry-run requested but write credentials are absent" and FR-007's "for the selected run mode"), in `tests/integration/test_us2_dry_run.py` (SC-002, SC-013)
+- [X] T027 [P] [US2] Integration test — US2 dry-run produces planned artifacts with zero Dataverse writes; an incomplete mapping still surfaces the gap; and a dry-run with `DATAVERSE_CLIENT_SECRET` / write credentials absent still succeeds (per spec §Edge Cases "Dry-run requested but write credentials are absent" and FR-007's "for the selected run mode"), in `tests/integration/test_us2_dry_run.py` (SC-002, SC-013)
 
 ### Implementation for User Story 2
 
-- [ ] T024 [US2] Add the dry-run capture path to `src/opencloser/crm/dataverse/adapter.py` — `emit_*` translate and capture planned payloads, issuing zero POST/PATCH (FR-031; contracts/dataverse-adapter.md)
-- [ ] T025 [US2] Add the dry-run path to `src/opencloser/slice2/runner.py` — dry-run is the default when no `--write` flag is supplied; never claims/mutates the CRM queue item (FR-010, FR-031)
-- [ ] T026 [US2] Wire planned write-back artifact writing into `src/opencloser/artifacts/writer.py` — planned Phone Call activity / queue-status update / Task as inspectable local artifacts
+- [X] T024 [US2] Add the dry-run capture path to `src/opencloser/crm/dataverse/adapter.py` — `emit_*` translate and capture planned payloads, issuing zero POST/PATCH (FR-031; contracts/dataverse-adapter.md)
+- [X] T025 [US2] Add the dry-run path to `src/opencloser/slice2/runner.py` — dry-run is the default when no `--write` flag is supplied; never claims/mutates the CRM queue item (FR-010, FR-031)
+- [X] T026 [US2] Wire planned write-back artifact writing into `src/opencloser/artifacts/writer.py` — planned Phone Call activity / queue-status update / Task as inspectable local artifacts
 
 **Checkpoint**: Dry-run rehearsal works; the write-enabled run (US1) is now safe to demo.
 

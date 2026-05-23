@@ -35,7 +35,7 @@ from opencloser.crm.dataverse.metadata import MetadataError, discover
 from opencloser.crm.dataverse.queue_loader import ExplicitId, NextReady, QueueSelector
 from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
-from opencloser.models import QueueItem
+from opencloser.models import DataverseSecrets, QueueItem, RunMode
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import ConversationFixture, ConversationTurn
 from opencloser.slice2.runner import run_one_crm_item
@@ -298,8 +298,11 @@ def run_crm(
         typer.Option(
             "--write",
             help=(
-                "Enable Dataverse write-back (FR-031). Required in this slice — the "
-                "default dry-run path is wired in US2 (T024-T026)."
+                "Enable Dataverse write-back (FR-031). Without this flag, run-crm "
+                "operates in dry-run mode: validates the mapping, exercises the "
+                "persona + transport, and captures the planned write-back as local "
+                "artifacts — zero create or update operations are issued against "
+                "Dataverse (SC-002, SC-013)."
             ),
         ),
     ] = False,
@@ -336,18 +339,12 @@ def run_crm(
 ) -> None:
     """Process exactly one Dataverse queue item (FR-032).
 
-    Requires `--write` in this slice. The contract's dry-run default (FR-031) is
-    intentionally not yet wired — that work lives in US2 (T024-T026) where the
-    runner gains a dry-run capture adapter and the planned-write-back artifact
-    path. Until that lands, `run-crm` without `--write` exits 2 with a pointer.
+    Run mode follows FR-031: no ``--write`` means dry-run (the default — validate
+    mapping, exercise persona + transport, capture planned write-back artifacts,
+    zero CRM mutations). ``--write`` enables the write-enabled path. There is no
+    way to mutate Dataverse without ``--write`` (SC-013).
     """
-    if not write:
-        typer.echo(
-            "error:       dry-run is not yet implemented (US2 / T024-T026). Pass --write "
-            "to run the write-enabled path.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
+    run_mode = RunMode.WRITE_ENABLED if write else RunMode.DRY_RUN
 
     slice1_config, slice2_config = _load_run_crm_configs(config_path, slice2_config_path)
     selector = _build_run_crm_selector(
@@ -356,11 +353,31 @@ def run_crm(
         campaign=campaign or slice2_config.run.campaign,
     )
 
+    # FR-031 + spec §Edge Cases "Dry-run requested but write credentials are
+    # absent": missing Dataverse secrets MUST NOT block the dry-run path
+    # (Codex PR #7 review). In write-enabled mode the same error is fatal.
+    # When secrets are missing in dry-run, we still construct a placeholder
+    # client so the runner's downstream code path is unchanged — the runner's
+    # `_verify_readiness(dry_run=True)` catches any auth/connectivity failure
+    # from the live `verify()` call and treats it as non-fatal per the
+    # `contracts/metadata-discovery-verification.md` §5 rule.
     try:
         secrets = load_dataverse_secrets()
     except Slice2ConfigError as exc:
-        typer.echo(f"error:       {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        if run_mode is RunMode.WRITE_ENABLED:
+            typer.echo(f"error:       {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        typer.echo(
+            f"warning:     {exc} — proceeding in dry-run mode (write-back disabled, "
+            "any Dataverse read will fail late and surface as a queue-load error)",
+            err=True,
+        )
+        secrets = DataverseSecrets(
+            tenant_id="dry-run-placeholder",
+            client_id="dry-run-placeholder",
+            client_secret="dry-run-placeholder",
+            env_url="https://dry-run-placeholder.crm.dynamics.com",
+        )
 
     clock = SystemClock()
     token_provider = DataverseTokenProvider(secrets)
@@ -376,6 +393,7 @@ def run_crm(
             client=client,
             conn=conn,
             clock=clock,
+            run_mode=run_mode,
         )
     finally:
         conn.close()

@@ -113,12 +113,24 @@ class DataverseWriteBackAdapter:
         translator: MappingTranslator,
         task_owners: TaskOwnersConfig,
         now_utc_ms: Callable[[], str] | None = None,
+        dry_run: bool = False,
     ) -> None:
         self._conn = conn
         self._client = client
         self._t = translator
         self._task_owners = task_owners
         self._now_utc_ms = now_utc_ms or _default_now_utc_ms
+        # FR-031 dry-run: when True, every emit_* translates the payload via the
+        # same mapping helpers as the write-enabled path, captures the planned
+        # payload in `_aggregates`, and short-circuits BEFORE any GET / POST /
+        # PATCH against `self._client`. `_record_correlation`, `_mark_progress`,
+        # and `finalize_progress` are skipped — a dry-run leaves no
+        # `crm_correlations` or `writeback_progress` row, because there is no
+        # CRM correlation and no resumable state to record. Owner verification
+        # is also skipped (it would require live Dataverse) — dry-run captures
+        # the CONFIGURED default owner so the planned-payload artifact reflects
+        # what a write-enabled run with a verified default would send (FR-025).
+        self._dry_run = dry_run
         self._aggregates: dict[str, _AggregateBuilder] = {}
         # Operator-visible warnings (e.g. owner-override fallback per FR-025).
         self._warnings: list[DataQualityWarning] = []
@@ -137,6 +149,19 @@ class DataverseWriteBackAdapter:
     def emit_phone_call_activity(self, payload: PhoneCallActivityPayload) -> None:
         entity_key = "phone_call_activity"
         idempotency_field = self._t.logical_name("phone_call.idempotency_key")
+        if self._dry_run:
+            # Validate every LOCAL mapping lookup the write-enabled path would
+            # do — `_primary_id`, `_entity_set`, the body builder — so a
+            # mapping gap (e.g. missing `entities['phone_call_activity']
+            # .primary_id`) surfaces in dry-run instead of passing silently
+            # only to fail immediately in write-enabled (Codex PR #7 review,
+            # `contracts/metadata-discovery-verification.md` §5: dry-run
+            # "still runs `verify` and surfaces gaps").
+            self._entity_set(entity_key)
+            self._primary_id(entity_key)
+            self._phone_call_body(payload, idempotency_field)
+            self._aggregate(payload.session_id).phone_call_activity = payload
+            return
         try:
             record_id = self._idempotent_create(
                 entity_key=entity_key,
@@ -170,6 +195,20 @@ class DataverseWriteBackAdapter:
         # the same failure-recording try/except so any Dataverse access error in
         # this path persists a consistent `crm_correlations(write_status=failed)`
         # row before re-raising.
+        if self._dry_run:
+            # Validate every LOCAL mapping lookup the write-enabled path would
+            # do — `_entity_set`, `_primary_id`, the body builder (Codex PR #7
+            # round-3 review: `_fetch_queue_last_session` calls
+            # `_primary_id("queue_item")` in the write-enabled path, so a
+            # mapping missing `entities['queue_item'].primary_id` MUST surface
+            # in dry-run too). Skip the GET pre-query and the PATCH; capture
+            # the conceptual payload (FR-031, FR-010 — dry-run MUST NOT
+            # mutate the CRM queue item).
+            self._entity_set("queue_item")
+            self._primary_id("queue_item")
+            self._queue_status_body(payload)
+            self._aggregate(payload.session_id).queue_status_update = payload
+            return
         try:
             entity_set = self._entity_set("queue_item")
             existing = self._fetch_queue_last_session(payload.queue_item_id)
@@ -215,6 +254,35 @@ class DataverseWriteBackAdapter:
 
         entity_key = "task"
         idempotency_field = self._t.logical_name("task.idempotency_key")
+
+        if self._dry_run:
+            # Validate every LOCAL mapping lookup the write-enabled path would
+            # do — `_primary_id`, `_entity_set`, the body builder — so missing
+            # `entities['task'].primary_id` surfaces in dry-run (Codex PR #7
+            # review). Owner override + verification (`_resolve_task_owner`)
+            # are deliberately skipped: both require live Dataverse GETs
+            # (`_lookup_owner_override`, `_owner_entity_set`), which the
+            # spec §Edge Cases path explicitly tolerates being unreachable in
+            # dry-run. We use the configured default owner directly and
+            # default the entity-set to "systemusers" (the common case). A
+            # write-enabled run still re-verifies the owner against
+            # active-enabled rows (FR-025).
+            self._entity_set(entity_key)
+            self._primary_id(entity_key)
+            default_owner = (
+                self._task_owners.callback
+                if payload.task_kind == "callback"
+                else self._task_owners.review
+            )
+            self._task_body(
+                payload,
+                idempotency_field=idempotency_field,
+                owner_id=default_owner,
+                owner_entity_set="systemusers",
+            )
+            stamped = payload.model_copy(update={"assigned_to": default_owner})
+            self._aggregate(payload.session_id).task = stamped
+            return
 
         # Owner-resolution + body construction + the POST all run inside the same
         # try/except so a Dataverse failure ANYWHERE in the emit_task path (override
@@ -294,7 +362,13 @@ class DataverseWriteBackAdapter:
     def finalize_progress(self, session_id: str, *, run_status: RunStatus) -> None:
         """Stamp the per-session resume ledger's terminal status (FR-023). Called
         by the runner once every emit_* for this session has completed (or been
-        skipped)."""
+        skipped).
+
+        In dry-run mode this is a no-op: no Dataverse write was issued, so there
+        is no CRM write-back to resume and no `writeback_progress` row to stamp.
+        """
+        if self._dry_run:
+            return
         progress = self._load_progress(session_id) or self._new_progress(session_id)
         if (
             progress.phone_call_activity_done

@@ -28,11 +28,16 @@ from typing import Literal
 
 from pydantic import ValidationError
 
+from opencloser.artifacts.writer import write_dry_run_marker
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
 from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
 from opencloser.crm.dataverse.client import DataverseClient
-from opencloser.crm.dataverse.errors import DataverseError
+from opencloser.crm.dataverse.errors import (
+    DataverseError,
+    PermanentDataverseError,
+    TransientDataverseError,
+)
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator, load_mapping
 from opencloser.crm.dataverse.metadata import MetadataError, verify
 from opencloser.crm.dataverse.queue_loader import (
@@ -46,6 +51,7 @@ from opencloser.models import (
     Disposition,
     MetadataVerificationReport,
     QueueItem,
+    RunMode,
     RunStatus,
     Slice2Config,
     SliceConfig,
@@ -91,6 +97,42 @@ class _ReadinessResult:
     metadata_report: MetadataVerificationReport
 
 
+_DRY_RUN_TOLERABLE_AUTH_STATUS_CODES: frozenset[int] = frozenset({400, 401})
+
+
+def _is_dry_run_tolerable_verify_failure(exc: Exception) -> bool:
+    """Per `contracts/metadata-discovery-verification.md` §5 + spec §Edge Cases
+    "Dry-run requested but write credentials are absent", dry-run readiness
+    tolerates a NARROW set of `verify()` failures that correspond to
+    "no working credentials" or "environment temporarily unreachable":
+
+    1. A `PermanentDataverseError` with HTTP 400 (Microsoft Entra
+       `invalid_request` for malformed tenant/client when the operator has
+       placeholder secrets) or HTTP 401 (`invalid_client` / bad
+       client_secret). Both are the "missing/invalid write credentials"
+       scenario the spec carves out (Codex PR #7 round-4 P1: a placeholder
+       tenant typically returns 400, not 401, so 401-only was too narrow).
+    2. A `TransientDataverseError` — network unreachable, 5xx, timeout. The
+       runtime cannot determine whether the configured metadata is valid;
+       dry-run should not fail-hard on environmental flakiness (this is a
+       deliberate liberalization vs. strictly the contract wording — a
+       transient 5xx blocking dry-run rehearsal is worse UX than letting
+       the operator notice their environment is flaky and retry).
+
+    Anything else — 403/permission regression, 404 entity not found, a
+    `MetadataError` from a missing-mapping read — is a REAL verification
+    failure that must block dry-run too, so an operator does not approve a
+    rehearsal whose write-enabled counterpart would immediately fail
+    (Codex PR #7 round-3 P1).
+    """
+    if isinstance(exc, TransientDataverseError):
+        return True
+    return (
+        isinstance(exc, PermanentDataverseError)
+        and exc.status_code in _DRY_RUN_TOLERABLE_AUTH_STATUS_CODES
+    )
+
+
 def run_one_crm_item(
     selector: QueueSelector,
     *,
@@ -102,21 +144,39 @@ def run_one_crm_item(
     conn: sqlite3.Connection,
     clock: Clock | None = None,
     persona: Persona | None = None,
+    run_mode: RunMode = RunMode.WRITE_ENABLED,
 ) -> CrmRunReport:
-    """Execute exactly one write-enabled Slice 2 run end-to-end.
+    """Execute exactly one Slice 2 run end-to-end.
 
     `client` is a configured `DataverseClient` (real or fake). The caller is
     responsible for its lifecycle. `conn` is an open SQLite state connection with
     schema applied.
+
+    ``run_mode`` selects between **write-enabled** (the default — performs live
+    metadata verification, claims/mutates the Dataverse queue item, and POSTs /
+    PATCHes the write-back records) and **dry-run** (FR-031 — still calls live
+    ``verify()`` to surface real mapping/option-set gaps per
+    ``contracts/metadata-discovery-verification.md`` §5, but tolerates a narrow
+    set of failures (``TransientDataverseError`` + 401 PermanentDataverseError)
+    so an environment without write credentials does not block the rehearsal
+    per spec §Edge Cases. Never mutates the Dataverse queue item per FR-010,
+    constructs the adapter with ``dry_run=True`` so every ``emit_*`` captures
+    the planned payload without issuing any POST / PATCH (and skips the GET
+    pre-queries within ``emit_*``; the queue load itself still uses GETs via
+    ``DataverseQueueLoader``), and writes the FR-031 dry-run marker artifact
+    alongside the orchestrator's session artifacts). The CLI default is
+    dry-run (FR-031, SC-013); the write-enabled path requires an explicit
+    ``--write`` flag.
     """
     clk = clock or SystemClock()
     persona = persona or ALFAppointmentSetterPersona()
+    is_dry_run = run_mode is RunMode.DRY_RUN
 
     version_report = _persona_version_mismatch_report(persona, slice1_config)
     if version_report is not None:
         return version_report
 
-    readiness = _verify_readiness(slice2_config, client, clk)
+    readiness = _verify_readiness(slice2_config, client, clk, dry_run=is_dry_run)
     if isinstance(readiness, CrmRunReport):
         return readiness
     translator = readiness.translator
@@ -153,6 +213,7 @@ def run_one_crm_item(
         translator=translator,
         task_owners=slice2_config.task_owners,
         now_utc_ms=clk.now_utc_ms,
+        dry_run=is_dry_run,
     )
     for warning in runner_warnings:
         adapter.add_warning(warning)
@@ -201,9 +262,37 @@ def run_one_crm_item(
             warnings=adapter.warnings(),
         )
 
-    # 6) Stamp terminal progress for the resume ledger.
+    # 6) Stamp terminal progress for the resume ledger. In dry-run this is a
+    # no-op inside the adapter (no Dataverse write happened, no
+    # `writeback_progress` row to record).
     terminal_status = _terminal_run_status(orchestrator_report)
     adapter.finalize_progress(orchestrator_report.session_id, run_status=terminal_status)
+
+    # 7) FR-031 dry-run marker — the Slice 1 orchestrator writes the planned
+    # `writeback.json` / `task.json` under their usual filenames (its writer
+    # call is unchanged per FR-014), so an inspector cannot tell from the
+    # filenames alone that no Dataverse write was issued. The marker file
+    # makes the dry-run nature unambiguous (SC-002, SC-013). A filesystem
+    # failure here MUST NOT crash the run — convert to a structured `failed`
+    # report so the operator sees a stable exit-status (Codex PR #7 round-3:
+    # don't introduce a new uncaught-exception path with the marker step).
+    if is_dry_run and orchestrator_report.artifact_dir is not None:
+        try:
+            write_dry_run_marker(
+                artifact_root=orchestrator_report.artifact_dir.parent,
+                session_id=orchestrator_report.session_id,
+            )
+        except OSError as exc:
+            return CrmRunReport(
+                exit_status="failed",
+                session_id=orchestrator_report.session_id,
+                final_disposition=orchestrator_report.final_disposition,
+                artifact_dir=orchestrator_report.artifact_dir,
+                queue_item_id=queue_item.queue_item_id,
+                metadata_report=report,
+                warnings=adapter.warnings(),
+                message=f"dry-run marker write failed: {exc}",
+            )
 
     exit_status: ExitStatus = (
         "blocked" if orchestrator_report.final_disposition is Disposition.BLOCKED else "completed"
@@ -243,6 +332,8 @@ def _verify_readiness(
     slice2_config: Slice2Config,
     client: DataverseClient,
     clk: Clock,
+    *,
+    dry_run: bool = False,
 ) -> _ReadinessResult | CrmRunReport:
     # 1) Readiness — load + validate the mapping artifact, then verify live metadata.
     try:
@@ -261,8 +352,27 @@ def _verify_readiness(
     try:
         report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
     except (DataverseError, MetadataError) as exc:
-        # An unreachable Dataverse (auth failure, 5xx, timeout) or unverifiable
-        # metadata at startup is operator-visible-blocked rather than an unhandled
+        if dry_run and _is_dry_run_tolerable_verify_failure(exc):
+            # spec §Edge Cases "Dry-run requested but write credentials are
+            # absent" + contracts/metadata-discovery-verification.md §5:
+            # dry-run still runs `verify()` AND surfaces gaps; ONLY missing
+            # write credentials (auth 401) and pure connectivity failures
+            # (`TransientDataverseError`) are tolerated. A 403 / 404 / real
+            # `MetadataError` (missing mapping) MUST still block dry-run
+            # (Codex PR #7 round-3 P1: a 403 on EntityDefinitions while
+            # queue reads still work is a real verification gap, not a
+            # missing-credentials story).
+            return _ReadinessResult(
+                translator=translator,
+                metadata_report=MetadataVerificationReport(
+                    ok=True,
+                    missing=[],
+                    drift=[],
+                    checked_at=clk.now_utc_ms(),
+                ),
+            )
+        # All other paths (write-enabled, OR dry-run with a non-tolerable
+        # error) are operator-visible-blocked rather than an unhandled
         # exception. The CLI prints the message and exits with the documented
         # `blocked` exit code.
         return CrmRunReport(
@@ -270,6 +380,9 @@ def _verify_readiness(
             message=f"metadata verification failed: {exc}",
         )
     if not report.ok:
+        # Real metadata gap (missing fields / option sets / etc.) — blocks BOTH
+        # modes per contracts/metadata-discovery-verification.md §5 (dry-run
+        # "still runs `verify` and surfaces gaps").
         return CrmRunReport(
             exit_status="blocked",
             message="metadata verification failed: " + "; ".join(report.missing),

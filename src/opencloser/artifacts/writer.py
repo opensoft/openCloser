@@ -31,6 +31,7 @@ _WRITEBACK_FILENAME = "writeback.json"
 _TASK_FILENAME = "task.json"
 _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
+_DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
 
 # Cached so repeated calls without an explicit layer don't re-compile the built-in
 # redaction patterns on every session write.
@@ -75,6 +76,13 @@ def write_session_artifacts(
     session-result never advertises a file that does not exist. Under
     ``"summary-only"`` retention, any pre-existing transcript file from an
     earlier run is removed so idempotent re-emit cannot leave PII on disk.
+
+    See :func:`write_dry_run_marker` for the FR-031 US2 dry-run signal — the
+    orchestrator's ``write_session_artifacts`` call is unchanged in dry-run
+    (the ``writeback.json`` / ``task.json`` it writes happen to contain planned
+    content because the adapter captured planned payloads), and the runner
+    calls :func:`write_dry_run_marker` separately after
+    ``process_one_queue_item`` returns to flag the session as dry-run.
     """
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +156,38 @@ class _ConflictingEventsArtifact(BaseModel):
     schema_version: str
     session_id: str
     events: list[ConflictingEventAuditRecord]
+
+
+class _DryRunMarker(BaseModel):
+    """Container for dry-run-marker.json (FR-031 US2 dry-run artifact marker)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "slice2-dry-run-marker-v1"
+    session_id: str
+    note: str = (
+        "This session ran in dry-run mode (FR-031). The writeback.json and task.json "
+        "files in this directory contain what a write-enabled run WOULD have sent to "
+        "Dataverse; zero create or update operations were issued against the CRM."
+    )
+
+
+def write_dry_run_marker(*, artifact_root: str | Path, session_id: str) -> Path:
+    """Write the FR-031 US2 dry-run marker file alongside the session artifacts.
+
+    The Slice 1 orchestrator is unchanged (FR-014), so it writes
+    ``writeback.json`` / ``task.json`` with the same filenames in both modes.
+    In dry-run those files contain the payloads the adapter CAPTURED (no
+    Dataverse writes were issued). This marker makes the dry-run nature
+    inspectable at a glance without changing the orchestrator's artifact
+    filenames (SC-002, SC-013). The runner calls this AFTER
+    ``process_one_queue_item`` returns in dry-run mode.
+    """
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = session_dir / _DRY_RUN_MARKER_FILENAME
+    _write_json_atomic(marker_path, _DryRunMarker(session_id=session_id))
+    return marker_path
 
 
 def _write_json_atomic(path: Path, model: BaseModel) -> None:

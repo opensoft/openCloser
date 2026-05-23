@@ -302,9 +302,21 @@ def test_cli_run_crm_rejects_non_guid_queue_item_id(tmp_path: Path) -> None:
     assert "not a valid Dataverse GUID" in out
 
 
-def test_cli_run_crm_without_write_exits_2(tmp_path: Path) -> None:
-    """`run-crm` without `--write` exits 2 with a pointer to US2 — dry-run is
-    intentionally not yet implemented."""
+def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
+    """`run-crm` without `--write` enters the FR-031 dry-run path (the previous
+    "dry-run not implemented" placeholder was removed in US2; the
+    missing-credentials gate was softened in round-2 review per Codex feedback).
+
+    With the Dataverse secret env vars absent in the test environment, the CLI
+    now:
+      1. Emits a `warning:` instead of `error:` for the missing secrets,
+      2. Proceeds into the dry-run path with placeholder credentials,
+      3. Fails AT the queue-load step (the placeholder creds can't authenticate
+         against the placeholder env_url) — exit_status="failed", which the
+         `_EXIT_CODE` table maps to CLI exit code 2.
+
+    The test asserts the new gate-softening behavior (warning + non-zero exit)
+    rather than the specific exit code or queue-load failure detail."""
     config_path = _write_config(tmp_path)
     run = _runner.invoke(
         app,
@@ -318,6 +330,14 @@ def test_cli_run_crm_without_write_exits_2(tmp_path: Path) -> None:
             str(config_path),
         ],
     )
-    assert run.exit_code == 2
     out = _combined_output(run)
-    assert "dry-run" in out.lower()
+    # The removed "dry-run not yet implemented" placeholder is gone.
+    assert "dry-run is not yet implemented" not in out.lower()
+    # The missing-secrets gate is now a WARNING (not a fatal error) in dry-run,
+    # per Codex PR #7 review + spec §Edge Cases.
+    assert "warning" in out.lower() and "missing required dataverse secret" in out.lower()
+    # Run reaches the dry-run path; the placeholder credentials fail later on
+    # the queue load, which produces exit_status="failed" (CLI exit code 2 per
+    # `_EXIT_CODE` in cli.py). The exact code is less important than the fact
+    # that we're past secret loading and into the dry-run flow.
+    assert run.exit_code != 0
