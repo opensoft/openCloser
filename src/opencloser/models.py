@@ -673,6 +673,21 @@ class DataverseMapping(BaseModel):
     task_owner_override_field: str | None = None
     preserve_if_present: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _require_entities(self) -> DataverseMapping:
+        # An artifact with no entities would parse cleanly and then pass `verify()`
+        # vacuously (ok=True after checking nothing) — a readiness-gate false
+        # positive that defers the real failure to runtime mapping errors in queue
+        # loading. Reject at load time so the failure surfaces during startup
+        # (Codex review on PR #3). `fields`/`option_sets` may legitimately be empty
+        # for a deployment that only touches the queue table without option-set or
+        # update fields, so they remain optional.
+        if not self.entities:
+            raise ValueError(
+                "DataverseMapping must declare at least one entry in `entities`"
+            )
+        return self
+
 
 # ---- Slice 2 configuration (config/slice2.toml — data-model.md §3) ----
 

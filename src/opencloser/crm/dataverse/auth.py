@@ -7,6 +7,7 @@ Entra ID and caches it in-process for the run lifetime. Secrets come from
 
 from __future__ import annotations
 
+import math
 import time
 
 import httpx
@@ -93,13 +94,16 @@ class DataverseTokenProvider:
             raise PermanentDataverseError(
                 "Entra ID token endpoint returned a non-numeric `expires_in` value"
             ) from exc
-        # A 0/negative lifetime would make `_expires_at` <= `clock`, so `token()`
-        # would re-acquire on every call — a tight loop of auth traffic. That can
-        # only happen on a malformed token payload; refuse it permanently
-        # (Copilot follow-up review on PR #3).
-        if lifetime <= 0:
+        # `float()` happily accepts NaN/Infinity, which both break the cache:
+        # NaN comparisons are always False (so `clock >= self._expires_at` never
+        # triggers a refresh) and Infinity means the token never expires. A
+        # non-positive lifetime would similarly make `_expires_at <= clock` and
+        # storm Entra ID with one re-acquire per call. All three cases can only
+        # arise from a malformed token payload, so refuse them permanently
+        # (Codex + Copilot reviews on PR #3).
+        if not math.isfinite(lifetime) or lifetime <= 0:
             raise PermanentDataverseError(
-                f"Entra ID token endpoint returned a non-positive `expires_in` "
+                f"Entra ID token endpoint returned an invalid `expires_in` "
                 f"value ({lifetime!r})"
             )
         # Short-lived tokens (lifetime < 2 * skew) need a clamped skew, otherwise

@@ -109,7 +109,7 @@ def _queue_record(
 
 
 def test_verify_ok_for_complete_metadata() -> None:
-    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING))
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING), entity_sets=_entity_sets(_MAPPING))
     report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is True
     assert report.missing == []
@@ -119,7 +119,7 @@ def test_verify_ok_for_complete_metadata() -> None:
 def test_verify_reports_missing_entity() -> None:
     entities = _entities(_MAPPING)
     del entities["task"]  # the Task table is absent from this environment
-    report = verify(DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING)).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    report = verify(DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING), entity_sets=_entity_sets(_MAPPING)).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is False
     assert any("task" in item for item in report.missing)
 
@@ -127,7 +127,7 @@ def test_verify_reports_missing_entity() -> None:
 def test_verify_reports_missing_field() -> None:
     entities = _entities(_MAPPING)
     entities["medx_callqueueitem"].discard("medx_callstatus")  # status column not present
-    report = verify(DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING)).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    report = verify(DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING), entity_sets=_entity_sets(_MAPPING)).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is False
     assert any("queue.status" in item for item in report.missing)
 
@@ -140,7 +140,7 @@ def test_verify_reports_option_set_value_mismatch() -> None:
     # Remove `ready` (0) from the medx_callstatus picklist so the mapping's
     # queue_status.ready entry no longer matches a live value.
     option_sets[("medx_callqueueitem", "medx_callstatus")].discard(0)
-    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=option_sets)
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=option_sets, entity_sets=_entity_sets(_MAPPING))
     report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is False
     assert any("queue_status.ready" in m for m in report.missing)
@@ -149,14 +149,14 @@ def test_verify_reports_option_set_value_mismatch() -> None:
 def test_verify_propagates_non_404_permanent_errors() -> None:
     """A 401/403/400 during metadata lookup is a real failure (auth/permission/bad
     request), not "entity missing" — `_entity_attributes` MUST propagate it."""
-    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING))
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING), entity_sets=_entity_sets(_MAPPING))
     fake.fail_next(1, status=403)  # the first metadata call gets a 403 forbidden
     with pytest.raises(PermanentDataverseError):
         verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
 
 
 def test_discover_refreshes_and_requires_reapproval() -> None:
-    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING))
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING), entity_sets=_entity_sets(_MAPPING))
     refreshed = discover(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert refreshed.meta.discovered_at == _NOW
     assert refreshed.meta.approved is False  # a fresh discovery needs PR re-approval
@@ -166,7 +166,7 @@ def test_discover_refreshes_and_requires_reapproval() -> None:
 def test_discover_raises_when_metadata_unverifiable() -> None:
     entities = _entities(_MAPPING)
     entities["medx_callqueueitem"].discard("medx_donotcall")
-    fake = DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING))
+    fake = DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING), entity_sets=_entity_sets(_MAPPING))
     with pytest.raises(MetadataError, match=r"queue\.dnc"):
         discover(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
 
@@ -403,6 +403,47 @@ def test_load_next_ready_string_campaign_accepts_common_characters(
     assert item is not None and item.queue_item_id == _QUEUE_GUID
 
 
+def test_verify_reports_entity_set_name_mismatch() -> None:
+    """A mapping `entity_set_name` that doesn't match the live `EntitySetName` is
+    silent runtime poison — every record CRUD URL 404s after startup. The
+    readiness gate MUST catch it (Codex PR #3 P1 review)."""
+    # Swap the queue_item entity_set in the fake to something different from what
+    # the mapping says, simulating drift between artifact and live environment.
+    entity_sets = dict(_entity_sets(_MAPPING))
+    entity_sets["medx_callqueueitem"] = "medx_typoed_set_name"
+    fake = DataverseFake(
+        entities=_entities(_MAPPING),
+        option_sets=_option_sets(_MAPPING),
+        entity_sets=entity_sets,
+    )
+    report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    assert report.ok is False
+    assert any("entity_set_name mismatch" in m for m in report.missing)
+    assert any("medx_typoed_set_name" in m for m in report.missing)
+
+
+def test_verify_supports_global_option_set_values() -> None:
+    """A mapped field whose option-set values live in a referenced GlobalOptionSet
+    (instead of a local OptionSet) must verify successfully — otherwise every
+    global-choice deployment fails readiness with false-missing entries
+    (Codex PR #3 review)."""
+    picklist_only = _option_sets(_MAPPING)
+    global_only = {
+        ("medx_callqueueitem", "medx_callstatus"): picklist_only.pop(
+            ("medx_callqueueitem", "medx_callstatus")
+        )
+    }
+    fake = DataverseFake(
+        entities=_entities(_MAPPING),
+        option_sets=picklist_only,            # no local OptionSet for medx_callstatus
+        global_option_sets=global_only,       # but GlobalOptionSet carries the values
+        entity_sets=_entity_sets(_MAPPING),
+    )
+    report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    assert report.ok is True
+    assert report.missing == []
+
+
 def test_verify_succeeds_when_option_set_is_only_a_status_attribute() -> None:
     """A Dataverse `Status` attribute exposes its OptionSet under the
     StatusAttributeMetadata cast, not the Picklist cast. `_option_set_values` MUST
@@ -418,6 +459,7 @@ def test_verify_succeeds_when_option_set_is_only_a_status_attribute() -> None:
         entities=_entities(_MAPPING),
         option_sets=picklist_only,  # no Picklist for medx_callstatus
         status_option_sets=status_only,  # but Status carries the values
+        entity_sets=_entity_sets(_MAPPING),
     )
     report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is True

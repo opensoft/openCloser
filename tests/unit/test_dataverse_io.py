@@ -204,8 +204,51 @@ def test_token_response_non_positive_expires_in_raises_permanent(bad_lifetime: i
         )
 
     provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
-    with pytest.raises(errors.PermanentDataverseError, match="non-positive"):
+    with pytest.raises(errors.PermanentDataverseError, match="invalid `expires_in`"):
         provider.token(now=0.0)
+
+
+@pytest.mark.parametrize(
+    "raw_literal",
+    ["NaN", "Infinity", "-Infinity"],  # what json.loads accepts as non-finite
+)
+def test_token_response_non_finite_expires_in_raises_permanent(
+    raw_literal: str,
+) -> None:
+    """`float('nan')`/`float('inf')` pass `<= 0` (NaN comparisons are False), but
+    a NaN expiry makes the cache forever-fresh and an Infinite one means it
+    never refreshes. Reject all non-finite lifetimes (Codex follow-up review on
+    PR #3). The literal is injected as raw bytes because httpx strict-encodes
+    JSON and refuses to serialize NaN/Infinity itself."""
+    body = f'{{"access_token": "tok-X", "expires_in": {raw_literal}}}'.encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="invalid `expires_in`"):
+        provider.token(now=0.0)
+
+
+def test_load_mapping_rejects_empty_entities(tmp_path: Path) -> None:
+    """An artifact with no entities would parse cleanly and pass verify() with
+    nothing to check — a readiness-gate false positive. Reject it at load time
+    (Codex review on PR #3)."""
+    bad = tmp_path / "no_entities.json"
+    bad.write_text(
+        '{"_meta": {"schema_version": "slice2-mapping-v1",'
+        ' "discovered_at": "2026-05-22T00:00:00.000Z",'
+        ' "dataverse_env_url": "https://x.crm.dynamics.com",'
+        ' "approved": false}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(MappingError, match="at least one entry in `entities`"):
+        load_mapping(bad)
 
 
 # ---------------------------------------------------------------------------
