@@ -1,7 +1,7 @@
 [project]
 name = "opencloser"
 version = "0.1.0"
-description = "openCloser — CRM-first AI communication platform for healthcare-oriented outreach. Slice 2 — Mock Call, Real CRM (Dynamics 365 / Dataverse)."
+description = "openCloser — CRM-first AI communication platform for healthcare-oriented outreach. Slice 2 foundation (Dynamics 365 / Dataverse adapter + state); the user-facing Slice 2 CLI lands in subsequent sub-PRs."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { text = "Proprietary" }

@@ -19,6 +19,10 @@ config/slice2.local.toml
 .env
 .env.*
 
+# Claude Code session state (cron locks, scheduled tasks, etc. — internal to the
+# local agent session; MUST NOT be committed).
+.claude/
+
 # Python
 __pycache__/
 *.pyc

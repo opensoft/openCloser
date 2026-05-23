@@ -75,8 +75,180 @@ def test_token_transient_failure_raises() -> None:
         return httpx.Response(503, request=request)
 
     provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
-    with pytest.raises(errors.TransientDataverseError):
+    with pytest.raises(errors.TransientDataverseError, match="Entra ID token endpoint"):
         provider.token(now=0.0)
+
+
+def test_token_permanent_failure_uses_auth_wording() -> None:
+    """A 401 from Entra ID must NOT be reported as a Dataverse Web API failure —
+    the operator needs to know which system rejected them (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
+def test_token_transport_error_uses_auth_wording() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.TransientDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
+def test_token_response_missing_access_token_raises_permanent() -> None:
+    """A 2xx body without `access_token` is an Entra ID protocol/config error, not
+    a successful auth — fail permanently with a clear message instead of leaking a
+    raw KeyError (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"token_type": "Bearer"}, request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="access_token"):
+        provider.token(now=0.0)
+
+
+def test_token_response_non_json_raises_permanent() -> None:
+    """A 2xx with non-JSON content is also an Entra ID config error — surface it
+    permanently without echoing the body (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>upstream gateway</html>", request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="access_token"):
+        provider.token(now=0.0)
+
+
+def test_token_response_empty_access_token_raises_permanent() -> None:
+    """An `access_token` key whose value is null/empty/non-string must be rejected
+    — the cached token would otherwise be unusable (Codex PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": ""}, request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="empty or non-string"):
+        provider.token(now=0.0)
+
+
+def test_token_response_null_access_token_raises_permanent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"access_token": None, "expires_in": 3600}, request=request
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="empty or non-string"):
+        provider.token(now=0.0)
+
+
+def test_token_misconfig_transport_error_is_permanent_no_retry() -> None:
+    """A misconfiguration-class transport error at the token endpoint MUST classify
+    as permanent — otherwise the retry budget is burned on an impossible request.
+    Mirrors the F11a narrowing of `errors.wrap_transport_error` (Copilot follow-up
+    review on PR #3)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.UnsupportedProtocol("bad scheme")
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
+def test_token_response_non_numeric_expires_in_raises_permanent() -> None:
+    """A malformed `expires_in` must surface as a typed PermanentDataverseError so
+    callers don't see a raw ValueError/TypeError escape the auth layer (Codex PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "tok-X", "expires_in": "not a number"},
+            request=request,
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="expires_in"):
+        provider.token(now=0.0)
+
+
+def test_token_short_lived_lifetime_is_cached_not_re_acquired() -> None:
+    """A 30s `expires_in` is positive but shorter than the 60s skew — without
+    clamping, `_expires_at` falls in the past and every token() call re-acquires.
+    The provider must clamp the skew so a short-lived token is still cached for
+    some non-trivial window (Codex follow-up review on PR #3)."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200, json={"access_token": "tok-short", "expires_in": 30}, request=request
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    assert provider.token(now=0.0) == "tok-short"
+    # Half-life later, the token MUST still come from the cache, not a re-acquire.
+    assert provider.token(now=10.0) == "tok-short"
+    assert calls["n"] == 1
+
+
+@pytest.mark.parametrize("bad_lifetime", [0, -1, -3600])
+def test_token_response_non_positive_expires_in_raises_permanent(bad_lifetime: int) -> None:
+    """A 0/negative `expires_in` would make every subsequent token() call re-acquire
+    (tight loop of auth traffic). Reject it permanently (Copilot PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "tok-X", "expires_in": bad_lifetime},
+            request=request,
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="invalid `expires_in`"):
+        provider.token(now=0.0)
+
+
+@pytest.mark.parametrize(
+    "raw_literal",
+    ["NaN", "Infinity", "-Infinity"],  # what json.loads accepts as non-finite
+)
+def test_token_response_non_finite_expires_in_raises_permanent(
+    raw_literal: str,
+) -> None:
+    """`float('nan')`/`float('inf')` pass `<= 0` (NaN comparisons are False), but
+    a NaN expiry makes the cache forever-fresh and an Infinite one means it
+    never refreshes. Reject all non-finite lifetimes (Codex follow-up review on
+    PR #3). The literal is injected as raw bytes because httpx strict-encodes
+    JSON and refuses to serialize NaN/Infinity itself."""
+    body = f'{{"access_token": "tok-X", "expires_in": {raw_literal}}}'.encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="invalid `expires_in`"):
+        provider.token(now=0.0)
+
+
+def test_load_mapping_rejects_empty_entities(tmp_path: Path) -> None:
+    """An artifact with no entities would parse cleanly and pass verify() with
+    nothing to check — a readiness-gate false positive. Reject it at load time
+    (Codex review on PR #3)."""
+    bad = tmp_path / "no_entities.json"
+    bad.write_text(
+        '{"_meta": {"schema_version": "slice2-mapping-v1",'
+        ' "discovered_at": "2026-05-22T00:00:00.000Z",'
+        ' "dataverse_env_url": "https://x.crm.dynamics.com",'
+        ' "approved": false}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(MappingError, match="at least one entry in `entities`"):
+        load_mapping(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +339,34 @@ def test_client_retries_transport_error() -> None:
     assert sleeps == [1.0, 2.0]
 
 
+def test_client_delay_with_empty_backoff_uses_zero() -> None:
+    """`RetryConfig.backoff_seconds == []` -> retries happen immediately (delay 0).
+    (Sourcery suggestion — lock in the empty-backoff semantics.)"""
+    handler, _ = _status_handler([503, 200])
+    sleeps: list[float] = []
+    retry = RetryConfig(max_retries=1, backoff_seconds=[], retry_after_cap_seconds=30.0)
+    client = DataverseClient(
+        _SECRETS.env_url, _StubToken(), retry,
+        http=_mock_client(handler), sleep=sleeps.append,
+    )
+    client.get("accounts")
+    assert sleeps == [0.0]
+
+
+def test_client_delay_with_short_backoff_repeats_last_value() -> None:
+    """A backoff list shorter than `max_retries` reuses the last value for the
+    remaining retries. (Sourcery suggestion — lock in the short-backoff semantics.)"""
+    handler, _ = _status_handler([503, 503, 503, 200])
+    sleeps: list[float] = []
+    retry = RetryConfig(max_retries=3, backoff_seconds=[1.5], retry_after_cap_seconds=30.0)
+    client = DataverseClient(
+        _SECRETS.env_url, _StubToken(), retry,
+        http=_mock_client(handler), sleep=sleeps.append,
+    )
+    client.get("accounts")
+    assert sleeps == [1.5, 1.5, 1.5]
+
+
 def test_client_post_and_patch() -> None:
     seen: list[str] = []
 
@@ -195,6 +395,32 @@ def test_load_mapping_and_translate() -> None:
     assert translator.option_set_key_for_value("queue.status", 99) is None
 
 
+def test_translator_entity_set_name_distinct_from_logical_name() -> None:
+    """Metadata URLs use logical names; record CRUD URLs use entity-set names.
+    The two differ for custom tables (Copilot PR #3 review)."""
+    translator = MappingTranslator(load_mapping(_MAPPING_FIXTURE))
+    assert translator.entity_logical_name("queue_item") == "medx_callqueueitem"
+    assert translator.entity_set_name("queue_item") == "medx_callqueueitems"
+    assert translator.entity_set_name("account") == "accounts"
+
+
+def test_translator_entity_set_name_falls_back_to_logical() -> None:
+    """A mapping that omits `entity_set_name` falls back to the logical name so
+    minimal/legacy scaffolds keep working."""
+    from opencloser.models import DataverseEntityRef, DataverseMapping, DataverseMappingMeta
+
+    mapping = DataverseMapping(
+        meta=DataverseMappingMeta(
+            schema_version="slice2-mapping-v1",
+            discovered_at="2026-05-22T00:00:00.000Z",
+            dataverse_env_url="https://fake.crm.dynamics.com",
+            approved=True,
+        ),
+        entities={"thing": DataverseEntityRef(logical_name="medx_thing")},
+    )
+    assert MappingTranslator(mapping).entity_set_name("thing") == "medx_thing"
+
+
 def test_mapping_approved_update_fields() -> None:
     translator = MappingTranslator(load_mapping(_MAPPING_FIXTURE))
     approved = translator.approved_update_logical_names()
@@ -212,6 +438,26 @@ def test_load_mapping_invalid_json(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{not valid json", encoding="utf-8")
     with pytest.raises(MappingError, match="not valid JSON"):
+        load_mapping(bad)
+
+
+def test_load_mapping_schema_invalid_wraps_validation_error(tmp_path: Path) -> None:
+    """JSON-valid but schema-invalid input must surface as MappingError, not a raw
+    Pydantic ValidationError, so callers can rely on the documented error contract
+    (Codex review on PR #3)."""
+    bad = tmp_path / "wrong_schema.json"
+    # Valid JSON but missing the required `_meta` block — Pydantic would raise here.
+    bad.write_text('{"entities": {}}', encoding="utf-8")
+    with pytest.raises(MappingError, match="schema validation"):
+        load_mapping(bad)
+
+
+def test_load_mapping_unreadable_bytes_wrap_as_mapping_error(tmp_path: Path) -> None:
+    """An undecodable file (raw bytes that aren't valid UTF-8) must surface as
+    MappingError, not a raw UnicodeDecodeError (Codex review on PR #3)."""
+    bad = tmp_path / "binary.json"
+    bad.write_bytes(b"\xff\xfe\xff garbage")
+    with pytest.raises(MappingError, match="could not be read"):
         load_mapping(bad)
 
 

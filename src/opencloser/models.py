@@ -617,11 +617,26 @@ class DataverseMappingMeta(BaseModel):
 
 
 class DataverseEntityRef(BaseModel):
-    """One entry of the mapping artifact's `entities` map."""
+    """One entry of the mapping artifact's `entities` map.
+
+    Dataverse Web API addresses tables under TWO names that may differ:
+
+    - `logical_name` — the singular table logical name used by metadata endpoints
+      (e.g. `EntityDefinitions(LogicalName='account')`).
+    - `entity_set_name` — the (often plural) entity-set name used in record CRUD
+      URLs (e.g. `/api/data/v9.2/accounts(id)`). Many publisher-prefixed custom
+      tables pluralize differently (e.g. `medx_callqueueitem` → `medx_callqueueitems`),
+      so we cannot derive it by appending `s`.
+
+    `entity_set_name` is optional and falls back to `logical_name` for backward
+    compatibility, but every mapping intended for live Dataverse SHOULD set both
+    explicitly (Copilot PR #3 review).
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     logical_name: str
+    entity_set_name: str | None = None
     primary_id: str | None = None
 
 
@@ -658,6 +673,21 @@ class DataverseMapping(BaseModel):
     task_owner_override_field: str | None = None
     preserve_if_present: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _require_entities(self) -> DataverseMapping:
+        # An artifact with no entities would parse cleanly and then pass `verify()`
+        # vacuously (ok=True after checking nothing) — a readiness-gate false
+        # positive that defers the real failure to runtime mapping errors in queue
+        # loading. Reject at load time so the failure surfaces during startup
+        # (Codex review on PR #3). `fields`/`option_sets` may legitimately be empty
+        # for a deployment that only touches the queue table without option-set or
+        # update fields, so they remain optional.
+        if not self.entities:
+            raise ValueError(
+                "DataverseMapping must declare at least one entry in `entities`"
+            )
+        return self
+
 
 # ---- Slice 2 configuration (config/slice2.toml — data-model.md §3) ----
 
@@ -672,11 +702,16 @@ class RunConfig(BaseModel):
 
 
 class DataverseConfig(BaseModel):
-    """`[dataverse]` section of slice2.toml."""
+    """`[dataverse]` section of slice2.toml.
+
+    Note: the Dataverse environment URL is **not** here — it lives only in
+    `DataverseSecrets.env_url` (loaded from the `DATAVERSE_ENV_URL` env var) so the
+    runtime has a single authoritative source for the connection target. Keeping a
+    second copy in this config file risked the two values drifting.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    env_url: str
     mapping_artifact: str
     callable_status: str
 

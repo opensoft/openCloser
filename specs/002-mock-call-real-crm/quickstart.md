@@ -6,6 +6,13 @@ Operator/developer quickstart for running one Dataverse-owned ALF queue item thr
 Slice 2 loop. The **dry-run** path needs no write permissions and is the default and the
 safe demo posture; the **write-enabled** path mutates one dedicated test record in Dynamics.
 
+> **Phase status (foundation PR #3)** — The CLI entrypoints below (`opencloser discover-crm`,
+> `opencloser run-crm`) and the `tests/contract/` directory referenced in §7 are
+> **planned for later Slice 2 phases** (US1/US2/US3 sub-PRs and Polish). The foundation
+> PR ships only the adapter primitives (`crm/dataverse/*`), the state-store additions, and
+> the Spec Kit artifacts. Treat the commands here as the *target* operator experience; they
+> are not yet runnable from the foundation tip.
+
 ---
 
 ## 1. Prerequisites

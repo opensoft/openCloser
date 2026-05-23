@@ -11,7 +11,11 @@ default_mode = "dry-run"
 campaign = ""
 
 [dataverse]
-env_url = "https://example.crm.dynamics.com"
+# The Dataverse environment URL is NOT here — it lives only in the
+# DATAVERSE_ENV_URL environment variable so the runtime has a single
+# authoritative source (spec FR-005; review fixup to PR #3 — env_url removed
+# from this section to eliminate drift risk with the env-var copy).
+
 # FR-004: the discovered + PR-reviewed mapping artifact.
 mapping_artifact = "config/dataverse_mapping.json"
 # FR-011: the queue status that is eligible to be called.

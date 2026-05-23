@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from opencloser.models import CallableStatus, EventType, QueueItem
-from opencloser.transport.mock import FixtureDrivenTransport
+from opencloser.transport.mock import FixtureDrivenTransport, MalformedFixtureError
 
 pytestmark = pytest.mark.module("transport")
 
@@ -57,22 +57,21 @@ def test_place_call_rejects_path_traversal_fixture_id(tmp_path: Path, bad_id: st
         transport.place_call(_qi(), bad_id)
 
 
-def test_event_stream_rejects_event_missing_required_keys(tmp_path: Path) -> None:
-    """An event missing type/event_id/timestamp raises ValueError, not a bare KeyError."""
+def test_place_call_rejects_event_missing_required_keys(tmp_path: Path) -> None:
+    """FR-019/FR-020: an event missing type/event_id/timestamp is rejected at place_call
+    time (before any call id is allocated), not at event_stream iteration time."""
     _write_fixture(tmp_path, "bad", [{"type": "connected"}])  # missing event_id + timestamp
     transport = FixtureDrivenTransport(tmp_path)
-    call_id = transport.place_call(_qi(), "bad")
-    with pytest.raises(ValueError, match="malformed event"):
-        list(transport.event_stream(call_id))
+    with pytest.raises(MalformedFixtureError, match="missing required field"):
+        transport.place_call(_qi(), "bad")
 
 
-def test_event_stream_rejects_fixture_without_events_array(tmp_path: Path) -> None:
-    """A fixture JSON with no 'events' key raises ValueError, not a silent empty stream."""
+def test_place_call_rejects_fixture_without_events_array(tmp_path: Path) -> None:
+    """FR-019/FR-020: a fixture JSON with no 'events' key is rejected at place_call time."""
     (tmp_path / "noevents.json").write_text('{"fixture_id": "noevents"}', encoding="utf-8")
     transport = FixtureDrivenTransport(tmp_path)
-    call_id = transport.place_call(_qi(), "noevents")
-    with pytest.raises(ValueError, match="events"):
-        list(transport.event_stream(call_id))
+    with pytest.raises(MalformedFixtureError, match="events"):
+        transport.place_call(_qi(), "noevents")
 
 
 def test_event_stream_yields_events_in_fixture_order(tmp_path: Path) -> None:
@@ -141,8 +140,10 @@ def test_event_stream_skips_unknown_event_types(
 
 
 def test_place_call_raises_when_fixture_missing(tmp_path: Path) -> None:
+    """FR-019/FR-020: a missing fixture file is a MalformedFixtureError (same no-mutation
+    outcome as an invalid-JSON / no-events-array / missing-identity-field fixture)."""
     transport = FixtureDrivenTransport(tmp_path)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(MalformedFixtureError, match="not found"):
         transport.place_call(_qi(), "does_not_exist")
 
 
