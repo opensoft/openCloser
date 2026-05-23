@@ -52,7 +52,8 @@ def test_default_layer_redacts_emails_and_phone_numbers() -> None:
         ("Call (555) 123-4567 back.", 1),
         ("Try 555.123.4567 or +1 555 123 4567.", 2),
         ("ping bob@example.org and alice@example.co.uk", 2),
-        ("Phone 5551234567 dial-only digits not matched", 0),
+        # Privacy-conservative: bare 10-digit phone numbers are also redacted.
+        ("Phone 5551234567 bare digits.", 1),
     ],
 )
 def test_regex_policy_match_variants(raw: str, expected_redactions: int) -> None:

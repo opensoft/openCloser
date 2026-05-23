@@ -700,20 +700,25 @@ class TaskOwnersConfig(BaseModel):
     review: str
 
 
+# Default ``[redaction] patterns`` for the regex policy: email + NA phone numbers.
+#
+# Lives on the config so the implicit and config-driven defaults cannot diverge —
+# ``RegexRedactionPolicy`` compiles exactly the patterns it is given, no implicit
+# prepending. Operators who supply a custom ``patterns`` list replace these
+# defaults outright (set ``policy = "noop"`` to disable redaction entirely).
+#
+# Phone-number regex is privacy-conservative: separators are OPTIONAL so bare
+# 10-digit forms (e.g. ``5551234567``) are also redacted (aligned with the
+# default in ``config/slice2.toml``). This may over-match true 10-digit IDs in
+# transcript text — operators with that concern should configure stricter
+# patterns explicitly.
 _BUILTIN_REDACTION_PATTERNS: tuple[str, ...] = (
     # Email addresses.
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-    # North American phone numbers — at least one separator required between segments
-    # so bare 10-digit IDs are not redacted. Matches: 555-123-4567, (555) 123-4567,
-    # 555.123.4567, +1 555 123 4567.
-    r"(?:\+?\d{1,2}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}",
+    # North American phone numbers. Matches all of: 555-123-4567, 5551234567,
+    # 555.123.4567, (555) 123-4567, +1 555 123 4567.
+    r"(?:\+?\d{1,2}[\s.-])?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}",
 )
-"""Default ``[redaction] patterns`` for the regex policy: email + NA phone.
-
-Lives on the config so the implicit and config-driven defaults cannot diverge —
-``RegexRedactionPolicy`` compiles exactly the patterns it is given, no implicit
-prepending. Operators who supply a custom ``patterns`` list replace these
-defaults outright (set ``policy = "noop"`` to disable redaction entirely)."""
 
 BUILTIN_REDACTION_PATTERNS: tuple[str, ...] = _BUILTIN_REDACTION_PATTERNS
 
