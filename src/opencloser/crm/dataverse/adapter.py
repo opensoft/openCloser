@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 
 from opencloser.crm.dataverse.client import DataverseClient
-from opencloser.crm.dataverse.errors import PermanentDataverseError
+from opencloser.crm.dataverse.errors import PermanentDataverseError, odata_string_literal
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
 from opencloser.models import (
     CrmCorrelation,
@@ -372,7 +372,9 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    "$filter": f"{idempotency_field} eq '{idempotency_value}'",
+                    "$filter": (
+                        f"{idempotency_field} eq {odata_string_literal(idempotency_value)}"
+                    ),
                     "$select": primary_id,
                     "$top": "1",
                 },
@@ -421,9 +423,10 @@ class DataverseWriteBackAdapter:
 
     def _entity_set(self, entity_key: str) -> str:
         """Resolve the Dataverse Web API entity-set (collection) name for an entity
-        key. Prefers the mapping's `entity_set_name` when populated (discover-crm
-        reads `EntityDefinition.EntitySetName`); falls back to the irregular-plural
-        override map / `+s` rule otherwise."""
+        key. Prefers the mapping's `entity_set_name` (populated by hand on PR
+        review today — `discover-crm` does not yet read
+        `EntityDefinition.EntitySetName` automatically); falls back to the
+        irregular-plural override map / `+s` rule otherwise."""
         ref = self._t.mapping.entities.get(entity_key)
         if ref is not None and ref.entity_set_name:
             return ref.entity_set_name

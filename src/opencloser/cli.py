@@ -361,11 +361,11 @@ def run_crm(
         )
         raise typer.Exit(code=2)
     # `--next-ready` requires a non-empty campaign so the queue-loader's
-    # selector carries the scope the contract demands (cli-slice2.md). Without
-    # one, the loader's query is currently campaign-agnostic — surfacing this
-    # at the CLI is the smallest fix that avoids silently picking items
-    # outside the operator's intended campaign. (Filtering the actual loader
-    # query by campaign is a queue-loader (T014) concern and tracked in US3.)
+    # selector carries the scope the contract demands (cli-slice2.md). The
+    # loader's NextReady path now filters by campaign when the mapping carries
+    # a `queue.campaign` field; when the mapping omits that field, the query
+    # falls back to a campaign-agnostic match and this CLI gate is the only
+    # user-facing protection against picking the wrong campaign's row.
     if next_ready and not effective_campaign:
         typer.echo(
             "error:       --next-ready requires --campaign (or a non-empty "

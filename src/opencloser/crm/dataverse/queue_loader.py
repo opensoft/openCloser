@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from opencloser.crm.dataverse.client import DataverseClient
+from opencloser.crm.dataverse.errors import odata_string_literal
 from opencloser.crm.dataverse.mapping import MappingTranslator
 from opencloser.models import CallableStatus, QueueItem
 
@@ -73,7 +74,9 @@ class DataverseQueueLoader:
             campaign_field_ref = self._t.mapping.fields.get("queue.campaign")
             if campaign_field_ref is not None and selector.campaign:
                 campaign_field = campaign_field_ref.logical_name
-                clauses.append(f"{campaign_field} eq '{selector.campaign}'")
+                clauses.append(
+                    f"{campaign_field} eq {odata_string_literal(selector.campaign)}"
+                )
             rows = self._query(
                 entity,
                 flt=" and ".join(clauses),
