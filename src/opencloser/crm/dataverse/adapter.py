@@ -150,10 +150,15 @@ class DataverseWriteBackAdapter:
         entity_key = "phone_call_activity"
         idempotency_field = self._t.logical_name("phone_call.idempotency_key")
         if self._dry_run:
-            # Build the body so a MappingError on an unverifiable idempotency
-            # field still surfaces in dry-run (FR-031: dry-run "still surfaces
-            # the gap"); capture the conceptual payload and return without
-            # touching Dataverse or the local correlation/progress ledgers.
+            # Validate every LOCAL mapping lookup the write-enabled path would
+            # do — `_primary_id`, `_entity_set`, the body builder — so a
+            # mapping gap (e.g. missing `entities['phone_call_activity']
+            # .primary_id`) surfaces in dry-run instead of passing silently
+            # only to fail immediately in write-enabled (Codex PR #7 review,
+            # `contracts/metadata-discovery-verification.md` §5: dry-run
+            # "still runs `verify` and surfaces gaps").
+            self._entity_set(entity_key)
+            self._primary_id(entity_key)
             self._phone_call_body(payload, idempotency_field)
             self._aggregate(payload.session_id).phone_call_activity = payload
             return
@@ -191,9 +196,11 @@ class DataverseWriteBackAdapter:
         # this path persists a consistent `crm_correlations(write_status=failed)`
         # row before re-raising.
         if self._dry_run:
-            # Build the body to surface mapping gaps but skip the GET pre-query
-            # and the PATCH; capture the conceptual payload (FR-031, FR-010 —
-            # dry-run MUST NOT mutate the CRM queue item).
+            # Validate every LOCAL mapping lookup the write-enabled path would
+            # do (Codex PR #7 review); skip the GET pre-query and the PATCH;
+            # capture the conceptual payload (FR-031, FR-010 — dry-run MUST
+            # NOT mutate the CRM queue item).
+            self._entity_set("queue_item")
             self._queue_status_body(payload)
             self._aggregate(payload.session_id).queue_status_update = payload
             return
@@ -244,11 +251,19 @@ class DataverseWriteBackAdapter:
         idempotency_field = self._t.logical_name("task.idempotency_key")
 
         if self._dry_run:
-            # Dry-run owner resolution: use the configured default for the task
-            # kind directly, WITHOUT live Dataverse verification. The planned
-            # payload reflects what a write-enabled run with a verified default
-            # owner WOULD send. A real write-enabled run still re-verifies the
-            # owner against active enabled Dataverse user/team rows (FR-025).
+            # Validate every LOCAL mapping lookup the write-enabled path would
+            # do — `_primary_id`, `_entity_set`, the body builder — so missing
+            # `entities['task'].primary_id` surfaces in dry-run (Codex PR #7
+            # review). Owner override + verification (`_resolve_task_owner`)
+            # are deliberately skipped: both require live Dataverse GETs
+            # (`_lookup_owner_override`, `_owner_entity_set`), which the
+            # spec §Edge Cases path explicitly tolerates being unreachable in
+            # dry-run. We use the configured default owner directly and
+            # default the entity-set to "systemusers" (the common case). A
+            # write-enabled run still re-verifies the owner against
+            # active-enabled rows (FR-025).
+            self._entity_set(entity_key)
+            self._primary_id(entity_key)
             default_owner = (
                 self._task_owners.callback
                 if payload.task_kind == "callback"

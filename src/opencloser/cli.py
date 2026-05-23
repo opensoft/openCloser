@@ -35,7 +35,7 @@ from opencloser.crm.dataverse.metadata import MetadataError, discover
 from opencloser.crm.dataverse.queue_loader import ExplicitId, NextReady, QueueSelector
 from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
-from opencloser.models import QueueItem, RunMode
+from opencloser.models import DataverseSecrets, QueueItem, RunMode
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import ConversationFixture, ConversationTurn
 from opencloser.slice2.runner import run_one_crm_item
@@ -353,11 +353,31 @@ def run_crm(
         campaign=campaign or slice2_config.run.campaign,
     )
 
+    # FR-031 + spec §Edge Cases "Dry-run requested but write credentials are
+    # absent": missing Dataverse secrets MUST NOT block the dry-run path
+    # (Codex PR #7 review). In write-enabled mode the same error is fatal.
+    # When secrets are missing in dry-run, we still construct a placeholder
+    # client so the runner's downstream code path is unchanged — the runner's
+    # `_verify_readiness(dry_run=True)` catches any auth/connectivity failure
+    # from the live `verify()` call and treats it as non-fatal per the
+    # `contracts/metadata-discovery-verification.md` §5 rule.
     try:
         secrets = load_dataverse_secrets()
     except Slice2ConfigError as exc:
-        typer.echo(f"error:       {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        if run_mode is RunMode.WRITE_ENABLED:
+            typer.echo(f"error:       {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        typer.echo(
+            f"warning:     {exc} — proceeding in dry-run mode (write-back disabled, "
+            "any Dataverse read will fail late and surface as a queue-load error)",
+            err=True,
+        )
+        secrets = DataverseSecrets(
+            tenant_id="dry-run-placeholder",
+            client_id="dry-run-placeholder",
+            client_secret="dry-run-placeholder",
+            env_url="https://dry-run-placeholder.crm.dynamics.com",
+        )
 
     clock = SystemClock()
     token_provider = DataverseTokenProvider(secrets)

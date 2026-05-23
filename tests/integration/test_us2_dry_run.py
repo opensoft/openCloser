@@ -10,8 +10,10 @@ in-process Dataverse fake. The dry-run path:
   persona) so the produced session-result + planned write-back match what a
   write-enabled run would emit;
 - routes every `emit_*` through `DataverseWriteBackAdapter` constructed with
-  `dry_run=True` so zero GET / POST / PATCH operations reach Dataverse
-  (FR-031, SC-002, SC-013);
+  `dry_run=True` so zero POST / PATCH operations reach Dataverse for
+  write-back (FR-031, SC-002, SC-013) — Note: the runner still issues GETs
+  to load the queue item from Dataverse via `DataverseQueueLoader`; the
+  "zero writes" guarantee is scoped to write-back, not all I/O;
 - writes the FR-031 dry-run marker alongside the orchestrator's session
   artifacts so an inspector can tell the session was a rehearsal (SC-002).
 
@@ -212,52 +214,50 @@ def test_us2_dry_run_blocks_when_mapping_missing(
 # ---------------------------------------------------------------------------
 
 
-def _stub_no_dataverse_client() -> DataverseClient:
-    """Build a DataverseClient whose underlying httpx transport hard-fails on any
-    request. Proves that dry-run readiness completes WITHOUT touching Dataverse
-    (it never reaches `verify()`). The downstream queue load DOES use the
-    client; this stub is only consumed for the readiness-path assertion, so the
-    test uses a real fake client for the queue load."""
+def _broken_dataverse_client() -> DataverseClient:
+    """Build a DataverseClient whose token-acquire raises a DataverseError. Per
+    `contracts/metadata-discovery-verification.md` §5 + spec §Edge Cases
+    "Dry-run requested but write credentials are absent", dry-run readiness
+    MUST tolerate `verify()` failing this way — the placeholder report path
+    keeps the run going.
 
-    def _refuse(_request: httpx.Request) -> httpx.Response:
-        raise AssertionError(
-            "dry-run readiness MUST NOT issue any HTTP request to Dataverse — "
-            "spec §Edge Cases 'Dry-run requested but write credentials are absent'"
-        )
+    (Earlier this test asserted that dry-run NEVER touches the client. That
+    was wrong per the contract — Copilot PR #7 review pointed this out: the
+    contract explicitly says dry-run runs `verify` AND surfaces gaps, with
+    the special case that missing write credentials are tolerated.)"""
+    from opencloser.crm.dataverse.errors import PermanentDataverseError
 
-    transport = httpx.MockTransport(_refuse)
-
-    class _StubToken:
-        def acquire(self) -> str:
-            raise AssertionError(
-                "dry-run readiness MUST NOT acquire an OAuth token when write "
-                "credentials are absent"
+    class _BrokenToken:
+        def token(self, *, now: float | None = None) -> str:
+            raise PermanentDataverseError(
+                "OAuth token acquisition failed (test stub — missing creds)",
+                status_code=401,
             )
 
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(401, json={"error": "unauthorized"})
+    )
+
     return DataverseClient(
-        "https://stub.crm.dynamics.com",
-        _StubToken(),
+        "https://broken.crm.dynamics.com",
+        _BrokenToken(),
         RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0),
         http=httpx.Client(transport=transport),
         sleep=lambda _seconds: None,
     )
 
 
-def test_us2_dry_run_readiness_skips_live_verify(
+def test_us2_dry_run_readiness_tolerates_verify_connectivity_failure(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
-    """Confirms that dry-run readiness validates only the local mapping artifact
-    and DOES NOT call live `verify()` — so a missing-credentials environment that
-    would block a write-enabled run still produces a successful dry-run readiness
-    (the queue load is a separate concern, exercised against a working fake)."""
+    """Confirms that dry-run readiness calls live `verify()` (per
+    `contracts/metadata-discovery-verification.md` §5) but tolerates
+    auth/connectivity failures (the spec §Edge Cases "dry-run + missing write
+    credentials" rule). With a working fake the dry-run completes; the
+    metadata report is the live one (drift may be populated)."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
 
-    # Use the real fake for the queue load. The proof here is the absence of any
-    # `verify()` call: the metadata-verification report on the returned
-    # CrmRunReport is the synthetic placeholder, NOT a live report. (`verify()`
-    # populates `drift` from the live discover; the dry-run placeholder leaves
-    # `drift` empty by construction.)
     report = _run_dry(
         conn=tmp_state_db,
         client=fake.client(_slice2_config().retry),
@@ -268,29 +268,26 @@ def test_us2_dry_run_readiness_skips_live_verify(
 
     assert report.exit_status == "completed"
     assert report.metadata_report is not None
-    # Synthetic dry-run placeholder: ok=True, no missing, no drift.
     assert report.metadata_report.ok is True
-    assert report.metadata_report.missing == []
-    assert report.metadata_report.drift == []
 
 
-def test_us2_dry_run_readiness_stub_client_proves_no_oauth(
+def test_us2_dry_run_readiness_continues_when_verify_fails(
     tmp_path: Path,
 ) -> None:
-    """Lower-level proof: invoke `_verify_readiness` directly with a stub client
-    whose token-acquire AND HTTP transport both `AssertionError` on any call.
-    Dry-run readiness must complete without raising — this proves it never
-    touches the client (and so does not need write credentials)."""
-    from opencloser.slice2.runner import _verify_readiness
+    """Lower-level proof: invoke `_verify_readiness` directly with a broken
+    client whose token-acquire raises `PermanentDataverseError`. Dry-run
+    readiness must complete without raising — the `verify()` failure is caught
+    and a placeholder report is returned, satisfying the spec §Edge Cases
+    "dry-run + missing write credentials" rule."""
+    from opencloser.slice2.runner import _ReadinessResult, _verify_readiness
 
     cfg = _slice2_config()
-    stub_client = _stub_no_dataverse_client()
+    broken_client = _broken_dataverse_client()
 
-    result = _verify_readiness(cfg, stub_client, _CLOCK, dry_run=True)
+    result = _verify_readiness(cfg, broken_client, _CLOCK, dry_run=True)
 
-    # The synthetic placeholder return path — readiness succeeded without HTTP.
-    from opencloser.slice2.runner import _ReadinessResult
-
+    # The placeholder return path — readiness succeeded despite a 401 from
+    # verify(), because the spec edge case tolerates it in dry-run.
     assert isinstance(result, _ReadinessResult)
     assert result.metadata_report.ok is True
     assert result.metadata_report.checked_at == _CLOCK.now_utc_ms()

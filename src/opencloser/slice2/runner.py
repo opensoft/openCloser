@@ -288,34 +288,38 @@ def _verify_readiness(
             ),
         )
     translator = MappingTranslator(mapping)
-    if dry_run:
-        # FR-007 "for the selected run mode" + spec §Edge Cases "Dry-run
-        # requested but write credentials are absent": dry-run readiness
-        # validates the local mapping artifact (above) but MUST NOT fail when
-        # live Dataverse verification cannot be performed — that gate belongs
-        # to the write-enabled path. Surface an empty placeholder report so
-        # callers downstream do not see a None.
-        return _ReadinessResult(
-            translator=translator,
-            metadata_report=MetadataVerificationReport(
-                ok=True,
-                missing=[],
-                drift=[],
-                checked_at=clk.now_utc_ms(),
-            ),
-        )
     try:
         report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
     except (DataverseError, MetadataError) as exc:
+        if dry_run:
+            # spec §Edge Cases "Dry-run requested but write credentials are
+            # absent" + contracts/metadata-discovery-verification.md §5:
+            # dry-run still runs `verify()` but auth/connectivity failures are
+            # NOT a dry-run error. Continue with a synthetic placeholder report
+            # so downstream still has a non-None report (Copilot PR #7 review).
+            # Genuine `ok=False` reports (real missing/drift) below STILL block
+            # dry-run — only the connectivity failure path is tolerated here.
+            return _ReadinessResult(
+                translator=translator,
+                metadata_report=MetadataVerificationReport(
+                    ok=True,
+                    missing=[],
+                    drift=[],
+                    checked_at=clk.now_utc_ms(),
+                ),
+            )
         # An unreachable Dataverse (auth failure, 5xx, timeout) or unverifiable
-        # metadata at startup is operator-visible-blocked rather than an unhandled
-        # exception. The CLI prints the message and exits with the documented
-        # `blocked` exit code.
+        # metadata at startup in write-enabled mode is operator-visible-blocked
+        # rather than an unhandled exception. The CLI prints the message and
+        # exits with the documented `blocked` exit code.
         return CrmRunReport(
             exit_status="blocked",
             message=f"metadata verification failed: {exc}",
         )
     if not report.ok:
+        # Real metadata gap (missing fields / option sets / etc.) — blocks BOTH
+        # modes per contracts/metadata-discovery-verification.md §5 (dry-run
+        # "still runs `verify` and surfaces gaps").
         return CrmRunReport(
             exit_status="blocked",
             message="metadata verification failed: " + "; ".join(report.missing),

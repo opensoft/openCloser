@@ -304,10 +304,18 @@ def test_cli_run_crm_rejects_non_guid_queue_item_id(tmp_path: Path) -> None:
 
 def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
     """`run-crm` without `--write` enters the FR-031 dry-run path (the previous
-    "dry-run not implemented" placeholder was removed in US2). With the
-    Dataverse secret env vars absent in the test environment, the secret-loader
-    exits 2 — proving the CLI now reaches the secret-load step rather than
-    short-circuiting on a missing-`--write` gate."""
+    "dry-run not implemented" placeholder was removed in US2; the
+    missing-credentials gate was softened in round-2 review per Codex feedback).
+
+    With the Dataverse secret env vars absent in the test environment, the CLI
+    now:
+      1. Emits a `warning:` instead of `error:` for the missing secrets,
+      2. Proceeds into the dry-run path with placeholder credentials,
+      3. Fails AT the queue-load step (the placeholder creds can't authenticate
+         against the placeholder env_url) — exit_status="failed", exit code 1.
+
+    The test asserts the new gate-softening behavior, not the queue-load
+    failure detail (which depends on httpx version)."""
     config_path = _write_config(tmp_path)
     run = _runner.invoke(
         app,
@@ -321,11 +329,13 @@ def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
             str(config_path),
         ],
     )
-    # Same exit code (2) but different reason: now it's the credential-load gate,
-    # NOT the removed "dry-run not yet implemented" placeholder. The error must
-    # name the missing secret env vars rather than mentioning dry-run.
-    assert run.exit_code == 2
     out = _combined_output(run)
-    assert "missing required dataverse secret" in out.lower()
-    assert "dataverse_client_secret" in out.lower()
+    # The removed "dry-run not yet implemented" placeholder is gone.
     assert "dry-run is not yet implemented" not in out.lower()
+    # The missing-secrets gate is now a WARNING (not a fatal error) in dry-run,
+    # per Codex PR #7 review + spec §Edge Cases.
+    assert "warning" in out.lower() and "missing required dataverse secret" in out.lower()
+    # Run reaches the dry-run path; the placeholder credentials fail later on
+    # the queue load, which produces exit_status="failed" (CLI exit code 1).
+    # The exact code is less important than that we're past secret loading.
+    assert run.exit_code != 0
