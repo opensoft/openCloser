@@ -418,7 +418,10 @@ def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Conn
     # No Task created and the unverifiable-default warning is recorded.
     assert [b for e, b in fake.created if e == "tasks"] == []
     assert any(w.code == "task_owner_default_unverifiable" for w in adapter.warnings())
-    # The failure-recording try/except persisted a failed correlation.
+    # The failure is staged in memory; the runner persists it after the
+    # orchestrator's transaction rolls back. Drive the flush here directly
+    # to verify the row that downstream resume/audit will see.
+    adapter.flush_pending_failures()
     rows = tmp_state_db.execute(
         "SELECT write_status FROM crm_correlations WHERE session_id = ? AND record_kind = ?;",
         (_SID, "task"),

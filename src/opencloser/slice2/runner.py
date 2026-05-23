@@ -189,26 +189,15 @@ def run_one_crm_item(
     # 5) Construct the boundary objects + adapter and call the orchestrator. The
     # conversation-fixture load is inside the try block so a missing or malformed
     # fixture file produces an exit_status=failed report rather than an unhandled
-    # exception. A `failure_conn_factory` opens a peer SQLite connection so the
-    # adapter's failure ledger writes survive the orchestrator's
-    # `with store.transaction(conn)` rollback on emit_* failure.
-    state_db_path = slice1_config.state.db
-
-    def _open_failure_conn() -> sqlite3.Connection:
-        peer = store.connect(state_db_path)
-        # `store.connect()` configures WAL + foreign_keys; combined with
-        # autocommit (`isolation_level=None`) and no explicit BEGIN here, each
-        # upsert commits independently of the orchestrator's transaction on
-        # the main `conn`.
-        return peer
-
+    # exception. The adapter stages failure markers in memory; the runner
+    # flushes them AFTER catching the emit_* exception (when the orchestrator's
+    # rolling-back transaction has released SQLite's write lock).
     adapter = DataverseWriteBackAdapter(
         conn=conn,
         client=client,
         translator=translator,
         task_owners=slice2_config.task_owners,
         now_utc_ms=clk.now_utc_ms,
-        failure_conn_factory=_open_failure_conn,
     )
     for warning in runner_warnings:
         adapter.add_warning(warning)
@@ -244,12 +233,13 @@ def run_one_crm_item(
         )
     except (DataverseError, DataverseWriteBackError, MappingError) as exc:
         # A permanent Dataverse write failure mid-run, or a missing/invalid
-        # mapping entry surfaced by the adapter (e.g. `primary_id` not set), is
-        # operator-visible-failed. The adapter has already recorded a
-        # `crm_correlations(write_status=failed)` row plus
-        # `writeback_progress.run_status=blocked` with the error before
-        # re-raising, so the resume coordinator can pick up in a later slice
-        # (US4).
+        # mapping entry surfaced by the adapter (e.g. `primary_id` not set),
+        # is operator-visible-failed. The orchestrator's
+        # `with store.transaction(conn)` around the failing emit_* has
+        # already rolled back; the SQLite write lock is free again, so we can
+        # now safely persist the failure markers the adapter staged. The
+        # resume coordinator (US4) reads from these rows.
+        adapter.flush_pending_failures()
         return CrmRunReport(
             exit_status="failed",
             message=f"dataverse write failed: {exc}",
