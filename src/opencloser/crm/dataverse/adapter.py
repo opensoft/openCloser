@@ -24,7 +24,11 @@ from datetime import UTC, datetime
 
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import PermanentDataverseError, odata_string_literal
-from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
+from opencloser.crm.dataverse.mapping import (
+    MappingError,
+    MappingTranslator,
+    resolve_entity_set,
+)
 from opencloser.models import (
     CrmCorrelation,
     CrmRecordKind,
@@ -58,31 +62,8 @@ class DataverseWriteBackError(RuntimeError):
     """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
 
 
-# Known-irregular Dataverse entity-set names (the OOTB system tables whose
-# `EntitySetName` doesn't follow the `logical_name + "s"` convention). A
-# deployment can also populate `DataverseEntityRef.entity_set_name` per entry
-# in `config/dataverse_mapping.json` to override this map.
-_ENTITY_SET_OVERRIDES: dict[str, str] = {
-    "activity": "activitypointers",
-    "opportunity": "opportunities",
-    "businessunit": "businessunits",
-    "currency": "transactioncurrencies",
-}
-
-
-def _derive_entity_set(logical_name: str) -> str:
-    """Fallback derivation when the mapping omits `entity_set_name`.
-
-    Returns the known irregular plural when one is registered, otherwise
-    appends `"s"`. This covers every entity Slice 2 references in practice
-    (`phonecall`/`task`/`medx_*`/`systemuser`/`team`/`account`); for any other
-    OOTB or custom table the mapping artifact MUST populate
-    `entity_set_name` explicitly. Today `discover-crm` only refreshes
-    `_meta.discovered_at`/`approved` and does NOT auto-populate
-    `entity_set_name` from `EntityDefinition.EntitySetName` — operators set
-    it by hand on PR review. (Auto-population is tracked for a later slice.)
-    """
-    return _ENTITY_SET_OVERRIDES.get(logical_name, logical_name + "s")
+# Entity-set resolution moved to `mapping.derive_entity_set` so the queue loader
+# and the adapter share one source of truth.
 
 
 class _AggregateBuilder:
@@ -423,15 +404,9 @@ class DataverseWriteBackAdapter:
 
     def _entity_set(self, entity_key: str) -> str:
         """Resolve the Dataverse Web API entity-set (collection) name for an entity
-        key. Prefers the mapping's `entity_set_name` (populated by hand on PR
-        review today — `discover-crm` does not yet read
-        `EntityDefinition.EntitySetName` automatically); falls back to the
-        irregular-plural override map / `+s` rule otherwise."""
-        ref = self._t.mapping.entities.get(entity_key)
-        if ref is not None and ref.entity_set_name:
-            return ref.entity_set_name
-        logical = self._t.entity_logical_name(entity_key)
-        return _derive_entity_set(logical)
+        key. Thin wrapper around the shared `mapping.resolve_entity_set` helper —
+        kept as a method so the adapter's call sites read naturally."""
+        return resolve_entity_set(self._t.mapping, entity_key)
 
     def _primary_id(self, entity_key: str) -> str:
         """Return the mapped primary-id column for an entity. Raises `MappingError`

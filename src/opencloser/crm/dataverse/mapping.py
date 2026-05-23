@@ -20,6 +20,45 @@ class MappingError(RuntimeError):
     """Raised when the mapping artifact is missing, malformed, or a lookup has no entry."""
 
 
+# Known-irregular Dataverse entity-set names — the OOTB system tables whose
+# `EntitySetName` doesn't follow the `logical_name + "s"` convention. A
+# deployment can also populate `DataverseEntityRef.entity_set_name` per entry
+# in `config/dataverse_mapping.json` to override this map per entity.
+_ENTITY_SET_OVERRIDES: dict[str, str] = {
+    "activity": "activitypointers",
+    "opportunity": "opportunities",
+    "businessunit": "businessunits",
+    "currency": "transactioncurrencies",
+}
+
+
+def derive_entity_set(logical_name: str) -> str:
+    """Fallback derivation when the mapping omits `entity_set_name`.
+
+    Returns the known irregular plural when one is registered, otherwise
+    appends `"s"`. This covers every entity Slice 2 references in practice
+    (`phonecall`/`task`/`medx_*`/`systemuser`/`team`/`account`); for any other
+    OOTB or custom table the mapping artifact MUST populate
+    `entity_set_name` explicitly. Today `discover-crm` does not auto-populate
+    `entity_set_name` from `EntityDefinition.EntitySetName` — operators set
+    it by hand on PR review.
+    """
+    return _ENTITY_SET_OVERRIDES.get(logical_name, logical_name + "s")
+
+
+def resolve_entity_set(mapping: DataverseMapping, entity_key: str) -> str:
+    """Return the Dataverse Web API entity-set (collection) name for a
+    conceptual entity key. Prefers the mapping's `entity_set_name` when
+    populated; falls back to `derive_entity_set` otherwise. Raises
+    `MappingError` when the entity key has no mapping at all."""
+    ref = mapping.entities.get(entity_key)
+    if ref is None:
+        raise MappingError(f"no Dataverse entity mapping for {entity_key!r}")
+    if ref.entity_set_name:
+        return ref.entity_set_name
+    return derive_entity_set(ref.logical_name)
+
+
 def load_mapping(path: str | Path) -> DataverseMapping:
     """Load and validate the Dataverse mapping artifact (FR-004).
 

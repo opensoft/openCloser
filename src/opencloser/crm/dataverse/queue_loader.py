@@ -12,7 +12,11 @@ from dataclasses import dataclass
 
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import odata_string_literal
-from opencloser.crm.dataverse.mapping import MappingTranslator
+from opencloser.crm.dataverse.mapping import (
+    MappingTranslator,
+    derive_entity_set,
+    resolve_entity_set,
+)
 from opencloser.models import CallableStatus, QueueItem
 
 
@@ -52,11 +56,15 @@ class DataverseQueueLoader:
         conceptual status) so the reused eligibility evaluator records the FR-011
         blocked result — filtering it out here would hide that decision.
         """
-        entity = self._t.entity_logical_name("queue_item")
-        primary_id = self._t.mapping.entities["queue_item"].primary_id or f"{entity}id"
+        # Record-level Web API URLs use the entity-set (collection) name, not the
+        # logical table name. `medx_callqueueitem` (logical) would 404 against a
+        # real environment; `medx_callqueueitems` (entity set) is correct.
+        entity_set = resolve_entity_set(self._t.mapping, "queue_item")
+        entity_logical = self._t.entity_logical_name("queue_item")
+        primary_id = self._t.mapping.entities["queue_item"].primary_id or f"{entity_logical}id"
 
         if isinstance(selector, ExplicitId):
-            rows = self._query(entity, flt=f"{primary_id} eq {selector.queue_item_id}", top=1)
+            rows = self._query(entity_set, flt=f"{primary_id} eq {selector.queue_item_id}", top=1)
         else:
             status_field = self._t.logical_name("queue.status")
             ready_value = self._t.option_set_value("queue_status.ready")
@@ -74,11 +82,9 @@ class DataverseQueueLoader:
             campaign_field_ref = self._t.mapping.fields.get("queue.campaign")
             if campaign_field_ref is not None and selector.campaign:
                 campaign_field = campaign_field_ref.logical_name
-                clauses.append(
-                    f"{campaign_field} eq {odata_string_literal(selector.campaign)}"
-                )
+                clauses.append(f"{campaign_field} eq {odata_string_literal(selector.campaign)}")
             rows = self._query(
-                entity,
+                entity_set,
                 flt=" and ".join(clauses),
                 orderby=f"{order_field} asc,{primary_id} asc",
                 top=1,
@@ -124,17 +130,24 @@ class DataverseQueueLoader:
         )
 
     def _facility_name(self, row: dict) -> str:
-        """Resolve the facility name from the Account lookup; fall back to the raw id."""
+        """Resolve the facility name from the Account lookup; fall back to the raw id.
+
+        The mapping's `lookup_target` is a Dataverse logical-name reference (e.g.
+        `account`) so a record-level query needs the entity-set form (`accounts`).
+        Without the conversion, this GET 404s in production environments and
+        bubbles out as a queue-loader failure on otherwise valid runs.
+        """
         account_field = self._t.field("queue.facility_account")
         account_id = row.get(account_field.logical_name)
         if not account_id:
             return ""
-        account_entity = account_field.lookup_target or "account"
+        account_logical = account_field.lookup_target or "account"
+        account_entity_set = derive_entity_set(account_logical)
         accounts = (
             self._client.get(
-                account_entity,
+                account_entity_set,
                 params={
-                    "$filter": f"accountid eq {account_id}",
+                    "$filter": f"{account_logical}id eq {account_id}",
                     "$select": "name",
                     "$top": "1",
                 },
