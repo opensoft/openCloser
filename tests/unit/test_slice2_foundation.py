@@ -148,7 +148,7 @@ def test_raise_for_dataverse_response_transient_with_retry_after() -> None:
     response = httpx.Response(429, headers={"Retry-After": "7"}, request=request)
     with pytest.raises(errors.TransientDataverseError) as exc_info:
         errors.raise_for_dataverse_response(response)
-    assert exc_info.value.retry_after == 7.0
+    assert exc_info.value.retry_after == pytest.approx(7.0)
 
 
 def test_raise_for_dataverse_response_permanent() -> None:
@@ -193,7 +193,7 @@ def test_load_slice2_config_applies_env_var_overrides(monkeypatch: pytest.Monkey
     cfg = config.load_slice2_config(_REPO_ROOT / "config/slice2.toml")
     assert cfg.dataverse.callable_status == "in_progress"
     assert cfg.retry.max_retries == 7
-    assert cfg.retry.retry_after_cap_seconds == 12.5
+    assert cfg.retry.retry_after_cap_seconds == pytest.approx(12.5)
     assert cfg.redaction.retention == "summary-only"
 
 

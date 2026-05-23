@@ -31,7 +31,7 @@ _PICKLIST_RE = re.compile(
     r"/Attributes\(LogicalName='([^']+)'\)"
     r"/Microsoft\.Dynamics\.CRM\.PicklistAttributeMetadata$"
 )
-_RECORD_RE = re.compile(r"^([A-Za-z0-9_]+)\(([^)]+)\)$")
+_RECORD_RE = re.compile(r"^(\w+)\(([^)]+)\)$")
 
 
 class _StubToken:
@@ -202,12 +202,18 @@ class DataverseFake:
 
 def _matches_filter(row: dict[str, Any], flt: str) -> bool:
     """Support the minimal OData `$filter` Slice 2 uses: `field eq value` (string,
-    int, or guid), optionally joined by ` and `."""
-    for clause in flt.split(" and "):
-        match = re.match(r"\s*([A-Za-z0-9_]+)\s+eq\s+(.+?)\s*$", clause)
-        if match is None:
+    int, or guid), optionally joined by ` and `.
+
+    Implemented with plain string splitting (no regex) — Sonar flagged a previous
+    regex variant for polynomial-backtracking ReDoS risk (rule python:S5852).
+    """
+    for raw_clause in flt.split(" and "):
+        clause = raw_clause.strip()
+        if " eq " not in clause:
             return False
-        field, raw = match.group(1), match.group(2).strip()
+        field, raw = (part.strip() for part in clause.split(" eq ", 1))
+        if not field or not field.replace("_", "").isalnum():
+            return False
         if raw.startswith("'") and raw.endswith("'"):
             expected: Any = raw[1:-1]
         elif raw.lower() in ("true", "false"):
