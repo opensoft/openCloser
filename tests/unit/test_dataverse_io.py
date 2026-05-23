@@ -122,6 +122,43 @@ def test_token_response_non_json_raises_permanent() -> None:
         provider.token(now=0.0)
 
 
+def test_token_response_empty_access_token_raises_permanent() -> None:
+    """An `access_token` key whose value is null/empty/non-string must be rejected
+    — the cached token would otherwise be unusable (Codex PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": ""}, request=request)
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="empty or non-string"):
+        provider.token(now=0.0)
+
+
+def test_token_response_null_access_token_raises_permanent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"access_token": None, "expires_in": 3600}, request=request
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="empty or non-string"):
+        provider.token(now=0.0)
+
+
+def test_token_response_non_numeric_expires_in_raises_permanent() -> None:
+    """A malformed `expires_in` must surface as a typed PermanentDataverseError so
+    callers don't see a raw ValueError/TypeError escape the auth layer (Codex PR #3 review)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "tok-X", "expires_in": "not a number"},
+            request=request,
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="expires_in"):
+        provider.token(now=0.0)
+
+
 # ---------------------------------------------------------------------------
 # T011 — Web API client with bounded transient retry
 # ---------------------------------------------------------------------------
@@ -309,6 +346,17 @@ def test_load_mapping_invalid_json(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{not valid json", encoding="utf-8")
     with pytest.raises(MappingError, match="not valid JSON"):
+        load_mapping(bad)
+
+
+def test_load_mapping_schema_invalid_wraps_validation_error(tmp_path: Path) -> None:
+    """JSON-valid but schema-invalid input must surface as MappingError, not a raw
+    Pydantic ValidationError, so callers can rely on the documented error contract
+    (Codex review on PR #3)."""
+    bad = tmp_path / "wrong_schema.json"
+    # Valid JSON but missing the required `_meta` block — Pydantic would raise here.
+    bad.write_text('{"entities": {}}', encoding="utf-8")
+    with pytest.raises(MappingError, match="schema validation"):
         load_mapping(bad)
 
 

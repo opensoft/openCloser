@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from opencloser.models import DataverseEntityRef, DataverseFieldRef, DataverseMapping
 
 
@@ -19,7 +21,12 @@ class MappingError(RuntimeError):
 
 
 def load_mapping(path: str | Path) -> DataverseMapping:
-    """Load and validate the Dataverse mapping artifact (FR-004)."""
+    """Load and validate the Dataverse mapping artifact (FR-004).
+
+    Raises `MappingError` for every load-time failure — file missing, JSON malformed,
+    or schema invalid — so callers can rely on a single documented exception type
+    (Codex review on PR #3).
+    """
     artifact = Path(path)
     if not artifact.exists():
         raise MappingError(f"mapping artifact not found: {artifact}")
@@ -27,7 +34,12 @@ def load_mapping(path: str | Path) -> DataverseMapping:
         raw = json.loads(artifact.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise MappingError(f"mapping artifact is not valid JSON: {exc}") from exc
-    return DataverseMapping.model_validate(raw)
+    try:
+        return DataverseMapping.model_validate(raw)
+    except ValidationError as exc:
+        raise MappingError(
+            f"mapping artifact failed schema validation: {exc}"
+        ) from exc
 
 
 class MappingTranslator:

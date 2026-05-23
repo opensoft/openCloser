@@ -168,6 +168,29 @@ def test_wrap_transport_error_classifies_timeout_as_transient() -> None:
     assert isinstance(wrapped, errors.TransientDataverseError)
 
 
+def test_wrap_transport_error_classifies_network_error_as_transient() -> None:
+    wrapped = errors.wrap_transport_error(httpx.ConnectError("refused"))
+    assert isinstance(wrapped, errors.TransientDataverseError)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.UnsupportedProtocol("bad scheme"),
+        httpx.LocalProtocolError("bad request line"),
+        httpx.ProxyError("proxy misconfig"),
+    ],
+)
+def test_wrap_transport_error_classifies_misconfiguration_as_permanent(
+    exc: httpx.HTTPError,
+) -> None:
+    """Misconfiguration-class transport errors cannot succeed on retry — classifying
+    them as transient would burn the FR-023 retry budget on impossible requests
+    (Codex review on PR #3)."""
+    wrapped = errors.wrap_transport_error(exc)
+    assert isinstance(wrapped, errors.PermanentDataverseError)
+
+
 # ---------------------------------------------------------------------------
 # T009 — Slice 2 configuration + secrets
 # ---------------------------------------------------------------------------

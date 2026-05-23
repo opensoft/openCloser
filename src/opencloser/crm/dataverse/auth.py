@@ -75,8 +75,25 @@ class DataverseTokenProvider:
                 f"Entra ID token endpoint returned a 2xx response without a usable "
                 f"`access_token` field ({type(exc).__name__})"
             ) from exc
+        # Reject null / empty / non-string access_token — otherwise the cached value
+        # is unusable and downstream Authorization headers will fail in confusing ways
+        # (Codex review on PR #3).
+        if not isinstance(access_token, str) or not access_token:
+            raise PermanentDataverseError(
+                "Entra ID token endpoint returned an empty or non-string "
+                "`access_token` field"
+            )
+        # `expires_in` may be missing, null, non-numeric, or otherwise unparseable —
+        # treat any parse failure as a permanent auth-payload error rather than letting
+        # a raw ValueError/TypeError escape (Codex review on PR #3).
+        raw_expires = body.get("expires_in", _DEFAULT_EXPIRES_IN)
+        try:
+            lifetime = float(raw_expires)
+        except (TypeError, ValueError) as exc:
+            raise PermanentDataverseError(
+                "Entra ID token endpoint returned a non-numeric `expires_in` value"
+            ) from exc
         self._token = access_token
-        lifetime = float(body.get("expires_in", _DEFAULT_EXPIRES_IN))
         self._expires_at = clock + lifetime - _EXPIRY_SKEW_SECONDS
 
     def close(self) -> None:

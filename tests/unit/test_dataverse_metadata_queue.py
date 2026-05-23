@@ -30,11 +30,22 @@ _ACCOUNT = {"accountid": _ACCOUNT_GUID, "name": "Sunage ALF of Davis"}
 
 
 def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
-    """Build a complete fake entity/attribute map from a mapping artifact."""
+    """Build a complete fake entity/attribute map from a mapping artifact.
+
+    For Dataverse lookup columns, both the navigation property (the bare logical
+    name) AND the `_<logical>_value` computed property are real attributes in a
+    live environment — the loader reads/filters via the latter, so the fake's
+    attribute set must include it (Codex review on PR #3).
+    """
     entities: dict[str, set[str]] = {}
     for ekey, eref in mapping.entities.items():
         attrs = {eref.primary_id} if eref.primary_id else set()
-        attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
+        for f in mapping.fields.values():
+            if f.entity != ekey:
+                continue
+            attrs.add(f.logical_name)
+            if f.type == "lookup":
+                attrs.add(f"_{f.logical_name}_value")
         entities[eref.logical_name] = attrs
     # Ensure the account table is present even if a test deletes its mapping.
     entities.setdefault("account", set()).update({"accountid", "name"})
@@ -74,9 +85,12 @@ def _queue_record(
     campaign: str = "alf-q2-davis",
     created: str = "2026-05-22T00:00:00.000Z",
 ) -> dict:
+    # Lookup column GUIDs live in the `_<logical>_value` computed property in real
+    # Dataverse payloads (Codex review on PR #3); mirror that here so tests exercise
+    # the live shape rather than a fake-only convenience naming.
     return {
         "medx_callqueueitemid": qid,
-        "medx_accountid": _ACCOUNT_GUID,
+        "_medx_accountid_value": _ACCOUNT_GUID,
         "medx_phonenumber": "+15305551234",
         "medx_timezone": "America/Los_Angeles",
         "medx_attemptcount": attempt,
@@ -84,7 +98,7 @@ def _queue_record(
         "medx_donotcall": False,
         "medx_callstatus": status,
         "medx_nextattemptat": next_at,
-        "medx_campaignid": campaign,
+        "_medx_campaignid_value": campaign,
         "createdon": created,
     }
 
@@ -328,6 +342,23 @@ def test_load_next_ready_rejects_unsafe_campaign_token() -> None:
     )
     with pytest.raises(QueueLoadError, match="unsafe OData"):
         loader.load(NextReady("bad') or (1 eq 1"))
+
+
+def test_load_next_ready_uses_lookup_value_property_for_campaign_filter() -> None:
+    """Dataverse one-to-many filtering goes through the lookup's `_<logical>_value`
+    computed property, not the bare logical name; otherwise live runs miss every
+    record (Codex review on PR #3). Verify by seeding a row whose campaign GUID
+    appears under the lookup-value property (as real Dataverse does)."""
+    loader = _loader(
+        {
+            "medx_callqueueitem": [
+                _queue_record(qid="q-x", next_at="2026-05-22T16:00:00.000Z")
+            ],
+            "account": [_ACCOUNT],
+        }
+    )
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None and item.queue_item_id == "q-x"
 
 
 def test_load_missing_facility_mapping_returns_empty() -> None:

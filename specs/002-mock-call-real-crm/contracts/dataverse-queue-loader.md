@@ -48,6 +48,15 @@ data-quality warning is raised downstream (FR-034).
 
 ---
 
+## Lookup-column reads and filters
+
+For `type: "lookup"` mapped fields (e.g. `queue.facility_account`, `queue.campaign`),
+Dataverse exposes the related-record GUID in a *computed property* named
+`_<logical>_value` — not under the bare logical name. The same name is what
+`$filter` predicates must reference. The loader uses `_<logical>_value` for both
+reads and filters on lookup-typed fields; scalar (non-lookup) fields keep using
+the bare logical name.
+
 ## Dataverse Web API addressing
 
 Dataverse exposes a table under two different names that the loader MUST keep

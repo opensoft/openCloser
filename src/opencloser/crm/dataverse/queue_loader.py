@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
-from opencloser.models import CallableStatus, QueueItem
+from opencloser.models import CallableStatus, DataverseFieldRef, QueueItem
 
 # The Dataverse system-field name that every table carries — used as the
 # next-ready tie-breaker between two rows with the same next_attempt_at
@@ -23,6 +23,17 @@ _DATAVERSE_CREATED_AT_FIELD = "createdon"
 # Conceptual mapping keys this module references repeatedly — extracted so a typo
 # fails once and the key is a single source of truth.
 _QUEUE_STATUS_FIELD = "queue.status"
+
+
+def _lookup_value_name(field_ref: DataverseFieldRef) -> str:
+    """Dataverse exposes lookup column GUIDs in a *computed* property named
+    `_<logical>_value` (with a leading underscore), not in the navigation property
+    itself; the same name is also what `$filter` predicates must reference. For
+    non-lookup fields the logical name IS the scalar property. (Codex review on PR #3.)
+    """
+    if field_ref.type == "lookup":
+        return f"_{field_ref.logical_name}_value"
+    return field_ref.logical_name
 
 # Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we accept any
 # value matching this safe alphanumeric+dash+underscore pattern (which covers real
@@ -112,11 +123,15 @@ class DataverseQueueLoader:
             filter_clauses = [f"{status_field} eq {callable_value}"]
             # FR-009 single-campaign scoping: filter on the mapped campaign field when
             # the deployment maps one. A mapping without `queue.campaign` is treated as
-            # a single-campaign queue table where this filter is unnecessary.
-            campaign_field = self._optional_logical_name("queue.campaign")
-            if campaign_field and selector.campaign:
+            # a single-campaign queue table where this filter is unnecessary. When the
+            # mapped campaign field is a Dataverse lookup, the filter LHS MUST be the
+            # `_<logical>_value` computed property — the bare logical name doesn't filter
+            # against lookups in real Dataverse (Codex review on PR #3).
+            campaign_field_ref = self._optional_field("queue.campaign")
+            if campaign_field_ref and selector.campaign:
+                filter_lhs = _lookup_value_name(campaign_field_ref)
                 filter_clauses.append(
-                    f"{campaign_field} eq {_odata_token(selector.campaign)}"
+                    f"{filter_lhs} eq {_odata_token(selector.campaign)}"
                 )
             rows = self._query(
                 entity_set,
@@ -139,6 +154,15 @@ class DataverseQueueLoader:
         does not include it (callers fall back to default behavior)."""
         try:
             return self._t.logical_name(conceptual)
+        except MappingError:
+            return None
+
+    def _optional_field(self, conceptual: str) -> DataverseFieldRef | None:
+        """The full field-ref for a conceptual field, or None when the mapping omits
+        it. Callers that need the field's `type` (e.g. for lookup-property handling)
+        use this rather than `_optional_logical_name`."""
+        try:
+            return self._t.field(conceptual)
         except MappingError:
             return None
 
@@ -187,7 +211,9 @@ class DataverseQueueLoader:
             # A deployment without an Account lookup mapping is accepted — the
             # facility_name simply defaults to empty rather than raising.
             return ""
-        account_id = row.get(account_field.logical_name)
+        # Lookup column GUIDs come back in the `_<logical>_value` computed property
+        # in real Dataverse, not under the bare logical name (Codex review on PR #3).
+        account_id = row.get(_lookup_value_name(account_field))
         if not account_id:
             return ""
         # `lookup_target` is the conceptual entity key. Prefer the mapped entity's

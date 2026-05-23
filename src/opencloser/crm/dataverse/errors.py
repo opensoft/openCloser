@@ -92,9 +92,13 @@ def raise_for_dataverse_response(response: httpx.Response) -> None:
 def wrap_transport_error(exc: httpx.HTTPError) -> DataverseError:
     """Map an httpx transport-level exception to the typed Dataverse error.
 
-    Timeouts and connection/network/transport errors are transient (httpx models
-    `TimeoutException` as a subclass of `TransportError`); anything else is permanent.
+    Only network-recoverable exceptions are transient — timeouts and connection /
+    read / write / close errors. Misconfiguration-class transport errors —
+    `UnsupportedProtocol`, `ProtocolError`, `ProxyError`, and anything outside
+    `TransportError` — are permanent: retrying them would burn the FR-023 retry
+    budget on a request that cannot succeed (Codex review on PR #3, rule python:S5773
+    in spirit).
     """
-    if isinstance(exc, httpx.TransportError):
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
         return TransientDataverseError(f"Dataverse transport failure: {exc!r}")
     return PermanentDataverseError(f"Dataverse error: {exc!r}")
