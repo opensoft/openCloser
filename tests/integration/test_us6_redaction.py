@@ -300,3 +300,11 @@ def test_us6_orchestrator_summary_only_retention_omits_transcript(
     assert not (report.artifact_dir / "transcript.txt").exists()
     sr = json.loads((report.artifact_dir / "session-result.json").read_text(encoding="utf-8"))
     assert sr["transcript_pointer"] is None
+
+    # DB consistency: the persisted normalized_result row must also have null
+    # transcript_pointer so the DB does not advertise a file the writer skipped.
+    row = tmp_state_db.execute(
+        "SELECT transcript_pointer FROM normalized_results WHERE session_id = ?;",
+        (report.session_id,),
+    ).fetchone()
+    assert row is not None and row["transcript_pointer"] is None

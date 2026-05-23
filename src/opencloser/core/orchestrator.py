@@ -513,6 +513,20 @@ def _finalize_session(
         ended_at=ended_at,
     )
 
+    # Apply the redaction layer's retention decision to ``normalized.transcript_pointer``
+    # BEFORE persisting to the DB. The artifact writer makes the same decision when it
+    # serializes session-result.json; doing it here too keeps the DB ``normalized_results``
+    # row consistent with what is actually written to disk (no DB pointer to a file the
+    # writer is about to skip under summary-only retention or no-transcript-text paths).
+    no_transcript = transcript_text is None
+    summary_only = (
+        not no_transcript
+        and redaction_layer is not None
+        and redaction_layer.retention_mode() == "summary-only"
+    )
+    if (no_transcript or summary_only) and normalized.transcript_pointer is not None:
+        normalized = normalized.model_copy(update={"transcript_pointer": None})
+
     # Persist the disposition, normalized result, and queue-item lifecycle update.
     # The session's `state` is intentionally NOT flipped to FINALIZED here — that
     # flip is the LAST commit, after write-backs and artifacts succeed (N3), so a
