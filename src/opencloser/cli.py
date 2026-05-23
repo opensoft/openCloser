@@ -281,8 +281,11 @@ def run_crm(
     write: Annotated[
         bool,
         typer.Option(
-            "--write/--dry-run",
-            help="Enable CRM writes (FR-031). Defaults to false — dry-run not yet wired (US2).",
+            "--write",
+            help=(
+                "Enable Dataverse write-back (FR-031). Required in this slice — the "
+                "default dry-run path is wired in US2 (T024-T026)."
+            ),
         ),
     ] = False,
     queue_item_id: Annotated[
@@ -318,14 +321,15 @@ def run_crm(
 ) -> None:
     """Process exactly one Dataverse queue item (FR-032).
 
-    Requires `--write` for write-enabled processing. Dry-run is the documented
-    default per FR-031 but is wired up in a later slice (US2 / T024-T026); calling
-    `run-crm` without `--write` exits 2 with an explanatory message.
+    Requires `--write` in this slice. The contract's dry-run default (FR-031) is
+    intentionally not yet wired — that work lives in US2 (T024-T026) where the
+    runner gains a dry-run capture adapter and the planned-write-back artifact
+    path. Until that lands, `run-crm` without `--write` exits 2 with a pointer.
     """
     if not write:
         typer.echo(
-            "error:       dry-run mode is not yet implemented (US2). Pass --write to run "
-            "the write-enabled path.",
+            "error:       dry-run is not yet implemented (US2 / T024-T026). Pass --write "
+            "to run the write-enabled path.",
             err=True,
         )
         raise typer.Exit(code=2)

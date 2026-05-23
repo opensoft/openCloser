@@ -162,9 +162,18 @@ class DataverseWriteBackAdapter:
 
         # Resolve ownership BEFORE constructing the payload so the resolved owner is
         # stamped on TaskPayload.assigned_to too (Slice 1 left it null; data-model §5
-        # makes it the Slice 2 wiring point).
-        owner_id = self._resolve_task_owner(payload)
-        body = self._task_body(payload, idempotency_field=idempotency_field, owner_id=owner_id)
+        # makes it the Slice 2 wiring point). FR-025: an unverifiable default blocks
+        # the Task emission rather than writing an unverified owner id.
+        resolved = self._resolve_task_owner(payload)
+        if resolved is None:
+            return
+        owner_id, owner_entity_set = resolved
+        body = self._task_body(
+            payload,
+            idempotency_field=idempotency_field,
+            owner_id=owner_id,
+            owner_entity_set=owner_entity_set,
+        )
 
         record_id = self._idempotent_create(
             entity=entity,
@@ -279,13 +288,14 @@ class DataverseWriteBackAdapter:
         *,
         idempotency_field: str,
         owner_id: str,
+        owner_entity_set: str,
     ) -> dict[str, object]:
         subject = payload.subject[:200] if payload.subject else "Follow-up"
         body: dict[str, object] = {
             "subject": subject,
             "description": _task_description(payload),
             idempotency_field: payload.session_id,
-            "ownerid@odata.bind": _owner_bind(owner_id),
+            "ownerid@odata.bind": _owner_bind(owner_id, owner_entity_set),
         }
         if payload.preferred_callback_window:
             body["scheduledend"] = payload.preferred_callback_window
@@ -342,17 +352,22 @@ class DataverseWriteBackAdapter:
 
     # ----- ownership resolution (FR-025) -----------------------------------
 
-    def _resolve_task_owner(self, payload: TaskPayload) -> str:
-        """Spec §Definitions §Approved owner override — return a verified owner id.
+    def _resolve_task_owner(self, payload: TaskPayload) -> tuple[str, str] | None:
+        """Spec §Definitions §Approved owner override — return `(owner_id, entity_set)`
+        where `entity_set` is `"systemusers"` or `"teams"` so the @odata.bind targets
+        the right entity set. Returns `None` when neither the override nor the default
+        can be verified as an active enabled Dataverse user/team (FR-025 — never write
+        an unverified owner id).
 
         Resolution order:
-        1. An override id carried on the queue row's mapped override field, if and
-           only if the referenced systemuser/team is reachable in Dataverse and
-           appropriate for the Task kind.
-        2. The configured default owner for the Task kind.
+        1. The override id carried on the queue row's mapped override field, if and
+           only if it resolves to an **active enabled** systemuser/team.
+        2. The configured default owner for the Task kind, again only when it
+           resolves to an active enabled systemuser/team.
 
-        An override that fails verification produces an operator-visible warning
-        and falls back to the default — never writing an unverified id.
+        An override that fails verification produces an operator-visible warning and
+        falls back to the default; a default that also fails verification produces a
+        second warning and the Task emission is skipped by the caller.
         """
         default = (
             self._task_owners.callback
@@ -360,21 +375,38 @@ class DataverseWriteBackAdapter:
             else self._task_owners.review
         )
         override = self._lookup_owner_override(payload.queue_item_id)
-        if override is None:
-            return default
-        if self._owner_is_verifiable(override):
-            return override
+        if override is not None:
+            entity_set = self._owner_entity_set(override)
+            if entity_set is not None:
+                return override, entity_set
+            self._warnings.append(
+                DataQualityWarning(
+                    code="task_owner_override_unverifiable",
+                    field="task_owner_override",
+                    message=(
+                        f"override owner {override!r} for queue item "
+                        f"{payload.queue_item_id!r} is not an active Dataverse user or "
+                        f"team — falling back to default"
+                    ),
+                )
+            )
+        default_entity_set = self._owner_entity_set(default)
+        if default_entity_set is not None:
+            return default, default_entity_set
+        # FR-025 — the configured default itself is unverifiable. Task write-back is
+        # blocked rather than writing an unverified id.
         self._warnings.append(
             DataQualityWarning(
-                code="task_owner_override_unverifiable",
-                field="task_owner_override",
+                code="task_owner_default_unverifiable",
+                field="task_owner_default",
                 message=(
-                    f"override owner {override!r} for queue item {payload.queue_item_id!r} "
-                    f"is not an active Dataverse user or team — falling back to default"
+                    f"configured default task owner {default!r} for task_kind="
+                    f"{payload.task_kind!r} is not an active Dataverse user or team "
+                    f"— task emission blocked"
                 ),
             )
         )
-        return default
+        return None
 
     def _lookup_owner_override(self, queue_item_id: str) -> str | None:
         override_field = self._t.mapping.task_owner_override_field
@@ -401,14 +433,24 @@ class DataverseWriteBackAdapter:
             return None
         return str(value)
 
-    def _owner_is_verifiable(self, owner_id: str) -> bool:
-        for entity in ("systemuser", "team"):
+    def _owner_entity_set(self, owner_id: str) -> str | None:
+        """Return the Dataverse entity-set name (`"systemusers"` or `"teams"`) for an
+        active enabled owner id, or `None` when no active enabled record matches.
+
+        Active-enabled gate per spec §Definitions §Approved owner override:
+        - `systemuser`: row must exist AND `isdisabled == false`.
+        - `team`: row must exist (teams have no `isdisabled` column).
+        """
+        for entity, entity_set, extra_filter in (
+            ("systemuser", "systemusers", " and isdisabled eq false"),
+            ("team", "teams", ""),
+        ):
             try:
                 rows = (
                     self._client.get(
                         entity,
                         params={
-                            "$filter": f"{entity}id eq {owner_id}",
+                            "$filter": f"{entity}id eq {owner_id}{extra_filter}",
                             "$select": f"{entity}id",
                             "$top": "1",
                         },
@@ -419,8 +461,8 @@ class DataverseWriteBackAdapter:
             except PermanentDataverseError:
                 continue
             if rows:
-                return True
-        return False
+                return entity_set
+        return None
 
     # ----- correlation + progress ledger -----------------------------------
 
@@ -518,11 +560,14 @@ def _parse_record_id_from_uri(entity_uri: str) -> str:
     return entity_uri[lparen + 1 : rparen].strip("'")
 
 
-def _owner_bind(owner_id: str) -> str:
-    """OData @odata.bind value for a systemuser/team owner reference."""
-    # We default to systemuser binding; verification at owner-resolution time covers
-    # the team case (a team-only owner is still a valid `ownerid` lookup).
-    return f"/systemusers({owner_id})"
+def _owner_bind(owner_id: str, entity_set: str) -> str:
+    """OData @odata.bind value for an owner reference.
+
+    `entity_set` is `"systemusers"` or `"teams"` — the Dataverse entity-set name
+    matching where the owner was verified. Binding to the wrong set produces an
+    HTTP 400 from real Dataverse (a team id under /systemusers does not resolve).
+    """
+    return f"/{entity_set}({owner_id})"
 
 
 def _task_description(payload: TaskPayload) -> str:

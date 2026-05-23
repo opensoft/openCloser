@@ -86,6 +86,8 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     entities["account"] = {"accountid", "name"}
     entities["systemuser"] = {"systemuserid", "isdisabled"}
     entities["team"] = {"teamid"}
+    # The adapter filters systemuser by `isdisabled eq false`; the fake needs that
+    # attribute in its known set so $filter doesn't 400.
     return entities
 
 
@@ -133,10 +135,22 @@ def _seed_local_state(conn: sqlite3.Connection, disposition: Disposition) -> Non
     )
 
 
+def _seed_default_owners(records: dict[str, list[dict]]) -> None:
+    """Seed the configured default owner ids as active enabled systemusers — the
+    adapter blocks Task emission unless the default verifies (FR-025)."""
+    existing = {row.get("systemuserid") for row in records.get("systemuser", [])}
+    for owner in ("owner-callback-id", "owner-review-id"):
+        if owner not in existing:
+            records.setdefault("systemuser", []).append(
+                {"systemuserid": owner, "isdisabled": False}
+            )
+
+
 def _adapter(
     conn: sqlite3.Connection, records: dict[str, list[dict]]
 ) -> tuple[DataverseWriteBackAdapter, DataverseFake]:
     mapping = load_mapping(_MAPPING_FIXTURE)
+    _seed_default_owners(records)
     fake = DataverseFake(entities=_entities(mapping), records=records)
     adapter = DataverseWriteBackAdapter(
         conn=conn,
@@ -327,11 +341,11 @@ def test_owner_override_falls_back_with_warning_when_unverifiable(
 
 
 def test_owner_override_used_when_verifiable(tmp_state_db: sqlite3.Connection) -> None:
-    """A verified override owner (an active systemuser) is written through."""
+    """A verified override owner (an active enabled systemuser) is written through."""
     _seed_local_state(tmp_state_db, Disposition.INTERESTED_CALLBACK_REQUESTED)
     records: dict[str, list[dict]] = {
         "account": [{"accountid": "a-0001", "name": "ALF"}],
-        "systemuser": [{"systemuserid": "approved-user-id"}],
+        "systemuser": [{"systemuserid": "approved-user-id", "isdisabled": False}],
     }
     _seed_queue_row(records, override_owner="approved-user-id")
     adapter, fake = _adapter(tmp_state_db, records)
@@ -341,6 +355,64 @@ def test_owner_override_used_when_verifiable(tmp_state_db: sqlite3.Connection) -
     task_body = next(b for e, b in fake.created if e == "task")
     assert task_body["ownerid@odata.bind"] == "/systemusers(approved-user-id)"
     assert adapter.warnings() == []
+
+
+def test_owner_override_skips_disabled_systemuser(tmp_state_db: sqlite3.Connection) -> None:
+    """A disabled systemuser MUST NOT be honored as an override — the override is
+    treated as unverifiable and the run falls back to the default (FR-025)."""
+    _seed_local_state(tmp_state_db, Disposition.INTERESTED_CALLBACK_REQUESTED)
+    records: dict[str, list[dict]] = {
+        "account": [{"accountid": "a-0001", "name": "ALF"}],
+        "systemuser": [{"systemuserid": "disabled-user-id", "isdisabled": True}],
+    }
+    _seed_queue_row(records, override_owner="disabled-user-id")
+    adapter, fake = _adapter(tmp_state_db, records)
+
+    adapter.emit_task(_task("callback"))
+
+    task_body = next(b for e, b in fake.created if e == "task")
+    assert task_body["ownerid@odata.bind"] == "/systemusers(owner-callback-id)"
+    assert any(w.code == "task_owner_override_unverifiable" for w in adapter.warnings())
+
+
+def test_owner_override_resolved_team_binds_to_teams(tmp_state_db: sqlite3.Connection) -> None:
+    """An override resolved as a team binds to `/teams(<id>)`, not /systemusers."""
+    _seed_local_state(tmp_state_db, Disposition.INTERESTED_CALLBACK_REQUESTED)
+    records: dict[str, list[dict]] = {
+        "account": [{"accountid": "a-0001", "name": "ALF"}],
+        "team": [{"teamid": "approved-team-id"}],
+    }
+    _seed_queue_row(records, override_owner="approved-team-id")
+    adapter, fake = _adapter(tmp_state_db, records)
+
+    adapter.emit_task(_task("callback"))
+
+    task_body = next(b for e, b in fake.created if e == "task")
+    assert task_body["ownerid@odata.bind"] == "/teams(approved-team-id)"
+    assert adapter.warnings() == []
+
+
+def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Connection) -> None:
+    """If the configured default owner cannot be verified as an active enabled user
+    or team, Task emission is blocked rather than writing an unverified id (FR-025)."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    _seed_local_state(tmp_state_db, Disposition.INTERESTED_CALLBACK_REQUESTED)
+    records: dict[str, list[dict]] = {"account": [{"accountid": "a-0001", "name": "ALF"}]}
+    _seed_queue_row(records)  # no override
+    # Deliberately do NOT seed the default systemuser/team — _seed_default_owners
+    # would add it, so build the fake directly here.
+    fake = DataverseFake(entities=_entities(mapping), records=records)
+    adapter = DataverseWriteBackAdapter(
+        conn=tmp_state_db,
+        client=fake.client(_RETRY),
+        translator=MappingTranslator(mapping),
+        task_owners=TaskOwnersConfig(callback="missing-owner-id", review="missing-review-id"),
+    )
+
+    adapter.emit_task(_task("callback"))
+
+    assert [b for e, b in fake.created if e == "task"] == []
+    assert any(w.code == "task_owner_default_unverifiable" for w in adapter.warnings())
 
 
 def test_build_writeback_assembles_aggregate(tmp_state_db: sqlite3.Connection) -> None:

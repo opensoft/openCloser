@@ -126,7 +126,12 @@ def _seed(
                 "medx_assignedownerid": override_owner,
             }
         ],
-        "systemuser": [],
+        # FR-025 — the adapter blocks Task emission unless the default owner verifies
+        # as an active enabled systemuser/team, so seed both default owners here.
+        "systemuser": [
+            {"systemuserid": _OWNER_CALLBACK, "isdisabled": False},
+            {"systemuserid": _OWNER_REVIEW, "isdisabled": False},
+        ],
     }
 
 
