@@ -23,6 +23,7 @@ from opencloser.models import (
     TaskPayload,
     WriteBack,
 )
+from opencloser.redaction.layer import RedactionLayer
 
 _TRANSCRIPT_FILENAME = "transcript.txt"
 _SESSION_RESULT_FILENAME = "session-result.json"
@@ -30,6 +31,10 @@ _WRITEBACK_FILENAME = "writeback.json"
 _TASK_FILENAME = "task.json"
 _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
+
+# Cached so repeated calls without an explicit layer don't re-compile the built-in
+# redaction patterns on every session write.
+_DEFAULT_REDACTION_LAYER = RedactionLayer.default()
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +60,43 @@ def write_session_artifacts(
     transcript_text: str | None = None,
     conflicting_events: list[ConflictingEventAuditRecord] | None = None,
     task: TaskPayload | None = None,
+    redaction_layer: RedactionLayer | None = None,
 ) -> ArtifactPaths:
-    """Write all per-session artifacts into ``<artifact_root>/<session_id>/`` atomically."""
+    """Write all per-session artifacts into ``<artifact_root>/<session_id>/``.
+
+    Each individual file is written atomically (tempfile + ``os.replace``); the set
+    of artifacts as a whole is not transactional. Atomicity is per-file, which is
+    what duplicate-event redelivery (FR-019) and idempotent re-emission need.
+
+    Transcript text always passes through the configured ``RedactionLayer`` before
+    disk write (FR-028..FR-030). When the layer's retention mode is
+    ``"summary-only"`` — or no transcript text was supplied — no transcript file
+    is written; the exported ``transcript_pointer`` is cleared so the
+    session-result never advertises a file that does not exist. Under
+    ``"summary-only"`` retention, any pre-existing transcript file from an
+    earlier run is removed so idempotent re-emit cannot leave PII on disk.
+    """
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Decide retention BEFORE writing session-result, so the exported pointer never
+    # advertises a transcript file that the writer is about to skip
+    # (contracts/redaction-layer.md §Behavior; FR-030).
+    effective_layer = redaction_layer or _DEFAULT_REDACTION_LAYER
+    summary_only = (
+        transcript_text is not None and effective_layer.retention_mode() == "summary-only"
+    )
+    transcript_will_be_written = transcript_text is not None and not summary_only
+    if not transcript_will_be_written and normalized_result.transcript_pointer is not None:
+        normalized_result = normalized_result.model_copy(update={"transcript_pointer": None})
+
+    # FR-030 + FR-019: when no transcript will be written (summary-only retention OR no
+    # transcript_text supplied), remove any transcript file from an earlier run BEFORE
+    # writing session-result.json. If the unlink fails (locked file / permissions), we
+    # raise here without having advertised a null transcript_pointer that would leave
+    # the on-disk state both privacy-inconsistent and harder to detect.
+    if not transcript_will_be_written:
+        (session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)
 
     session_result_path = session_dir / _SESSION_RESULT_FILENAME
     _write_json_atomic(session_result_path, normalized_result)
@@ -72,9 +110,9 @@ def write_session_artifacts(
         _write_json_atomic(task_path, task)
 
     transcript_path: Path | None = None
-    if transcript_text is not None:
+    if transcript_will_be_written:
         transcript_path = session_dir / _TRANSCRIPT_FILENAME
-        _write_text_atomic(transcript_path, transcript_text)
+        _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
     _write_json_atomic(eligibility_path, eligibility_decision)

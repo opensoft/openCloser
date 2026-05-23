@@ -3,13 +3,18 @@
 Walks the AST of every `src/opencloser/**/*.py` and asserts the FR-033 boundary's
 dependency-allowed rules from `contracts/*.md` hold. Per boundary:
 
-- ``core`` may import any boundary module + state + models + artifacts.
+- ``core`` may import any boundary module + state + models + artifacts +
+  redaction (the orchestrator plumbs a configured ``RedactionLayer`` through
+  to the writer per ``contracts/redaction-layer.md``).
 - ``eligibility`` / ``transport`` / ``persona`` MAY import `models` and shared
   `core` primitives (`ids`, `clock`, `idempotency` per orchestrator contract),
   but MUST NOT import each other.
 - ``crm`` may import `models` and `state` only — `contracts/crm-writeback.md`
   explicitly forbids `core` for the write-back boundary.
-- ``artifacts`` writer may import `models` only.
+- ``artifacts`` writer may import `models` and `redaction` — per
+  `contracts/redaction-layer.md`, the writer calls the redaction layer
+  immediately before any transcript disk write (FR-028..FR-030).
+- ``redaction`` may import `models` only.
 - ``state`` may import `models` only.
 
 Each group may also import its own submodules — intra-boundary imports
@@ -37,6 +42,11 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.transport",
         "opencloser.persona",
         "opencloser.crm",
+        # contracts/redaction-layer.md: the orchestrator accepts a configured
+        # RedactionLayer and plumbs it through to the artifact writer
+        # (FR-028..FR-030). Slice 1 callers omit it and get the writer's
+        # cached default-on layer.
+        "opencloser.redaction",
         "opencloser.core",
     },
     "eligibility": {
@@ -65,6 +75,9 @@ _ALLOWED: dict[str, set[str]] = {
     },
     "artifacts": {
         "opencloser.models",
+        # contracts/redaction-layer.md §Behavior: the writer calls the RedactionLayer
+        # immediately before any transcript disk write (FR-028..FR-030).
+        "opencloser.redaction",
         "opencloser.artifacts",  # intra-boundary submodules
     },
     # ---- Slice 2 boundaries (contracts/redaction-layer.md, contracts/cli-slice2.md) ----

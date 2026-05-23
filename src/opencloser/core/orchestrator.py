@@ -43,6 +43,7 @@ from opencloser.persona.base import (
     PersonaOutput,
     SessionContext,
 )
+from opencloser.redaction.layer import RedactionLayer
 from opencloser.state import store
 
 if TYPE_CHECKING:
@@ -114,6 +115,7 @@ def process_one_queue_item(
     conversation_fixture: ConversationFixture | None,
     transport_fixture_id: str | None,
     clock: Clock | None = None,
+    redaction_layer: RedactionLayer | None = None,
 ) -> RunReport:
     """End-to-end Slice 1 orchestration for a single queue record.
 
@@ -123,6 +125,13 @@ def process_one_queue_item(
 
     `conversation_fixture` is required when a call is expected to reach `connected`.
     `transport_fixture_id` is the name of the fixture under the transport's fixtures dir.
+
+    `redaction_layer` is the configured transcript redaction layer
+    (``contracts/redaction-layer.md``; FR-028..FR-030). Slice 2 callers should
+    build one from ``Slice2Config.redaction`` via ``RedactionLayer.from_config``
+    so operator-configured patterns / policy / retention take effect. Slice 1
+    callers may omit it; the artifact writer falls back to a default-on layer
+    so PII never lands on disk unredacted by accident.
     """
     clock = clock or SystemClock()
     start_ts_monotonic = time.monotonic()
@@ -188,6 +197,7 @@ def process_one_queue_item(
             clock=clock,
             crm=crm,
             start_ts_monotonic=start_ts_monotonic,
+            redaction_layer=redaction_layer,
         )
         return report
 
@@ -206,6 +216,7 @@ def process_one_queue_item(
         conversation_fixture=conversation_fixture,
         transport_fixture_id=transport_fixture_id,
         start_ts_monotonic=start_ts_monotonic,
+        redaction_layer=redaction_layer,
     )
 
 
@@ -224,6 +235,7 @@ def _finalize_blocked(
     clock: Clock,
     crm: WriteBackAdapter,
     start_ts_monotonic: float,
+    redaction_layer: RedactionLayer | None = None,
 ) -> RunReport:
     """FR-005 block path: queue-status update only, no Phone Call activity, no task."""
     new_status = queue_item.callable_status  # FR-032: blocked → unchanged
@@ -273,6 +285,7 @@ def _finalize_blocked(
         task=None,
         transcript_text=None,
         conflicting_events=None,
+        redaction_layer=redaction_layer,
     )
 
     return RunReport(
@@ -305,6 +318,7 @@ def _run_allowed_session(
     conversation_fixture: ConversationFixture | None,
     transport_fixture_id: str | None,
     start_ts_monotonic: float,
+    redaction_layer: RedactionLayer | None = None,
 ) -> RunReport:
     del eligibility  # already used; kept for signature symmetry
 
@@ -452,6 +466,7 @@ def _run_allowed_session(
         persona_output=persona_output,
         transcript_text=transcript_text,
         conflicting_events=conflicting_events,
+        redaction_layer=redaction_layer,
     )
     return RunReport(
         session_id=session.session_id,
@@ -497,6 +512,7 @@ def _finalize_session(
     persona_output: PersonaOutput | None,
     transcript_text: str | None,
     conflicting_events: list[ConflictingEventAuditRecord],
+    redaction_layer: RedactionLayer | None = None,
 ) -> tuple[NormalizedResult, ArtifactPaths]:
     """Finalize the session, emit write-backs per FR-031, write artifacts."""
     ended_at = clock.now_utc_ms()
@@ -510,6 +526,20 @@ def _finalize_session(
         persona_output=persona_output,
         ended_at=ended_at,
     )
+
+    # Apply the redaction layer's retention decision to ``normalized.transcript_pointer``
+    # BEFORE persisting to the DB. The artifact writer makes the same decision when it
+    # serializes session-result.json; doing it here too keeps the DB ``normalized_results``
+    # row consistent with what is actually written to disk (no DB pointer to a file the
+    # writer is about to skip under summary-only retention or no-transcript-text paths).
+    no_transcript = transcript_text is None
+    summary_only = (
+        not no_transcript
+        and redaction_layer is not None
+        and redaction_layer.retention_mode() == "summary-only"
+    )
+    if (no_transcript or summary_only) and normalized.transcript_pointer is not None:
+        normalized = normalized.model_copy(update={"transcript_pointer": None})
 
     # Persist the disposition, normalized result, and queue-item lifecycle update.
     # The session's `state` is intentionally NOT flipped to FINALIZED here — that
@@ -621,6 +651,7 @@ def _finalize_session(
         task=task,
         transcript_text=transcript_text,
         conflicting_events=conflicting_events or None,
+        redaction_layer=redaction_layer,
     )
 
     # FINAL commit: flip the session to FINALIZED only now that every write-back row
