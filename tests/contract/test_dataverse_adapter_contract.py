@@ -69,15 +69,16 @@ assert set(_EMISSION_MAP) == set(Disposition.__members__.values()), (
 def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     entities: dict[str, set[str]] = {}
     for ekey, eref in mapping.entities.items():
-        attrs = {eref.primary_id} if eref.primary_id else set()
+        primary_id = eref.primary_id or f"{eref.logical_name}id"
+        attrs = {primary_id}
         attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
-        # Phone Call activity attributes our adapter writes (FR-003 non-approved
-        # base fields are not gated by `approved_update_field`; they are part of the
-        # entity schema we POST against).
+        # Phone Call activity / Task base fields the adapter writes (FR-003
+        # non-approved base fields are part of the entity schema we POST against,
+        # not gated by `approved_update_field`).
         if ekey == "phone_call_activity":
             attrs |= {"subject", "description", "actualstart", "actualend"}
         if ekey == "task":
-            attrs |= {"subject", "description", "scheduledend", "ownerid"}
+            attrs |= {"subject", "description", "ownerid"}
         entities[eref.logical_name] = attrs
     # Owner-override column on the queue row (out-of-mapping `fields` because it is
     # the source field for `task_owner_override_field`, not a write target).
@@ -86,8 +87,6 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     entities["account"] = {"accountid", "name"}
     entities["systemuser"] = {"systemuserid", "isdisabled"}
     entities["team"] = {"teamid"}
-    # The adapter filters systemuser by `isdisabled eq false`; the fake needs that
-    # attribute in its known set so $filter doesn't 400.
     return entities
 
 
@@ -251,7 +250,7 @@ def test_per_disposition_emission_matches_contract(
         adapter.emit_task(_task(task_kind))
 
     # Phone Call activity: created iff the map says so.
-    phonecall_creates = [body for entity, body in fake.created if entity == "phonecall"]
+    phonecall_creates = [body for entity, body in fake.created if entity == "phonecalls"]
     assert (len(phonecall_creates) == 1) is emits_pca, (
         f"phone_call_activity emission mismatch for {disposition.value}"
     )
@@ -260,7 +259,7 @@ def test_per_disposition_emission_matches_contract(
 
     # Queue PATCH always happens (FR-029 — exactly one queue_status_update per session).
     queue_patches = [
-        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
+        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitems"
     ]
     assert len(queue_patches) == 1, f"expected exactly one queue PATCH for {disposition.value}"
     patch = queue_patches[0]
@@ -279,7 +278,7 @@ def test_per_disposition_emission_matches_contract(
     assert set(patch.keys()) <= approved
 
     # Task: created iff the map says so.
-    task_creates = [body for entity, body in fake.created if entity == "task"]
+    task_creates = [body for entity, body in fake.created if entity == "tasks"]
     assert (len(task_creates) == 1) is emits_task, f"task emission mismatch for {disposition.value}"
     if emits_task:
         body = task_creates[0]
@@ -306,7 +305,7 @@ def test_emit_phone_call_activity_is_idempotent(tmp_state_db: sqlite3.Connection
     adapter.emit_phone_call_activity(payload)
     adapter.emit_phone_call_activity(payload)
 
-    assert sum(1 for e, _ in fake.created if e == "phonecall") == 1
+    assert sum(1 for e, _ in fake.created if e == "phonecalls") == 1
 
 
 def test_emit_task_belt_and_suspenders_blocks_excluded_dispositions(
@@ -319,7 +318,7 @@ def test_emit_task_belt_and_suspenders_blocks_excluded_dispositions(
     _seed_queue_row(records)
     adapter, fake = _adapter(tmp_state_db, records)
     adapter.emit_task(_task("callback"))
-    assert not [b for e, b in fake.created if e == "task"]
+    assert not [b for e, b in fake.created if e == "tasks"]
 
 
 def test_owner_override_falls_back_with_warning_when_unverifiable(
@@ -334,7 +333,7 @@ def test_owner_override_falls_back_with_warning_when_unverifiable(
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "task")
+    task_body = next(b for e, b in fake.created if e == "tasks")
     assert task_body["ownerid@odata.bind"] == "/systemusers(owner-callback-id)"
     warnings = adapter.warnings()
     assert any(w.code == "task_owner_override_unverifiable" for w in warnings)
@@ -352,7 +351,7 @@ def test_owner_override_used_when_verifiable(tmp_state_db: sqlite3.Connection) -
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "task")
+    task_body = next(b for e, b in fake.created if e == "tasks")
     assert task_body["ownerid@odata.bind"] == "/systemusers(approved-user-id)"
     assert adapter.warnings() == []
 
@@ -370,7 +369,7 @@ def test_owner_override_skips_disabled_systemuser(tmp_state_db: sqlite3.Connecti
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "task")
+    task_body = next(b for e, b in fake.created if e == "tasks")
     assert task_body["ownerid@odata.bind"] == "/systemusers(owner-callback-id)"
     assert any(w.code == "task_owner_override_unverifiable" for w in adapter.warnings())
 
@@ -387,7 +386,7 @@ def test_owner_override_resolved_team_binds_to_teams(tmp_state_db: sqlite3.Conne
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "task")
+    task_body = next(b for e, b in fake.created if e == "tasks")
     assert task_body["ownerid@odata.bind"] == "/teams(approved-team-id)"
     assert adapter.warnings() == []
 
@@ -411,7 +410,7 @@ def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Conn
 
     adapter.emit_task(_task("callback"))
 
-    assert [b for e, b in fake.created if e == "task"] == []
+    assert [b for e, b in fake.created if e == "tasks"] == []
     assert any(w.code == "task_owner_default_unverifiable" for w in adapter.warnings())
 
 

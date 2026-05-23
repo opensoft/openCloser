@@ -242,9 +242,14 @@ def discover_crm(
         typer.echo(f"error:       {exc}", err=True)
         raise typer.Exit(code=2) from None
 
-    artifact_path = out or Path(slice2_config.dataverse.mapping_artifact)
+    # Discovery reads the configured mapping artifact as its scaffold (the human-
+    # reviewed conceptual-to-logical assignments live there), then writes the
+    # refreshed result. `--out` only overrides the output path — using it as both
+    # input and output would break the first run with a new --out path.
+    scaffold_path = Path(slice2_config.dataverse.mapping_artifact)
+    artifact_path = out or scaffold_path
     try:
-        scaffold = load_mapping(artifact_path)
+        scaffold = load_mapping(scaffold_path)
     except MappingError as exc:
         typer.echo(f"error:       {exc}", err=True)
         raise typer.Exit(code=2) from None
@@ -334,10 +339,19 @@ def run_crm(
         )
         raise typer.Exit(code=2)
 
+    # Load configs before building the selector so `--next-ready` can fall back
+    # to the configured `[run].campaign` when `--campaign` is omitted.
+    try:
+        slice1_config = load_config(config_path)
+        slice2_config = load_slice2_config(slice2_config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(f"error:       config load failed: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
     selector = _build_selector(
         queue_item_id=queue_item_id,
         next_ready=next_ready,
-        campaign=campaign,
+        campaign=campaign or slice2_config.run.campaign,
     )
     if selector is None:
         typer.echo(
@@ -345,13 +359,6 @@ def run_crm(
             err=True,
         )
         raise typer.Exit(code=2)
-
-    try:
-        slice1_config = load_config(config_path)
-        slice2_config = load_slice2_config(slice2_config_path)
-    except (FileNotFoundError, ValueError) as exc:
-        typer.echo(f"error:       config load failed: {exc}", err=True)
-        raise typer.Exit(code=2) from None
 
     try:
         secrets = load_dataverse_secrets()

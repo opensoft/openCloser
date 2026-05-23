@@ -166,6 +166,9 @@ def update_queue_item_status(
     callable_status: CallableStatus | None = None,
     dnc_flag: bool | None = None,
     last_decision_at: str | None = None,
+    phone_number: str | None = None,
+    timezone: str | None = None,
+    attempt_count: int | None = None,
 ) -> None:
     fields: list[str] = []
     values: list[Any] = []
@@ -178,6 +181,15 @@ def update_queue_item_status(
     if last_decision_at is not None:
         fields.append("last_decision_at = ?")
         values.append(last_decision_at)
+    if phone_number is not None:
+        fields.append("phone_number = ?")
+        values.append(phone_number)
+    if timezone is not None:
+        fields.append("timezone = ?")
+        values.append(timezone)
+    if attempt_count is not None:
+        fields.append("attempt_count = ?")
+        values.append(attempt_count)
     if not fields:
         return
     values.append(queue_item_id)

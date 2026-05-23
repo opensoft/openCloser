@@ -28,11 +28,16 @@ from typing import Literal
 
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
-from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter
+from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
 from opencloser.crm.dataverse.client import DataverseClient
+from opencloser.crm.dataverse.errors import DataverseError
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator, load_mapping
-from opencloser.crm.dataverse.metadata import verify
-from opencloser.crm.dataverse.queue_loader import DataverseQueueLoader, QueueSelector
+from opencloser.crm.dataverse.metadata import MetadataError, verify
+from opencloser.crm.dataverse.queue_loader import (
+    DataverseQueueLoader,
+    QueueLoadError,
+    QueueSelector,
+)
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     DataQualityWarning,
@@ -59,10 +64,6 @@ ExitStatus = Literal[
 
 # Anchored E.164: leading +, then 1-15 digits.
 _E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
-
-
-class ReadinessError(RuntimeError):
-    """Readiness/metadata gate failure — `run-crm` exits before any write (FR-002/FR-007)."""
 
 
 @dataclass
@@ -114,7 +115,17 @@ def run_one_crm_item(
             ),
         )
     translator = MappingTranslator(mapping)
-    report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
+    try:
+        report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
+    except (DataverseError, MetadataError) as exc:
+        # An unreachable Dataverse (auth failure, 5xx, timeout) or unverifiable
+        # metadata at startup is operator-visible-blocked rather than an unhandled
+        # exception. The CLI prints the message and exits with the documented
+        # `blocked` exit code.
+        return CrmRunReport(
+            exit_status="blocked",
+            message=f"metadata verification failed: {exc}",
+        )
     if not report.ok:
         return CrmRunReport(
             exit_status="blocked",
@@ -122,12 +133,13 @@ def run_one_crm_item(
             metadata_report=report,
         )
 
-    # 2) Load the queue item.
+    # 2) Load the queue item. Any mapping/option-set/transient failure surfaces as a
+    # structured `failed` report instead of an unhandled exception.
     loader = DataverseQueueLoader(client, translator)
     try:
         queue_item = loader.load(selector)
-    except MappingError as exc:
-        return CrmRunReport(exit_status="failed", message=f"queue loader mapping error: {exc}")
+    except (MappingError, QueueLoadError, DataverseError) as exc:
+        return CrmRunReport(exit_status="failed", message=f"queue loader error: {exc}")
     if queue_item is None:
         return CrmRunReport(
             exit_status="no-callable-item",
@@ -136,8 +148,8 @@ def run_one_crm_item(
         )
 
     # 3) FR-034 — non-E.164 phone-quality warning. Recorded into the runner report and
-    # ultimately the queue-status transition_reason via the adapter, but never changes
-    # the exit status.
+    # the queue-status payload's `queue.last_error` column (via the adapter; see
+    # `_compose_last_error`), without changing the exit status.
     runner_warnings: list[DataQualityWarning] = []
     if queue_item.phone_number and not _E164_RE.match(queue_item.phone_number):
         runner_warnings.append(
@@ -151,12 +163,10 @@ def run_one_crm_item(
     # 4) Stage the queue row locally so the unchanged orchestrator can read it.
     _stage_queue_item(conn, queue_item)
 
-    # 5) Build conversation fixture (optional — eligibility may block before any call).
-    conversation = (
-        _load_conversation_fixture(conversation_fixture) if conversation_fixture else None
-    )
-
-    # 6) Construct the boundary objects + adapter and call the orchestrator.
+    # 5) Construct the boundary objects + adapter and call the orchestrator. The
+    # conversation-fixture load is inside the try block so a missing or malformed
+    # fixture file produces an exit_status=failed report rather than an unhandled
+    # exception.
     adapter = DataverseWriteBackAdapter(
         conn=conn,
         client=client,
@@ -170,6 +180,9 @@ def run_one_crm_item(
     transport_dir = transport_fixture.parent
     transport_fixture_id = transport_fixture.stem
     try:
+        conversation = (
+            _load_conversation_fixture(conversation_fixture) if conversation_fixture else None
+        )
         orchestrator_report = process_one_queue_item(
             queue_item.queue_item_id,
             conn=conn,
@@ -185,12 +198,22 @@ def run_one_crm_item(
     except QueueItemNotFound as exc:
         return CrmRunReport(exit_status="failed", message=f"queue item not found locally: {exc}")
     except (ValueError, OSError) as exc:
-        # Malformed transport fixture / missing file — surfaces as exit_status=failed.
-        # The orchestrator pre-validates the allow-path transport fixture id before
-        # any session row is created, so no attempt is consumed (FR-019/FR-020 spirit).
+        # Malformed transport/conversation fixture, missing file. The orchestrator
+        # pre-validates allow-path inputs before any session row is created, so no
+        # attempt is consumed (FR-019/FR-020 spirit).
         return CrmRunReport(
             exit_status="failed",
             message=str(exc),
+            warnings=adapter.warnings(),
+        )
+    except (DataverseError, DataverseWriteBackError) as exc:
+        # A permanent Dataverse write failure mid-run is operator-visible-failed.
+        # The adapter has already recorded `writeback_progress.run_status=blocked`
+        # with the error before re-raising, so the resume coordinator can pick up
+        # in a later slice (US4).
+        return CrmRunReport(
+            exit_status="failed",
+            message=f"dataverse write failed: {exc}",
             warnings=adapter.warnings(),
         )
 
@@ -219,20 +242,24 @@ def _terminal_run_status(report: RunReport) -> RunStatus:
 
 
 def _stage_queue_item(conn: sqlite3.Connection, queue_item: QueueItem) -> None:
-    """Insert the queue row into local SQLite (idempotent) so the unchanged
-    orchestrator can join sessions to a queue-items row by FK."""
+    """Insert or refresh the queue row in local SQLite from the live Dataverse
+    snapshot so the unchanged orchestrator's eligibility evaluator reads current
+    state (not whatever a prior run last wrote). FK consumers (sessions, etc.)
+    keep their references — only the mutable columns are refreshed."""
     existing = store.get_queue_item(conn, queue_item.queue_item_id)
     if existing is None:
         with store.transaction(conn):
             store.insert_queue_item(conn, queue_item)
         return
-    # Refresh the mutable fields a prior run may have changed locally.
     with store.transaction(conn):
         store.update_queue_item_status(
             conn,
             queue_item.queue_item_id,
             callable_status=queue_item.callable_status,
             dnc_flag=queue_item.dnc_flag,
+            phone_number=queue_item.phone_number,
+            timezone=queue_item.timezone,
+            attempt_count=queue_item.attempt_count,
         )
 
 
@@ -259,6 +286,5 @@ def _load_conversation_fixture(path: Path) -> ConversationFixture:
 __all__ = (
     "CrmRunReport",
     "ExitStatus",
-    "ReadinessError",
     "run_one_crm_item",
 )

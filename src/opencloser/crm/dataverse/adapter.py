@@ -55,7 +55,26 @@ _TASK_EXCLUDED_DISPOSITIONS: frozenset[Disposition] = frozenset(
 
 
 class DataverseWriteBackError(RuntimeError):
-    """A non-transient adapter-level failure (e.g. PATCH targeted a missing row)."""
+    """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
+
+
+# Conceptual entity key -> Dataverse entity-set (collection) name overrides.
+# Dataverse Web API uses the entity-set (plural) name in record URIs — e.g.
+# `POST /api/data/v9.2/phonecalls`, NOT `/phonecall`. For the entities Slice 2
+# touches the rule is `logical_name + "s"`; this map lets a deployment override
+# any irregular plural without re-writing the mapping artifact.
+_ENTITY_SET_OVERRIDES: dict[str, str] = {}
+
+
+def _entity_set_name(logical_name: str) -> str:
+    """Return the Dataverse entity-set (collection) name for a logical name.
+
+    Defaults to `logical_name + "s"` — the standard Dataverse pluralization for
+    every entity Slice 2 references (`phonecall`/`task`/`medx_callqueueitem`/
+    `systemuser`/`team`/`account`). Irregular plurals (e.g. `opportunity` →
+    `opportunities`) require an entry in `_ENTITY_SET_OVERRIDES`.
+    """
+    return _ENTITY_SET_OVERRIDES.get(logical_name, logical_name + "s")
 
 
 class _AggregateBuilder:
@@ -93,10 +112,10 @@ class DataverseWriteBackAdapter:
     # ----- public protocol surface -----------------------------------------
 
     def emit_phone_call_activity(self, payload: PhoneCallActivityPayload) -> None:
-        entity = self._t.entity_logical_name("phone_call_activity")
+        entity_key = "phone_call_activity"
         idempotency_field = self._t.logical_name("phone_call.idempotency_key")
         record_id = self._idempotent_create(
-            entity=entity,
+            entity_key=entity_key,
             idempotency_field=idempotency_field,
             idempotency_value=payload.session_id,
             body=self._phone_call_body(payload, idempotency_field),
@@ -111,12 +130,12 @@ class DataverseWriteBackAdapter:
         self._aggregate(payload.session_id).phone_call_activity = payload
 
     def emit_queue_status_update(self, payload: QueueStatusUpdatePayload) -> None:
-        entity = self._t.entity_logical_name("queue_item")
+        entity_set = _entity_set_name(self._t.entity_logical_name("queue_item"))
         # PATCH is keyed by the queue row's primary id directly; the FR-024 idempotency
         # signal lives in the `last_session_id` column rather than a synthetic key
         # column. A row whose `last_session_id` already equals this session has been
         # patched in a prior run — record/refresh the correlation and skip the PATCH.
-        existing = self._fetch_queue_last_session(entity, payload.queue_item_id)
+        existing = self._fetch_queue_last_session(payload.queue_item_id)
         if existing == payload.session_id:
             self._record_correlation(
                 session_id=payload.session_id,
@@ -129,7 +148,7 @@ class DataverseWriteBackAdapter:
             return
 
         body = self._queue_status_body(payload)
-        path = f"{entity}({payload.queue_item_id})"
+        path = f"{entity_set}({payload.queue_item_id})"
         try:
             self._client.patch(path, json=body)
         except PermanentDataverseError as exc:
@@ -157,7 +176,7 @@ class DataverseWriteBackAdapter:
         if session.final_disposition in _TASK_EXCLUDED_DISPOSITIONS:
             return
 
-        entity = self._t.entity_logical_name("task")
+        entity_key = "task"
         idempotency_field = self._t.logical_name("task.idempotency_key")
 
         # Resolve ownership BEFORE constructing the payload so the resolved owner is
@@ -176,7 +195,7 @@ class DataverseWriteBackAdapter:
         )
 
         record_id = self._idempotent_create(
-            entity=entity,
+            entity_key=entity_key,
             idempotency_field=idempotency_field,
             idempotency_value=payload.session_id,
             body=body,
@@ -290,34 +309,44 @@ class DataverseWriteBackAdapter:
         owner_id: str,
         owner_entity_set: str,
     ) -> dict[str, object]:
+        # `preferred_callback_window` is intentionally free-form text (e.g.
+        # "Thursday afternoon") per the Slice 1 contract; it MUST NOT be written to
+        # the Dataverse `scheduledend` column (an Edm.DateTimeOffset that 400s on
+        # non-ISO input). The window is surfaced in `description` instead.
         subject = payload.subject[:200] if payload.subject else "Follow-up"
-        body: dict[str, object] = {
+        return {
             "subject": subject,
             "description": _task_description(payload),
             idempotency_field: payload.session_id,
             "ownerid@odata.bind": _owner_bind(owner_id, owner_entity_set),
         }
-        if payload.preferred_callback_window:
-            body["scheduledend"] = payload.preferred_callback_window
-        return body
 
     # ----- Dataverse interaction helpers -----------------------------------
 
     def _idempotent_create(
         self,
         *,
-        entity: str,
+        entity_key: str,
         idempotency_field: str,
         idempotency_value: str,
         body: dict[str, object],
     ) -> str:
         """FR-024 — pre-query for an existing record with this idempotency key; if
-        found, return its id. Otherwise POST and return the new record id."""
+        found, return its id. Otherwise POST and return the new record id.
+
+        A POST that succeeds but omits an `OData-EntityId` response header is a
+        permanent adapter-level failure: we cannot record a confirmed correlation
+        without the new record's id, and silently storing an empty id would mask
+        the failure on every later resume/audit.
+        """
+        entity_set = _entity_set_name(self._t.entity_logical_name(entity_key))
+        primary_id = self._primary_id(entity_key, entity_set)
         existing = (
             self._client.get(
-                entity,
+                entity_set,
                 params={
                     "$filter": f"{idempotency_field} eq '{idempotency_value}'",
+                    "$select": primary_id,
                     "$top": "1",
                 },
             )
@@ -325,19 +354,32 @@ class DataverseWriteBackAdapter:
             .get("value", [])
         )
         if existing:
-            return str(existing[0].get(f"{entity}id"))
-        response = self._client.post(entity, json=body)
+            existing_id = existing[0].get(primary_id)
+            if not existing_id:
+                raise DataverseWriteBackError(
+                    f"idempotency pre-query for {entity_set} returned a row without "
+                    f"its primary id {primary_id!r}"
+                )
+            return str(existing_id)
+        response = self._client.post(entity_set, json=body)
         entity_uri = response.headers.get("OData-EntityId", "")
-        return _parse_record_id_from_uri(entity_uri)
+        record_id = _parse_record_id_from_uri(entity_uri)
+        if not record_id:
+            raise DataverseWriteBackError(
+                f"POST {entity_set} succeeded but response carried no OData-EntityId "
+                f"header — cannot record a confirmed correlation"
+            )
+        return record_id
 
-    def _fetch_queue_last_session(self, entity: str, queue_item_id: str) -> str | None:
+    def _fetch_queue_last_session(self, queue_item_id: str) -> str | None:
+        entity_set = _entity_set_name(self._t.entity_logical_name("queue_item"))
+        primary_id = self._primary_id("queue_item", entity_set)
         last_session_field = self._t.logical_name("queue.last_session_id")
         rows = (
             self._client.get(
-                entity,
+                entity_set,
                 params={
-                    "$filter": f"{self._t.mapping.entities['queue_item'].primary_id or f'{entity}id'} "
-                    f"eq {queue_item_id}",
+                    "$filter": f"{primary_id} eq {queue_item_id}",
                     "$select": last_session_field,
                     "$top": "1",
                 },
@@ -349,6 +391,18 @@ class DataverseWriteBackAdapter:
             return None
         value = rows[0].get(last_session_field)
         return None if value is None else str(value)
+
+    def _primary_id(self, entity_key: str, entity_set: str) -> str:
+        """Mapped primary-id column for an entity. Falls back to `<logical>id` when
+        the mapping leaves it unset — but the mapped value is preferred because
+        Dataverse activity tables use names like `activityid` rather than the
+        logical-name-plus-id pattern (e.g. `phonecall` → `activityid`)."""
+        ref = self._t.mapping.entities.get(entity_key)
+        if ref is not None and ref.primary_id:
+            return ref.primary_id
+        # Strip the trailing 's' from the entity-set form to recover the logical
+        # name when the mapping omits primary_id.
+        return entity_set.rstrip("s") + "id"
 
     # ----- ownership resolution (FR-025) -----------------------------------
 
@@ -412,11 +466,11 @@ class DataverseWriteBackAdapter:
         override_field = self._t.mapping.task_owner_override_field
         if not override_field:
             return None
-        entity = self._t.entity_logical_name("queue_item")
-        primary_id = self._t.mapping.entities["queue_item"].primary_id or f"{entity}id"
+        entity_set = _entity_set_name(self._t.entity_logical_name("queue_item"))
+        primary_id = self._primary_id("queue_item", entity_set)
         rows = (
             self._client.get(
-                entity,
+                entity_set,
                 params={
                     "$filter": f"{primary_id} eq {queue_item_id}",
                     "$select": override_field,
@@ -441,17 +495,17 @@ class DataverseWriteBackAdapter:
         - `systemuser`: row must exist AND `isdisabled == false`.
         - `team`: row must exist (teams have no `isdisabled` column).
         """
-        for entity, entity_set, extra_filter in (
-            ("systemuser", "systemusers", " and isdisabled eq false"),
-            ("team", "teams", ""),
+        for entity_set, primary_id, extra_filter in (
+            ("systemusers", "systemuserid", " and isdisabled eq false"),
+            ("teams", "teamid", ""),
         ):
             try:
                 rows = (
                     self._client.get(
-                        entity,
+                        entity_set,
                         params={
-                            "$filter": f"{entity}id eq {owner_id}{extra_filter}",
-                            "$select": f"{entity}id",
+                            "$filter": f"{primary_id} eq {owner_id}{extra_filter}",
+                            "$select": primary_id,
                             "$top": "1",
                         },
                     )

@@ -85,12 +85,13 @@ def _slice2_config() -> Slice2Config:
 def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     entities: dict[str, set[str]] = {}
     for ekey, eref in mapping.entities.items():
-        attrs = {eref.primary_id} if eref.primary_id else set()
+        primary_id = eref.primary_id or f"{eref.logical_name}id"
+        attrs = {primary_id}
         attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
         if ekey == "phone_call_activity":
             attrs |= {"subject", "description", "actualstart", "actualend"}
         if ekey == "task":
-            attrs |= {"subject", "description", "scheduledend", "ownerid"}
+            attrs |= {"subject", "description", "ownerid"}
         entities[eref.logical_name] = attrs
     if mapping.task_owner_override_field:
         entities["medx_callqueueitem"].add(mapping.task_owner_override_field)
@@ -183,9 +184,9 @@ def test_us1_interested_callback_requested_writes_full_loop(
     assert report.artifact_dir is not None
 
     # Dataverse fake recorded: 1 phonecall create + 1 task create + 1 queue PATCH.
-    phonecalls = [b for e, b in fake.created if e == "phonecall"]
-    tasks = [b for e, b in fake.created if e == "task"]
-    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
+    phonecalls = [b for e, b in fake.created if e == "phonecalls"]
+    tasks = [b for e, b in fake.created if e == "tasks"]
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitems"]
     assert len(phonecalls) == 1, "exactly one Phone Call activity per session"
     assert len(tasks) == 1, "one callback Task per session"
     assert len(queue_patches) == 1, "one queue-status PATCH per session"
@@ -245,7 +246,7 @@ def test_us1_interested_email_captured_marks_completed(
     )
     assert report.exit_status == "completed"
     assert report.final_disposition is Disposition.INTERESTED_EMAIL_CAPTURED
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
     assert queue_patch["medx_callstatus"] == 2  # queue_status.completed
 
 
@@ -263,11 +264,11 @@ def test_us1_needs_human_review_writes_review_task(
     )
     assert report.exit_status == "completed"
     assert report.final_disposition is Disposition.NEEDS_HUMAN_REVIEW
-    tasks = [b for e, b in fake.created if e == "task"]
+    tasks = [b for e, b in fake.created if e == "tasks"]
     assert len(tasks) == 1
     # Review task is routed to the review owner (FR-025).
     assert tasks[0]["ownerid@odata.bind"] == f"/systemusers({_OWNER_REVIEW})"
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
     assert queue_patch["medx_callstatus"] == 3  # queue_status.blocked
 
 
@@ -286,8 +287,8 @@ def test_us1_do_not_call_sets_dnc_and_emits_no_task(
     assert report.exit_status == "completed"
     assert report.final_disposition is Disposition.DO_NOT_CALL
     # No Task is emitted for DNC (FR-018).
-    assert [b for e, b in fake.created if e == "task"] == []
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
+    assert [b for e, b in fake.created if e == "tasks"] == []
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
     assert queue_patch["medx_callstatus"] == 4  # queue_status.dnc
     assert queue_patch["medx_donotcall"] is True
 
@@ -314,9 +315,9 @@ def test_us1_blocked_by_dnc_does_not_place_call(
     assert report.final_disposition is Disposition.BLOCKED
     # No Phone Call activity, no Task created. Exactly one queue PATCH carries the
     # block transition_reason via queue.last_error.
-    assert [b for e, b in fake.created if e == "phonecall"] == []
-    assert [b for e, b in fake.created if e == "task"] == []
-    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
+    assert [b for e, b in fake.created if e == "phonecalls"] == []
+    assert [b for e, b in fake.created if e == "tasks"] == []
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitems"]
     assert len(queue_patches) == 1
     assert "blocked_by_eligibility" in str(queue_patches[0].get("medx_lasterror", ""))
 
@@ -342,7 +343,7 @@ def test_us1_non_e164_phone_records_warning(
     assert report.exit_status == "completed"
     assert any(w.code == "non_e164_phone" for w in report.warnings)
     # The queue PATCH carries the warning summary in last_error.
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
     assert "non_e164_phone" in str(queue_patch.get("medx_lasterror", ""))
 
 

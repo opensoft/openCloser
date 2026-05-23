@@ -51,8 +51,25 @@ class DataverseFake:
         env_url: str = "https://fake.crm.dynamics.com",
     ) -> None:
         self.env_url = env_url
-        self._entities = {name: set(attrs) for name, attrs in entities.items()}
-        self._records = {name: [dict(r) for r in recs] for name, recs in (records or {}).items()}
+        # Auto-alias each registered entity with its `<name>s` form so both the
+        # logical-name URL (e.g. `/medx_callqueueitem`) and the OData entity-set
+        # URL (e.g. `/medx_callqueueitems`) resolve to the same attribute set and
+        # the same records list. Real Dataverse uses the entity-set form for
+        # record operations; the Slice 2 adapter follows that, while the Slice 2
+        # foundation `queue_loader`/`metadata` still use logical names. Aliasing
+        # lets one fake serve both consumers within a single test.
+        self._entities: dict[str, set[str]] = {}
+        for name, attrs in entities.items():
+            attr_set = set(attrs)
+            self._entities.setdefault(name, attr_set)
+            self._entities.setdefault(name + "s", attr_set)
+        self._records: dict[str, list[dict[str, Any]]] = {}
+        for name, recs in (records or {}).items():
+            rec_list = [dict(r) for r in recs]
+            # Share the SAME list reference between `<name>` and `<name>s` so a
+            # PATCH/POST on either alias is observable through the other.
+            self._records.setdefault(name, rec_list)
+            self._records.setdefault(name + "s", rec_list)
         self._fail_remaining = 0
         self._fail_status = 503
         self.created: list[tuple[str, dict[str, Any]]] = []  # (entity, record) — POST log
@@ -140,7 +157,8 @@ class DataverseFake:
             unknown = [k for k in keys if k not in self._entities[entity]]
             if unknown:  # a $select of an unmapped field is a Dataverse 400
                 return httpx.Response(
-                    400, json={"error": {"message": f"unknown field(s): {unknown}"}},
+                    400,
+                    json={"error": {"message": f"unknown field(s): {unknown}"}},
                     request=request,
                 )
             rows = [{k: r.get(k) for k in keys} for r in rows]
@@ -151,7 +169,11 @@ class DataverseFake:
             return httpx.Response(404, request=request)
         body = json.loads(request.content or b"{}")
         record_id = str(uuid.uuid4())
-        body.setdefault(f"{entity}id", record_id)
+        # Stamp both the singular-name primary id (`<logical>id`) so
+        # `_handle_patch`/test introspection finds the row regardless of which
+        # URL form (logical name or entity-set) the caller used.
+        primary_key = _primary_id_field(entity)
+        body.setdefault(primary_key, record_id)
         self._records.setdefault(entity, []).append(dict(body))
         self.created.append((entity, dict(body)))
         entity_uri = f"{self.env_url}{_API_PREFIX}{entity}({record_id})"
@@ -162,12 +184,23 @@ class DataverseFake:
             return httpx.Response(404, request=request)
         changes = json.loads(request.content or b"{}")
         rid = record_id.strip("'")
+        primary_key = _primary_id_field(entity)
         for row in self._records.get(entity, []):
-            if row.get(f"{entity}id") == rid:
+            if row.get(primary_key) == rid:
                 row.update(changes)
                 self.patched.append((entity, rid, dict(changes)))
                 return httpx.Response(204, request=request)
         return httpx.Response(404, request=request)
+
+
+def _primary_id_field(entity: str) -> str:
+    """Derive the primary-id column for an entity name addressed in the Web API.
+
+    Strips one trailing 's' so OData entity-set names (e.g. `medx_callqueueitems`)
+    map to the singular-form primary key (`medx_callqueueitemid`) that records are
+    actually keyed on. A name without trailing 's' is left alone."""
+    base = entity[:-1] if entity.endswith("s") else entity
+    return f"{base}id"
 
 
 def _matches_filter(row: dict[str, Any], flt: str) -> bool:
