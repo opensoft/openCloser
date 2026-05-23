@@ -1,4 +1,5 @@
-"""Dataverse error taxonomy — Slice 2 (spec §Definitions, FR-023).
+"""Dataverse error taxonomy + small OData helpers — Slice 2 (spec §Definitions,
+FR-023).
 
 `TransientDataverseError` is retryable within the bounded retry budget;
 `PermanentDataverseError` MUST NOT be retried. Classification of HTTP responses and
@@ -8,6 +9,21 @@ httpx transport exceptions follows the spec's Definitions section exactly.
 from __future__ import annotations
 
 import httpx
+
+
+def odata_string_literal(value: str) -> str:
+    """Quote a string for use as an OData v4 literal in `$filter` clauses.
+
+    Per OData v4 spec (section 5.1.1.6.1), a single quote inside a string
+    literal is escaped by doubling it (`'` -> `''`). Centralizing the
+    escape here keeps every `$filter` clause that interpolates a string
+    safe by construction — no caller has to remember to escape, and the
+    door for OData-filter injection via user-supplied values stays shut.
+
+    Returns the value wrapped in single quotes with embedded `'` doubled.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
 
 # HTTP status codes treated as transient (spec §Definitions §"Transient Dataverse error":
 # network timeout, connection reset, HTTP 408, HTTP 429, or HTTP 5xx).

@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 from opencloser.crm.dataverse.client import DataverseClient
+from opencloser.crm.dataverse.errors import odata_string_literal
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
 from opencloser.models import CallableStatus, DataverseFieldRef, QueueItem
 
@@ -69,8 +70,7 @@ def _odata_value(field_type: str, value: object) -> str:
         return text
     if field_type in _BARE_LITERAL_TYPES:
         return _odata_token(value)
-    text = str(value)
-    return "'" + text.replace("'", "''") + "'"
+    return odata_string_literal(str(value))
 
 # Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we accept any
 # value matching this safe alphanumeric+dash+underscore pattern (which covers real
@@ -178,6 +178,11 @@ class DataverseQueueLoader:
                 filter_clauses.append(
                     f"{_lookup_value_name(campaign_field_ref)} eq "
                     f"{_odata_value(campaign_field_ref.type, selector.campaign)}"
+                )
+            else:
+                raise QueueLoadError(
+                    "NextReady requires `queue.campaign` in the Dataverse mapping "
+                    "so the query cannot widen across campaigns"
                 )
             rows = self._query(
                 entity_set,

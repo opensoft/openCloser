@@ -272,3 +272,52 @@ def test_cli_no_args_shows_help() -> None:
     assert "init-state" in result.output
     assert "load-queue-item" in result.output
     assert "run-one" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — run-crm input validation (GUID shape, dry-run gate)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_run_crm_rejects_non_guid_queue_item_id(tmp_path: Path) -> None:
+    """`--queue-item-id` MUST be a Dataverse GUID — arbitrary strings interpolated
+    into the OData $filter / record URL are a filter-injection vector."""
+    config_path = _write_config(tmp_path)
+    run = _runner.invoke(
+        app,
+        [
+            "run-crm",
+            "--write",
+            "--queue-item-id",
+            "not-a-guid",
+            "--transport-fixture",
+            str(_TRANSPORT_FIXTURE),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "error:" in out
+    assert "not a valid Dataverse GUID" in out
+
+
+def test_cli_run_crm_without_write_exits_2(tmp_path: Path) -> None:
+    """`run-crm` without `--write` exits 2 with a pointer to US2 — dry-run is
+    intentionally not yet implemented."""
+    config_path = _write_config(tmp_path)
+    run = _runner.invoke(
+        app,
+        [
+            "run-crm",
+            "--queue-item-id",
+            "22222222-2222-2222-2222-222222222222",
+            "--transport-fixture",
+            str(_TRANSPORT_FIXTURE),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "dry-run" in out.lower()

@@ -34,6 +34,7 @@ _OPTION_SET_META_RE = re.compile(
     r"/Microsoft\.Dynamics\.CRM\.(Picklist|Status)AttributeMetadata$"
 )
 _RECORD_RE = re.compile(r"^(\w+)\(([^)]+)\)$")
+_ACTIVITY_LOGICAL_NAMES = frozenset({"phonecall", "task", "email", "appointment"})
 
 
 class _StubToken:
@@ -244,6 +245,8 @@ class DataverseFake:
         body = json.loads(request.content or b"{}")
         record_id = str(uuid.uuid4())
         body.setdefault(f"{logical}id", record_id)
+        if logical in _ACTIVITY_LOGICAL_NAMES:
+            body.setdefault("activityid", record_id)
         self._records.setdefault(logical, []).append(dict(body))
         self.created.append((logical, dict(body)))
         entity_uri = f"{self.env_url}{_API_PREFIX}{entity}({record_id})"
@@ -256,7 +259,9 @@ class DataverseFake:
         changes = json.loads(request.content or b"{}")
         rid = record_id.strip("'")
         for row in self._records.get(logical, []):
-            if row.get(f"{logical}id") == rid:
+            if row.get(f"{logical}id") == rid or (
+                logical in _ACTIVITY_LOGICAL_NAMES and row.get("activityid") == rid
+            ):
                 row.update(changes)
                 self.patched.append((logical, rid, dict(changes)))
                 return httpx.Response(204, request=request)

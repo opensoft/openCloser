@@ -19,6 +19,15 @@ from opencloser.crm.dataverse.queue_loader import (
 )
 from opencloser.models import CallableStatus, DataverseMapping, RetryConfig
 from tests.fixtures.dataverse.fake import DataverseFake
+from tests.fixtures.dataverse.helpers import (
+    entity_attributes as _entities,
+)
+from tests.fixtures.dataverse.helpers import (
+    entity_sets as _entity_sets,
+)
+from tests.fixtures.dataverse.helpers import (
+    option_sets as _option_sets,
+)
 
 _MAPPING = load_mapping(Path(__file__).parents[1] / "fixtures/dataverse/dataverse_mapping.json")
 _RETRY = RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0)
@@ -27,53 +36,6 @@ _NOW = "2026-05-22T16:00:00.000Z"
 _ACCOUNT_GUID = "a-0001"
 _QUEUE_GUID = "q-0001"
 _ACCOUNT = {"accountid": _ACCOUNT_GUID, "name": "Sunage ALF of Davis"}
-
-
-def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
-    """Build a complete fake entity/attribute map from a mapping artifact.
-
-    For Dataverse lookup columns, both the navigation property (the bare logical
-    name) AND the `_<logical>_value` computed property are real attributes in a
-    live environment — the loader reads/filters via the latter, so the fake's
-    attribute set must include it (Codex review on PR #3).
-    """
-    entities: dict[str, set[str]] = {}
-    for ekey, eref in mapping.entities.items():
-        attrs = {eref.primary_id} if eref.primary_id else set()
-        for f in mapping.fields.values():
-            if f.entity != ekey:
-                continue
-            attrs.add(f.logical_name)
-            if f.type == "lookup":
-                attrs.add(f"_{f.logical_name}_value")
-        entities[eref.logical_name] = attrs
-    # Ensure the account table is present even if a test deletes its mapping.
-    entities.setdefault("account", set()).update({"accountid", "name"})
-    return entities
-
-
-def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
-    """Build the fake's record-collection alias map (logical_name → entity_set_name)
-    from a mapping artifact. Tests that exercise record CRUD must pass this so the
-    fake recognises the entity-set URLs the loader/adapter emit."""
-    return {
-        eref.logical_name: eref.entity_set_name
-        for eref in mapping.entities.values()
-        if eref.entity_set_name
-    }
-
-
-def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
-    """Build the fake's option-set table — (entity_logical, attr_logical) -> set of
-    integer values — from a mapping artifact's `option_sets` section."""
-    out: dict[tuple[str, str], set[int]] = {}
-    for entry in mapping.option_sets.values():
-        field_ref = mapping.fields.get(entry.field)
-        if field_ref is None or field_ref.entity not in mapping.entities:
-            continue
-        entity_logical = mapping.entities[field_ref.entity].logical_name
-        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
-    return out
 
 
 def _queue_record(
@@ -203,19 +165,81 @@ def test_load_explicit_id_maps_to_queue_item_contract() -> None:
     assert item.dnc_flag is False
 
 
+def _mapping_with_campaign() -> DataverseMapping:
+    """`_MAPPING` augmented with a `queue.campaign` field — required by the
+    loader's NextReady path for campaign-scoped selection."""
+    mapping = _MAPPING.model_copy(deep=True)
+    mapping.fields["queue.campaign"] = type(next(iter(_MAPPING.fields.values())))(
+        entity="queue_item",
+        logical_name="medx_campaign",
+        type="string",
+    )
+    return mapping
+
+
+def _loader_with_campaign(records: dict[str, list[dict]]) -> DataverseQueueLoader:
+    mapping = _mapping_with_campaign()
+    entities = _entities(mapping)
+    entities["medx_callqueueitem"].add("medx_campaign")
+    fake = DataverseFake(
+        entities=entities,
+        records=records,
+        option_sets=_option_sets(mapping),
+        entity_sets=_entity_sets(mapping),
+    )
+    return DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
+
+
 def test_load_next_ready_is_deterministic() -> None:
-    loader = _loader(
-        {
-            "medx_callqueueitem": [
-                _queue_record(qid="q-late", next_at="2026-05-22T18:00:00.000Z"),
-                _queue_record(qid="q-early", next_at="2026-05-22T09:00:00.000Z"),
-            ],
-            "account": [_ACCOUNT],
-        }
+    """Among rows in the SAME campaign, the earliest `next_attempt_at` wins."""
+    rec_late = _queue_record(qid="q-late", next_at="2026-05-22T18:00:00.000Z")
+    rec_late["medx_campaign"] = "alf-q2-davis"
+    rec_early = _queue_record(qid="q-early", next_at="2026-05-22T09:00:00.000Z")
+    rec_early["medx_campaign"] = "alf-q2-davis"
+    loader = _loader_with_campaign(
+        {"medx_callqueueitem": [rec_late, rec_early], "account": [_ACCOUNT]}
     )
     item = loader.load(NextReady("alf-q2-davis"))
     assert item is not None
-    assert item.queue_item_id == "q-early"  # earliest next_attempt_at wins
+    assert item.queue_item_id == "q-early"
+
+
+def test_load_next_ready_filters_by_campaign_when_mapped() -> None:
+    """When the mapping carries `queue.campaign`, NextReady scopes the query to
+    the selector's campaign — contracts/dataverse-queue-loader.md."""
+    rec_in = _queue_record(qid="q-in", next_at="2026-05-22T09:00:00.000Z")
+    rec_in["medx_campaign"] = "alf-q2-davis"
+    rec_out = _queue_record(qid="q-out", next_at="2026-05-22T08:00:00.000Z")
+    rec_out["medx_campaign"] = "other-campaign"
+    loader = _loader_with_campaign(
+        {"medx_callqueueitem": [rec_in, rec_out], "account": [_ACCOUNT]}
+    )
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None
+    # `q-out` has an earlier next_attempt_at but is in the wrong campaign.
+    assert item.queue_item_id == "q-in"
+
+
+def test_load_next_ready_rejects_when_campaign_unmapped() -> None:
+    """If the mapping omits `queue.campaign`, the loader MUST fail — a
+    campaign-agnostic NextReady query in a multi-campaign environment would
+    pick the wrong row."""
+    mapping = _MAPPING.model_copy(deep=True)
+    del mapping.fields["queue.campaign"]
+    fake = DataverseFake(
+        entities=_entities(mapping),
+        records={
+            "medx_callqueueitem": [
+                _queue_record(qid="q-only", next_at="2026-05-22T09:00:00.000Z")
+            ],
+            "account": [_ACCOUNT],
+        },
+        option_sets=_option_sets(mapping),
+        entity_sets=_entity_sets(mapping),
+    )
+    loader = DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
+    with pytest.raises(QueueLoadError, match=r"queue\.campaign"):
+        loader.load(NextReady("any-campaign"))
 
 
 def test_load_next_ready_honors_campaign_filter() -> None:
@@ -290,7 +314,9 @@ def test_load_next_ready_uses_configured_callable_status() -> None:
 
 
 def test_load_empty_queue_returns_none() -> None:
-    loader = _loader({"medx_callqueueitem": [], "account": [_ACCOUNT]})
+    loader = _loader_with_campaign(
+        {"medx_callqueueitem": [], "account": [_ACCOUNT]}
+    )
     assert loader.load(ExplicitId("does-not-exist")) is None
     assert loader.load(NextReady("alf-q2-davis")) is None
 

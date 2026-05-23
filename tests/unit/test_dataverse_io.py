@@ -13,6 +13,7 @@ import pytest
 from opencloser.crm.dataverse import errors
 from opencloser.crm.dataverse.auth import DataverseTokenProvider
 from opencloser.crm.dataverse.client import DataverseClient
+from opencloser.crm.dataverse.errors import odata_string_literal
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator, load_mapping
 from opencloser.models import DataverseSecrets, RetryConfig
 
@@ -465,3 +466,26 @@ def test_translator_unknown_field_raises() -> None:
     translator = MappingTranslator(load_mapping(_MAPPING_FIXTURE))
     with pytest.raises(MappingError, match="no Dataverse field mapping"):
         translator.logical_name("queue.nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# OData literal escaping (errors.odata_string_literal)
+# ---------------------------------------------------------------------------
+
+
+def test_odata_string_literal_wraps_in_single_quotes() -> None:
+    assert odata_string_literal("hello") == "'hello'"
+
+
+def test_odata_string_literal_doubles_embedded_single_quotes() -> None:
+    # Per OData v4 spec, an embedded `'` is escaped by doubling it. Without this
+    # escape, a campaign name like `O'Brien` would terminate the literal and
+    # invalidate the entire $filter clause (or worse — open a filter-injection
+    # path for user-supplied values).
+    assert odata_string_literal("O'Brien") == "'O''Brien'"
+    assert odata_string_literal("'") == "''''"
+    assert odata_string_literal("a'b'c") == "'a''b''c'"
+
+
+def test_odata_string_literal_empty_string() -> None:
+    assert odata_string_literal("") == "''"
