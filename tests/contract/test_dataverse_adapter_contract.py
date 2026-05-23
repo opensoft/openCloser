@@ -21,7 +21,6 @@ from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter
 from opencloser.crm.dataverse.mapping import MappingTranslator, load_mapping
 from opencloser.models import (
     CallableStatus,
-    DataverseMapping,
     Disposition,
     HumanReviewReason,
     PhoneCallActivityPayload,
@@ -35,6 +34,7 @@ from opencloser.models import (
 )
 from opencloser.state import store
 from tests.fixtures.dataverse.fake import DataverseFake
+from tests.fixtures.dataverse.helpers import fake_for_mapping
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MAPPING_FIXTURE = _REPO_ROOT / "tests/fixtures/dataverse/dataverse_mapping.json"
@@ -64,65 +64,6 @@ _EMISSION_MAP: dict[Disposition, tuple[bool, bool, str | None, CallableStatus]] 
 assert set(_EMISSION_MAP) == set(Disposition.__members__.values()), (
     "contract test must cover every Disposition"
 )
-
-
-def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
-    entities: dict[str, set[str]] = {}
-    for ekey, eref in mapping.entities.items():
-        primary_id = eref.primary_id or f"{eref.logical_name}id"
-        attrs = {primary_id}
-        for field in mapping.fields.values():
-            if field.entity != ekey:
-                continue
-            attrs.add(field.logical_name)
-            if field.type == "lookup":
-                attrs.add(f"_{field.logical_name}_value")
-        # Phone Call activity / Task base fields the adapter writes (FR-003
-        # non-approved base fields are part of the entity schema we POST against,
-        # not gated by `approved_update_field`).
-        if ekey == "phone_call_activity":
-            attrs |= {"subject", "description", "actualstart", "actualend", "activityid"}
-        if ekey == "task":
-            attrs |= {"subject", "description", "ownerid", "activityid"}
-        entities[eref.logical_name] = attrs
-    # Owner-override column on the queue row (out-of-mapping `fields` because it is
-    # the source field for `task_owner_override_field`, not a write target).
-    if mapping.task_owner_override_field:
-        entities["medx_callqueueitem"].add(mapping.task_owner_override_field)
-    entities["account"] = {"accountid", "name"}
-    entities["systemuser"] = {"systemuserid", "isdisabled"}
-    entities["team"] = {"teamid"}
-    return entities
-
-
-def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
-    entity_sets = {
-        eref.logical_name: eref.entity_set_name
-        for eref in mapping.entities.values()
-        if eref.entity_set_name
-    }
-    entity_sets.update({"systemuser": "systemusers", "team": "teams"})
-    return entity_sets
-
-
-def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
-    out: dict[tuple[str, str], set[int]] = {}
-    for entry in mapping.option_sets.values():
-        field_ref = mapping.fields.get(entry.field)
-        if field_ref is None or field_ref.entity not in mapping.entities:
-            continue
-        entity_logical = mapping.entities[field_ref.entity].logical_name
-        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
-    return out
-
-
-def _fake(mapping: DataverseMapping, records: dict[str, list[dict]]) -> DataverseFake:
-    return DataverseFake(
-        entities=_entities(mapping),
-        records=records,
-        option_sets=_option_sets(mapping),
-        entity_sets=_entity_sets(mapping),
-    )
 
 
 def _seed_queue_row(records: dict[str, list[dict]], override_owner: str | None = None) -> None:
@@ -186,7 +127,7 @@ def _adapter(
 ) -> tuple[DataverseWriteBackAdapter, DataverseFake]:
     mapping = load_mapping(_MAPPING_FIXTURE)
     _seed_default_owners(records)
-    fake = _fake(mapping, records)
+    fake = fake_for_mapping(mapping, records)
     adapter = DataverseWriteBackAdapter(
         conn=conn,
         client=fake.client(_RETRY),
@@ -440,7 +381,7 @@ def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Conn
     _seed_queue_row(records)  # no override
     # Deliberately do NOT seed the default systemuser/team — _seed_default_owners
     # would add it, so build the fake directly here.
-    fake = _fake(mapping, records)
+    fake = fake_for_mapping(mapping, records)
     adapter = DataverseWriteBackAdapter(
         conn=tmp_state_db,
         client=fake.client(_RETRY),

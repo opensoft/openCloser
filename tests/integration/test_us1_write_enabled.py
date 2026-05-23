@@ -27,7 +27,6 @@ from opencloser.models import (
     ArtifactsConfig,
     CallWindowConfig,
     DataverseConfig,
-    DataverseMapping,
     Disposition,
     EligibilityConfig,
     PersonaConfig,
@@ -42,6 +41,7 @@ from opencloser.models import (
 )
 from opencloser.slice2.runner import run_one_crm_item
 from tests.fixtures.dataverse.fake import DataverseFake
+from tests.fixtures.dataverse.helpers import fake_for_mapping
 
 pytestmark = pytest.mark.integration
 
@@ -78,60 +78,6 @@ def _slice2_config() -> Slice2Config:
         retry=RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0),
         task_owners=TaskOwnersConfig(callback=_OWNER_CALLBACK, review=_OWNER_REVIEW),
         redaction=RedactionPolicyConfig(policy="regex", retention="full", patterns=[]),
-    )
-
-
-def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
-    entities: dict[str, set[str]] = {}
-    for ekey, eref in mapping.entities.items():
-        primary_id = eref.primary_id or f"{eref.logical_name}id"
-        attrs = {primary_id}
-        for field in mapping.fields.values():
-            if field.entity != ekey:
-                continue
-            attrs.add(field.logical_name)
-            if field.type == "lookup":
-                attrs.add(f"_{field.logical_name}_value")
-        if ekey == "phone_call_activity":
-            attrs |= {"subject", "description", "actualstart", "actualend", "activityid"}
-        if ekey == "task":
-            attrs |= {"subject", "description", "ownerid", "activityid"}
-        entities[eref.logical_name] = attrs
-    if mapping.task_owner_override_field:
-        entities["medx_callqueueitem"].add(mapping.task_owner_override_field)
-    entities["account"] = {"accountid", "name"}
-    entities["systemuser"] = {"systemuserid", "isdisabled"}
-    entities["team"] = {"teamid"}
-    return entities
-
-
-def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
-    entity_sets = {
-        eref.logical_name: eref.entity_set_name
-        for eref in mapping.entities.values()
-        if eref.entity_set_name
-    }
-    entity_sets.update({"systemuser": "systemusers", "team": "teams"})
-    return entity_sets
-
-
-def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
-    out: dict[tuple[str, str], set[int]] = {}
-    for entry in mapping.option_sets.values():
-        field_ref = mapping.fields.get(entry.field)
-        if field_ref is None or field_ref.entity not in mapping.entities:
-            continue
-        entity_logical = mapping.entities[field_ref.entity].logical_name
-        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
-    return out
-
-
-def _fake(mapping: DataverseMapping, records: dict[str, list[dict]]) -> DataverseFake:
-    return DataverseFake(
-        entities=_entities(mapping),
-        records=records,
-        option_sets=_option_sets(mapping),
-        entity_sets=_entity_sets(mapping),
     )
 
 
@@ -202,7 +148,7 @@ def test_us1_interested_callback_requested_writes_full_loop(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = _fake(mapping, _seed())
+    fake = fake_for_mapping(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -271,7 +217,7 @@ def test_us1_interested_email_captured_marks_completed(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = _fake(mapping, _seed())
+    fake = fake_for_mapping(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -289,7 +235,7 @@ def test_us1_needs_human_review_writes_review_task(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = _fake(mapping, _seed())
+    fake = fake_for_mapping(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -311,7 +257,7 @@ def test_us1_do_not_call_sets_dnc_and_emits_no_task(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = _fake(mapping, _seed())
+    fake = fake_for_mapping(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -338,7 +284,7 @@ def test_us1_blocked_by_dnc_does_not_place_call(
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
     # status=3 (blocked) so the eligibility evaluator rejects rule (f).
-    fake = _fake(mapping, _seed(status=3))
+    fake = fake_for_mapping(mapping, _seed(status=3))
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -366,7 +312,7 @@ def test_us1_non_e164_phone_records_warning(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = _fake(mapping, _seed(phone="555-1234"))
+    fake = fake_for_mapping(mapping, _seed(phone="555-1234"))
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -391,7 +337,7 @@ def test_us1_empty_queue_is_clean_noop(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = _fake(mapping, {"account": [], "medx_callqueueitem": []})
+    fake = fake_for_mapping(mapping, {"account": [], "medx_callqueueitem": []})
     # The runner accepts a transport fixture path even though it will not be used.
     report = run_one_crm_item(
         selector=ExplicitId("does-not-exist"),

@@ -19,6 +19,15 @@ from opencloser.crm.dataverse.queue_loader import (
 )
 from opencloser.models import CallableStatus, DataverseMapping, RetryConfig
 from tests.fixtures.dataverse.fake import DataverseFake
+from tests.fixtures.dataverse.helpers import (
+    entity_attributes as _entities,
+)
+from tests.fixtures.dataverse.helpers import (
+    entity_sets as _entity_sets,
+)
+from tests.fixtures.dataverse.helpers import (
+    option_sets as _option_sets,
+)
 
 _MAPPING = load_mapping(Path(__file__).parents[1] / "fixtures/dataverse/dataverse_mapping.json")
 _RETRY = RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0)
@@ -27,53 +36,6 @@ _NOW = "2026-05-22T16:00:00.000Z"
 _ACCOUNT_GUID = "a-0001"
 _QUEUE_GUID = "q-0001"
 _ACCOUNT = {"accountid": _ACCOUNT_GUID, "name": "Sunage ALF of Davis"}
-
-
-def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
-    """Build a complete fake entity/attribute map from a mapping artifact.
-
-    For Dataverse lookup columns, both the navigation property (the bare logical
-    name) AND the `_<logical>_value` computed property are real attributes in a
-    live environment — the loader reads/filters via the latter, so the fake's
-    attribute set must include it (Codex review on PR #3).
-    """
-    entities: dict[str, set[str]] = {}
-    for ekey, eref in mapping.entities.items():
-        attrs = {eref.primary_id} if eref.primary_id else set()
-        for f in mapping.fields.values():
-            if f.entity != ekey:
-                continue
-            attrs.add(f.logical_name)
-            if f.type == "lookup":
-                attrs.add(f"_{f.logical_name}_value")
-        entities[eref.logical_name] = attrs
-    # Ensure the account table is present even if a test deletes its mapping.
-    entities.setdefault("account", set()).update({"accountid", "name"})
-    return entities
-
-
-def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
-    """Build the fake's record-collection alias map (logical_name → entity_set_name)
-    from a mapping artifact. Tests that exercise record CRUD must pass this so the
-    fake recognises the entity-set URLs the loader/adapter emit."""
-    return {
-        eref.logical_name: eref.entity_set_name
-        for eref in mapping.entities.values()
-        if eref.entity_set_name
-    }
-
-
-def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
-    """Build the fake's option-set table — (entity_logical, attr_logical) -> set of
-    integer values — from a mapping artifact's `option_sets` section."""
-    out: dict[tuple[str, str], set[int]] = {}
-    for entry in mapping.option_sets.values():
-        field_ref = mapping.fields.get(entry.field)
-        if field_ref is None or field_ref.entity not in mapping.entities:
-            continue
-        entity_logical = mapping.entities[field_ref.entity].logical_name
-        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
-    return out
 
 
 def _queue_record(

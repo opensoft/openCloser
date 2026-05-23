@@ -59,6 +59,9 @@ _TASK_EXCLUDED_DISPOSITIONS: frozenset[Disposition] = frozenset(
         Disposition.BLOCKED,
     }
 )
+_ODATA_FILTER = "$filter"
+_ODATA_SELECT = "$select"
+_ODATA_TOP = "$top"
 
 
 class DataverseWriteBackError(RuntimeError):
@@ -401,11 +404,11 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    "$filter": (
+                    _ODATA_FILTER: (
                         f"{idempotency_field} eq {odata_string_literal(idempotency_value)}"
                     ),
-                    "$select": primary_id,
-                    "$top": "1",
+                    _ODATA_SELECT: primary_id,
+                    _ODATA_TOP: "1",
                 },
             )
             .json()
@@ -437,9 +440,9 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    "$filter": f"{primary_id} eq {queue_item_id}",
-                    "$select": last_session_field,
-                    "$top": "1",
+                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_SELECT: last_session_field,
+                    _ODATA_TOP: "1",
                 },
             )
             .json()
@@ -629,9 +632,9 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    "$filter": f"{primary_id} eq {queue_item_id}",
-                    "$select": override_field,
-                    "$top": "1",
+                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_SELECT: override_field,
+                    _ODATA_TOP: "1",
                 },
             )
             .json()
@@ -668,9 +671,9 @@ class DataverseWriteBackAdapter:
                     self._client.get(
                         entity_set,
                         params={
-                            "$filter": f"{primary_id} eq {owner_id}{extra_filter}",
-                            "$select": primary_id,
-                            "$top": "1",
+                            _ODATA_FILTER: f"{primary_id} eq {owner_id}{extra_filter}",
+                            _ODATA_SELECT: primary_id,
+                            _ODATA_TOP: "1",
                         },
                     )
                     .json()

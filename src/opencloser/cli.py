@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from pydantic import ValidationError
 
 from opencloser.core.clock import SystemClock
 from opencloser.core.config import (
@@ -243,7 +242,7 @@ def discover_crm(
     """
     try:
         slice2_config = load_slice2_config(slice2_config_path)
-    except (FileNotFoundError, ValueError, ValidationError) as exc:
+    except (FileNotFoundError, ValueError) as exc:
         typer.echo(f"error:       could not load {slice2_config_path}: {exc}", err=True)
         raise typer.Exit(code=2) from None
 
@@ -350,49 +349,12 @@ def run_crm(
         )
         raise typer.Exit(code=2)
 
-    # Load configs before building the selector so `--next-ready` can fall back
-    # to the configured `[run].campaign` when `--campaign` is omitted.
-    try:
-        slice1_config = load_config(config_path)
-        slice2_config = load_slice2_config(slice2_config_path)
-    except (FileNotFoundError, ValueError, ValidationError) as exc:
-        typer.echo(f"error:       config load failed: {exc}", err=True)
-        raise typer.Exit(code=2) from None
-
-    if queue_item_id is not None and not _GUID_RE.match(queue_item_id):
-        typer.echo(
-            f"error:       --queue-item-id {queue_item_id!r} is not a valid "
-            "Dataverse GUID (expected 8-4-4-4-12 hex digits, e.g. "
-            "22222222-2222-2222-2222-222222222222).",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    effective_campaign = campaign or slice2_config.run.campaign
-    selector = _build_selector(
+    slice1_config, slice2_config = _load_run_crm_configs(config_path, slice2_config_path)
+    selector = _build_run_crm_selector(
         queue_item_id=queue_item_id,
         next_ready=next_ready,
-        campaign=effective_campaign,
+        campaign=campaign or slice2_config.run.campaign,
     )
-    if selector is None:
-        typer.echo(
-            "error:       provide exactly one of --queue-item-id or --next-ready",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    # `--next-ready` requires a non-empty campaign so the queue-loader's
-    # selector carries the scope the contract demands (cli-slice2.md). The
-    # loader's NextReady path filters by `queue.campaign` when the mapping
-    # carries that field, and raises `QueueLoadError` when it doesn't — this
-    # CLI gate just turns a missing operator argument into a clean exit code
-    # instead of a deeper failure.
-    if next_ready and not effective_campaign:
-        typer.echo(
-            "error:       --next-ready requires --campaign (or a non-empty "
-            "[run].campaign in slice2.toml).",
-            err=True,
-        )
-        raise typer.Exit(code=2)
 
     try:
         secrets = load_dataverse_secrets()
@@ -420,6 +382,58 @@ def run_crm(
         client.close()
         token_provider.close()
 
+    _print_crm_report(report)
+
+    raise typer.Exit(code=_EXIT_CODE.get(report.exit_status, 2))
+
+
+def _load_run_crm_configs(config_path: Path, slice2_config_path: Path):
+    """Load both config files for `run-crm`, normalizing schema/file errors."""
+    try:
+        return load_config(config_path), load_slice2_config(slice2_config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(f"error:       config load failed: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+
+def _build_run_crm_selector(
+    *,
+    queue_item_id: str | None,
+    next_ready: bool,
+    campaign: str | None,
+) -> QueueSelector:
+    if queue_item_id is not None and not _GUID_RE.match(queue_item_id):
+        typer.echo(
+            f"error:       --queue-item-id {queue_item_id!r} is not a valid "
+            "Dataverse GUID (expected 8-4-4-4-12 hex digits, e.g. "
+            "22222222-2222-2222-2222-222222222222).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    selector = _build_selector(
+        queue_item_id=queue_item_id,
+        next_ready=next_ready,
+        campaign=campaign,
+    )
+    if selector is None:
+        typer.echo(
+            "error:       provide exactly one of --queue-item-id or --next-ready",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    if next_ready and not campaign:
+        typer.echo(
+            "error:       --next-ready requires --campaign (or a non-empty "
+            "[run].campaign in slice2.toml).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return selector
+
+
+def _print_crm_report(report) -> None:
     typer.echo(f"exit_status:           {report.exit_status}")
     if report.session_id:
         typer.echo(f"session_id:            {report.session_id}")
@@ -435,8 +449,6 @@ def run_crm(
             typer.echo(f"  {w.code}: {w.message}")
     if report.message:
         typer.echo(f"message:               {report.message}")
-
-    raise typer.Exit(code=_EXIT_CODE.get(report.exit_status, 2))
 
 
 def _build_selector(

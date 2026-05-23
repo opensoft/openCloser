@@ -85,6 +85,12 @@ class CrmRunReport:
     message: str | None = None
 
 
+@dataclass(frozen=True)
+class _ReadinessResult:
+    translator: MappingTranslator
+    metadata_report: MetadataVerificationReport
+
+
 def run_one_crm_item(
     selector: QueueSelector,
     *,
@@ -106,86 +112,31 @@ def run_one_crm_item(
     clk = clock or SystemClock()
     persona = persona or ALFAppointmentSetterPersona()
 
-    # Persona-version gate — the orchestrator hands `persona.version` to every
-    # write-back payload (`PhoneCallActivityPayload`, `TaskPayload`), so running
-    # against a mismatched persona silently produces records tagged with a
-    # different version than the operator configured. The Slice 1 CLI's run-one
-    # checks this and the Slice 2 runner now mirrors that fail-fast behavior.
-    if persona.version != slice1_config.persona.version:
-        return CrmRunReport(
-            exit_status="blocked",
-            message=(
-                f"persona version mismatch: slice1.toml requires "
-                f"{slice1_config.persona.version!r} but the running persona is "
-                f"{persona.version!r}"
-            ),
-        )
+    version_report = _persona_version_mismatch_report(persona, slice1_config)
+    if version_report is not None:
+        return version_report
 
-    # 1) Readiness — load + validate the mapping artifact, then verify live metadata.
-    try:
-        mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
-    except MappingError as exc:
-        return CrmRunReport(exit_status="blocked", message=f"mapping artifact error: {exc}")
-    if not mapping.meta.approved:
-        return CrmRunReport(
-            exit_status="blocked",
-            message=(
-                f"mapping artifact {slice2_config.dataverse.mapping_artifact!r} is not approved; "
-                "re-run `discover-crm` and have a reviewer flip _meta.approved to true"
-            ),
-        )
-    translator = MappingTranslator(mapping)
-    try:
-        report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
-    except (DataverseError, MetadataError) as exc:
-        # An unreachable Dataverse (auth failure, 5xx, timeout) or unverifiable
-        # metadata at startup is operator-visible-blocked rather than an unhandled
-        # exception. The CLI prints the message and exits with the documented
-        # `blocked` exit code.
-        return CrmRunReport(
-            exit_status="blocked",
-            message=f"metadata verification failed: {exc}",
-        )
-    if not report.ok:
-        return CrmRunReport(
-            exit_status="blocked",
-            message="metadata verification failed: " + "; ".join(report.missing),
-            metadata_report=report,
-        )
+    readiness = _verify_readiness(slice2_config, client, clk)
+    if isinstance(readiness, CrmRunReport):
+        return readiness
+    translator = readiness.translator
+    report = readiness.metadata_report
 
-    # 2) Load the queue item. Any mapping/option-set/transient failure surfaces as a
-    # structured `failed` report instead of an unhandled exception. `ValidationError`
-    # is included because `loader.load(...)` constructs a `QueueItem` from the
-    # Dataverse row, and a schema-corrupted row (e.g. a negative `attempt_count`
-    # the CHECK clause would also reject) surfaces from there.
-    loader = DataverseQueueLoader(
-        client,
-        translator,
-        callable_status=slice2_config.dataverse.callable_status,
+    queue_item_result = _load_dataverse_queue_item(
+        selector=selector,
+        client=client,
+        translator=translator,
+        slice2_config=slice2_config,
+        metadata_report=report,
     )
-    try:
-        queue_item = loader.load(selector)
-    except (MappingError, QueueLoadError, DataverseError, ValidationError) as exc:
-        return CrmRunReport(exit_status="failed", message=f"queue loader error: {exc}")
-    if queue_item is None:
-        return CrmRunReport(
-            exit_status="no-callable-item",
-            metadata_report=report,
-            message="no callable queue item",
-        )
+    if isinstance(queue_item_result, CrmRunReport):
+        return queue_item_result
+    queue_item = queue_item_result
 
     # 3) FR-034 — non-E.164 phone-quality warning. Recorded into the runner report and
     # the queue-status payload's `queue.last_error` column (via the adapter; see
     # `_compose_last_error`), without changing the exit status.
-    runner_warnings: list[DataQualityWarning] = []
-    if queue_item.phone_number and not _E164_RE.match(queue_item.phone_number):
-        runner_warnings.append(
-            DataQualityWarning(
-                code="non_e164_phone",
-                field="queue.phone",
-                message=f"queue item {queue_item.queue_item_id!r} phone is not E.164",
-            )
-        )
+    runner_warnings = _phone_quality_warnings(queue_item)
 
     # 4) Stage the queue row locally so the unchanged orchestrator can read it.
     _stage_queue_item(conn, queue_item)
@@ -266,6 +217,108 @@ def run_one_crm_item(
         metadata_report=report,
         warnings=adapter.warnings(),
     )
+
+
+def _persona_version_mismatch_report(
+    persona: Persona, slice1_config: SliceConfig
+) -> CrmRunReport | None:
+    # Persona-version gate — the orchestrator hands `persona.version` to every
+    # write-back payload (`PhoneCallActivityPayload`, `TaskPayload`), so running
+    # against a mismatched persona silently produces records tagged with a
+    # different version than the operator configured. The Slice 1 CLI's run-one
+    # checks this and the Slice 2 runner mirrors that fail-fast behavior.
+    if persona.version == slice1_config.persona.version:
+        return None
+    return CrmRunReport(
+        exit_status="blocked",
+        message=(
+            f"persona version mismatch: slice1.toml requires "
+            f"{slice1_config.persona.version!r} but the running persona is "
+            f"{persona.version!r}"
+        ),
+    )
+
+
+def _verify_readiness(
+    slice2_config: Slice2Config,
+    client: DataverseClient,
+    clk: Clock,
+) -> _ReadinessResult | CrmRunReport:
+    # 1) Readiness — load + validate the mapping artifact, then verify live metadata.
+    try:
+        mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
+    except MappingError as exc:
+        return CrmRunReport(exit_status="blocked", message=f"mapping artifact error: {exc}")
+    if not mapping.meta.approved:
+        return CrmRunReport(
+            exit_status="blocked",
+            message=(
+                f"mapping artifact {slice2_config.dataverse.mapping_artifact!r} is not approved; "
+                "re-run `discover-crm` and have a reviewer flip _meta.approved to true"
+            ),
+        )
+    translator = MappingTranslator(mapping)
+    try:
+        report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
+    except (DataverseError, MetadataError) as exc:
+        # An unreachable Dataverse (auth failure, 5xx, timeout) or unverifiable
+        # metadata at startup is operator-visible-blocked rather than an unhandled
+        # exception. The CLI prints the message and exits with the documented
+        # `blocked` exit code.
+        return CrmRunReport(
+            exit_status="blocked",
+            message=f"metadata verification failed: {exc}",
+        )
+    if not report.ok:
+        return CrmRunReport(
+            exit_status="blocked",
+            message="metadata verification failed: " + "; ".join(report.missing),
+            metadata_report=report,
+        )
+    return _ReadinessResult(translator=translator, metadata_report=report)
+
+
+def _load_dataverse_queue_item(
+    *,
+    selector: QueueSelector,
+    client: DataverseClient,
+    translator: MappingTranslator,
+    slice2_config: Slice2Config,
+    metadata_report: MetadataVerificationReport,
+) -> QueueItem | CrmRunReport:
+    # 2) Load the queue item. Any mapping/option-set/transient failure surfaces as a
+    # structured `failed` report instead of an unhandled exception. `ValidationError`
+    # is included because `loader.load(...)` constructs a `QueueItem` from the
+    # Dataverse row, and a schema-corrupted row (e.g. a negative `attempt_count`
+    # the CHECK clause would also reject) surfaces from there.
+    loader = DataverseQueueLoader(
+        client,
+        translator,
+        callable_status=slice2_config.dataverse.callable_status,
+    )
+    try:
+        queue_item = loader.load(selector)
+    except (MappingError, QueueLoadError, DataverseError, ValidationError) as exc:
+        return CrmRunReport(exit_status="failed", message=f"queue loader error: {exc}")
+    if queue_item is None:
+        return CrmRunReport(
+            exit_status="no-callable-item",
+            metadata_report=metadata_report,
+            message="no callable queue item",
+        )
+    return queue_item
+
+
+def _phone_quality_warnings(queue_item: QueueItem) -> list[DataQualityWarning]:
+    if not queue_item.phone_number or _E164_RE.match(queue_item.phone_number):
+        return []
+    return [
+        DataQualityWarning(
+            code="non_e164_phone",
+            field="queue.phone",
+            message=f"queue item {queue_item.queue_item_id!r} phone is not E.164",
+        )
+    ]
 
 
 def _terminal_run_status(report: RunReport) -> RunStatus:
