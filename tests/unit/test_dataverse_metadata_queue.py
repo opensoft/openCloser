@@ -344,6 +344,63 @@ def test_load_next_ready_rejects_unsafe_campaign_token() -> None:
         loader.load(NextReady("bad') or (1 eq 1"))
 
 
+def test_load_next_ready_rejects_empty_campaign_when_mapped() -> None:
+    """When the mapping defines `queue.campaign`, an empty campaign selector would
+    silently widen across all campaigns; reject it instead (Codex review on PR #3)."""
+    loader = _loader(
+        {"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")]}
+    )
+    with pytest.raises(QueueLoadError, match="non-empty campaign"):
+        loader.load(NextReady(""))
+
+
+def test_load_next_ready_quotes_string_typed_campaign_field() -> None:
+    """When `queue.campaign` is mapped as a plain string column (not a lookup), the
+    filter RHS must be `'value'`, not a bare token — otherwise the OData predicate
+    is invalid (Codex review on PR #3)."""
+    mapping = _MAPPING.model_copy(deep=True)
+    # Convert the campaign field from lookup → string in this mapping copy so the
+    # type-aware quoting branch is exercised.
+    mapping.fields["queue.campaign"] = mapping.fields["queue.campaign"].model_copy(
+        update={"type": "string", "lookup_target": None}
+    )
+    # Mirror that on the seeded row: a string-typed campaign lives under the bare
+    # logical name (no `_<logical>_value` for non-lookups).
+    row = _queue_record(next_at="2026-05-22T16:00:00.000Z")
+    row.pop("_medx_campaignid_value", None)
+    row["medx_campaignid"] = "alf-q2-davis"
+    fake = DataverseFake(
+        entities=_entities(mapping),
+        records={"medx_callqueueitem": [row], "account": [_ACCOUNT]},
+        option_sets=_option_sets(mapping),
+        entity_sets=_entity_sets(mapping),
+    )
+    loader = DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
+    item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None and item.queue_item_id == _QUEUE_GUID
+
+
+def test_verify_succeeds_when_option_set_is_only_a_status_attribute() -> None:
+    """A Dataverse `Status` attribute exposes its OptionSet under the
+    StatusAttributeMetadata cast, not the Picklist cast. `_option_set_values` MUST
+    fall back to Status when Picklist 404s, otherwise mapped status fields would be
+    reported as missing on every verify (Codex review on PR #3)."""
+    picklist_only = _option_sets(_MAPPING)
+    status_only = {
+        ("medx_callqueueitem", "medx_callstatus"): picklist_only.pop(
+            ("medx_callqueueitem", "medx_callstatus")
+        )
+    }
+    fake = DataverseFake(
+        entities=_entities(_MAPPING),
+        option_sets=picklist_only,  # no Picklist for medx_callstatus
+        status_option_sets=status_only,  # but Status carries the values
+    )
+    report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    assert report.ok is True
+    assert report.missing == []
+
+
 def test_load_next_ready_uses_lookup_value_property_for_campaign_filter() -> None:
     """Dataverse one-to-many filtering goes through the lookup's `_<logical>_value`
     computed property, not the bare logical name; otherwise live runs miss every

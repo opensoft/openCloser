@@ -17,24 +17,36 @@ class MetadataError(RuntimeError):
     """Raised when one-time discovery cannot confirm a mapped table or field (FR-002)."""
 
 
+# Option-set-bearing Dataverse attributes are exposed under one of several
+# metadata casts. Try them in order — Picklist is the most common, Status covers
+# `statuscode`-style columns whose mapping otherwise reports as missing-on-verify
+# even though the attribute exists (Codex review on PR #3).
+_OPTION_SET_METADATA_CASTS = (
+    "Microsoft.Dynamics.CRM.PicklistAttributeMetadata",
+    "Microsoft.Dynamics.CRM.StatusAttributeMetadata",
+)
+
+
 def _option_set_values(
     client: DataverseClient, entity_logical: str, attr_logical: str
 ) -> set[int] | None:
-    """Return the set of valid option-set integer values for a Dataverse picklist
-    attribute, or None when the attribute's picklist metadata cannot be fetched
-    (HTTP 404 — the attribute is missing or not a picklist)."""
-    try:
-        response = client.get(
-            f"EntityDefinitions(LogicalName='{entity_logical}')"
-            f"/Attributes(LogicalName='{attr_logical}')"
-            f"/Microsoft.Dynamics.CRM.PicklistAttributeMetadata"
-        )
-    except PermanentDataverseError as exc:
-        if exc.status_code == 404:
-            return None
-        raise
-    options = response.json().get("OptionSet", {}).get("Options", [])
-    return {opt["Value"] for opt in options if "Value" in opt}
+    """Return the set of valid option-set integer values for a Dataverse option-set
+    attribute (Picklist or Status), or None when no option-set metadata cast resolves
+    (HTTP 404 from each tried cast — the attribute is missing or not an option set)."""
+    for cast in _OPTION_SET_METADATA_CASTS:
+        try:
+            response = client.get(
+                f"EntityDefinitions(LogicalName='{entity_logical}')"
+                f"/Attributes(LogicalName='{attr_logical}')"
+                f"/{cast}"
+            )
+        except PermanentDataverseError as exc:
+            if exc.status_code == 404:
+                continue  # try the next option-set metadata cast
+            raise
+        options = response.json().get("OptionSet", {}).get("Options", [])
+        return {opt["Value"] for opt in options if "Value" in opt}
+    return None
 
 
 def _entity_attributes(client: DataverseClient, logical_name: str) -> set[str] | None:

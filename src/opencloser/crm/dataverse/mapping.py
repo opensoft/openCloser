@@ -23,15 +23,22 @@ class MappingError(RuntimeError):
 def load_mapping(path: str | Path) -> DataverseMapping:
     """Load and validate the Dataverse mapping artifact (FR-004).
 
-    Raises `MappingError` for every load-time failure — file missing, JSON malformed,
-    or schema invalid — so callers can rely on a single documented exception type
+    Raises `MappingError` for every load-time failure — file missing, unreadable
+    (permission denied / decode error / other OSError), JSON malformed, or schema
+    invalid — so callers can rely on a single documented exception type
     (Codex review on PR #3).
     """
     artifact = Path(path)
     if not artifact.exists():
         raise MappingError(f"mapping artifact not found: {artifact}")
     try:
-        raw = json.loads(artifact.read_text(encoding="utf-8"))
+        text = artifact.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MappingError(
+            f"mapping artifact could not be read ({type(exc).__name__}): {exc}"
+        ) from exc
+    try:
+        raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise MappingError(f"mapping artifact is not valid JSON: {exc}") from exc
     try:

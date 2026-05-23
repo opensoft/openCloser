@@ -104,10 +104,13 @@ class DataverseTokenProvider:
 
 # Auth-aware error wrappers — keep the Entra ID/OAuth source visible in messages so
 # operators don't mis-diagnose a token-endpoint outage as a Dataverse Web API outage
-# (Copilot review on PR #3). Same transient/permanent classification as the Dataverse
-# Web API path; only the message changes.
+# (Copilot review on PR #3). The transient/permanent split mirrors
+# `errors.wrap_transport_error` exactly: only timeouts and network failures are
+# transient; misconfiguration-class transport errors (UnsupportedProtocol,
+# ProtocolError, ProxyError) are permanent so the retry budget is not burned on
+# impossible requests (Copilot follow-up review on PR #3).
 def _wrap_auth_transport_error(exc: httpx.HTTPError, endpoint: str) -> DataverseError:
-    if isinstance(exc, httpx.TransportError):
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
         return TransientDataverseError(
             f"Entra ID token endpoint unreachable ({endpoint}): {exc!r}"
         )

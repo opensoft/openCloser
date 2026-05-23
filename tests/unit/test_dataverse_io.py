@@ -144,6 +144,19 @@ def test_token_response_null_access_token_raises_permanent() -> None:
         provider.token(now=0.0)
 
 
+def test_token_misconfig_transport_error_is_permanent_no_retry() -> None:
+    """A misconfiguration-class transport error at the token endpoint MUST classify
+    as permanent — otherwise the retry budget is burned on an impossible request.
+    Mirrors the F11a narrowing of `errors.wrap_transport_error` (Copilot follow-up
+    review on PR #3)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.UnsupportedProtocol("bad scheme")
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    with pytest.raises(errors.PermanentDataverseError, match="Entra ID token endpoint"):
+        provider.token(now=0.0)
+
+
 def test_token_response_non_numeric_expires_in_raises_permanent() -> None:
     """A malformed `expires_in` must surface as a typed PermanentDataverseError so
     callers don't see a raw ValueError/TypeError escape the auth layer (Codex PR #3 review)."""
@@ -357,6 +370,15 @@ def test_load_mapping_schema_invalid_wraps_validation_error(tmp_path: Path) -> N
     # Valid JSON but missing the required `_meta` block — Pydantic would raise here.
     bad.write_text('{"entities": {}}', encoding="utf-8")
     with pytest.raises(MappingError, match="schema validation"):
+        load_mapping(bad)
+
+
+def test_load_mapping_unreadable_bytes_wrap_as_mapping_error(tmp_path: Path) -> None:
+    """An undecodable file (raw bytes that aren't valid UTF-8) must surface as
+    MappingError, not a raw UnicodeDecodeError (Codex review on PR #3)."""
+    bad = tmp_path / "binary.json"
+    bad.write_bytes(b"\xff\xfe\xff garbage")
+    with pytest.raises(MappingError, match="could not be read"):
         load_mapping(bad)
 
 

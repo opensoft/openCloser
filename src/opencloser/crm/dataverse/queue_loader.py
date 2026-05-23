@@ -35,6 +35,28 @@ def _lookup_value_name(field_ref: DataverseFieldRef) -> str:
         return f"_{field_ref.logical_name}_value"
     return field_ref.logical_name
 
+
+# Field types whose `$filter` RHS is a bare literal in OData (GUID, integer, boolean).
+# Everything else is treated as a quoted string ('value'). Adding more types here
+# (e.g. `datetime`) is a deliberate decision — datetimes need their own RFC3339 form.
+_BARE_LITERAL_TYPES = frozenset({"lookup", "integer", "boolean"})
+
+
+def _odata_value(field_type: str, value: object) -> str:
+    """Render `value` as an OData `$filter` RHS appropriate for `field_type`.
+
+    Lookups (`_<name>_value` GUIDs), integers, and booleans go in bare; everything
+    else (including the default `string` case) is wrapped in single quotes — the
+    OData literal form Dataverse requires. The value is always run through
+    `_odata_token` first, so anything carrying reserved characters / quotes is
+    rejected before it can break the filter or inject extra clauses (Codex review
+    on PR #3).
+    """
+    token = _odata_token(value)
+    if field_type in _BARE_LITERAL_TYPES:
+        return token
+    return f"'{token}'"
+
 # Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we accept any
 # value matching this safe alphanumeric+dash+underscore pattern (which covers real
 # GUIDs and the test fixture ids) and reject anything containing OData reserved or
@@ -125,13 +147,22 @@ class DataverseQueueLoader:
             # the deployment maps one. A mapping without `queue.campaign` is treated as
             # a single-campaign queue table where this filter is unnecessary. When the
             # mapped campaign field is a Dataverse lookup, the filter LHS MUST be the
-            # `_<logical>_value` computed property — the bare logical name doesn't filter
-            # against lookups in real Dataverse (Codex review on PR #3).
+            # `_<logical>_value` computed property; the RHS quoting depends on the field
+            # type — GUID/int/bool are bare, strings are `'value'` (Codex review on PR #3).
             campaign_field_ref = self._optional_field("queue.campaign")
-            if campaign_field_ref and selector.campaign:
-                filter_lhs = _lookup_value_name(campaign_field_ref)
+            if campaign_field_ref is not None:
+                if not selector.campaign:
+                    # An empty/whitespace campaign with a mapped campaign field would
+                    # silently widen the query across all campaigns — almost always an
+                    # operator error. Fail explicitly so the cross-campaign read can't
+                    # happen by accident (Codex review on PR #3).
+                    raise QueueLoadError(
+                        "NextReady requires a non-empty campaign selector when the "
+                        "mapping defines `queue.campaign`"
+                    )
                 filter_clauses.append(
-                    f"{filter_lhs} eq {_odata_token(selector.campaign)}"
+                    f"{_lookup_value_name(campaign_field_ref)} eq "
+                    f"{_odata_value(campaign_field_ref.type, selector.campaign)}"
                 )
             rows = self._query(
                 entity_set,

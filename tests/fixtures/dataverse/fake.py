@@ -26,10 +26,12 @@ from opencloser.models import RetryConfig
 
 _API_PREFIX = "/api/data/v9.2/"
 _ENTITY_DEF_RE = re.compile(r"^EntityDefinitions\(LogicalName='([^']+)'\)(/Attributes)?$")
-_PICKLIST_RE = re.compile(
+# Match Picklist OR Status metadata casts — Dataverse exposes option-set columns
+# under several derived types and the loader/verifier tries them in order.
+_OPTION_SET_META_RE = re.compile(
     r"^EntityDefinitions\(LogicalName='([^']+)'\)"
     r"/Attributes\(LogicalName='([^']+)'\)"
-    r"/Microsoft\.Dynamics\.CRM\.PicklistAttributeMetadata$"
+    r"/Microsoft\.Dynamics\.CRM\.(Picklist|Status)AttributeMetadata$"
 )
 _RECORD_RE = re.compile(r"^(\w+)\(([^)]+)\)$")
 
@@ -54,14 +56,20 @@ class DataverseFake:
         entities: dict[str, Iterable[str]],
         records: dict[str, list[dict[str, Any]]] | None = None,
         option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
+        status_option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
         entity_sets: dict[str, str] | None = None,
         env_url: str = "https://fake.crm.dynamics.com",
     ) -> None:
         self.env_url = env_url
         self._entities = {name: set(attrs) for name, attrs in entities.items()}
         self._records = {name: [dict(r) for r in recs] for name, recs in (records or {}).items()}
-        # (entity_logical, attribute_logical) -> set of valid option-set integer values
-        self._option_sets = {k: set(v) for k, v in (option_sets or {}).items()}
+        # (entity_logical, attribute_logical) -> set of valid option-set integer values,
+        # keyed by metadata cast ('Picklist' or 'Status'). The loader/verifier tries
+        # casts in order and accepts the first hit (Codex review on PR #3).
+        self._option_sets_by_cast: dict[str, dict[tuple[str, str], set[int]]] = {
+            "Picklist": {k: set(v) for k, v in (option_sets or {}).items()},
+            "Status": {k: set(v) for k, v in (status_option_sets or {}).items()},
+        }
         # Record-URL collection-name → internal logical key. Real Dataverse uses the
         # entity-set name (e.g. `accounts`) for record CRUD URLs but the logical name
         # for metadata URLs; the fake accepts EITHER as a record-URL collection so
@@ -116,9 +124,14 @@ class DataverseFake:
         resource = path[len(_API_PREFIX) :]
         method = request.method.upper()
 
-        picklist = _PICKLIST_RE.match(resource)
-        if picklist is not None and method == "GET":
-            return self._handle_picklist_metadata(request, picklist.group(1), picklist.group(2))
+        option_set_meta = _OPTION_SET_META_RE.match(resource)
+        if option_set_meta is not None and method == "GET":
+            return self._handle_option_set_metadata(
+                request,
+                option_set_meta.group(1),
+                option_set_meta.group(2),
+                option_set_meta.group(3),  # 'Picklist' or 'Status'
+            )
 
         meta = _ENTITY_DEF_RE.match(resource)
         if meta is not None:
@@ -144,17 +157,19 @@ class DataverseFake:
             return httpx.Response(200, json={"value": value}, request=request)
         return httpx.Response(200, json={"LogicalName": logical_name}, request=request)
 
-    def _handle_picklist_metadata(
-        self, request: httpx.Request, entity_logical: str, attr_logical: str
+    def _handle_option_set_metadata(
+        self, request: httpx.Request, entity_logical: str, attr_logical: str, cast: str
     ) -> httpx.Response:
-        """Serve the OptionSet for an attribute (or 404 when the entity/attribute is
-        unknown or no option_set was registered for it)."""
+        """Serve the OptionSet for an attribute under the requested metadata cast
+        ('Picklist' or 'Status'). Returns 404 when the entity/attribute is unknown
+        OR when no option-set was registered for this cast — letting callers try the
+        next cast (Codex review on PR #3)."""
         if (
             entity_logical not in self._entities
             or attr_logical not in self._entities[entity_logical]
         ):
             return httpx.Response(404, request=request)
-        values = self._option_sets.get((entity_logical, attr_logical))
+        values = self._option_sets_by_cast[cast].get((entity_logical, attr_logical))
         if values is None:
             return httpx.Response(404, request=request)
         options = [{"Value": v} for v in sorted(values)]
