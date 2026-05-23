@@ -251,6 +251,68 @@ def test_validate_fixture_rejects_non_string_event_type(tmp_path: Path, bad_type
         validate_fixture(path)
 
 
+@pytest.mark.parametrize(
+    "bad_event_id",
+    [
+        42,  # int
+        None,  # null
+        ["e1"],  # list
+        {"id": "e1"},  # dict
+        True,  # bool
+    ],
+    ids=["int", "null", "list", "dict", "bool"],
+)
+def test_validate_fixture_rejects_non_string_event_id(tmp_path: Path, bad_event_id) -> None:
+    """FR-020 (defensive): a non-string ``event_id`` would raise pydantic.ValidationError
+    when ``event_stream`` constructs ``MockCallEvent`` — *after* the orchestrator has
+    already created the session row and incremented the attempt count, re-introducing
+    the partial-state problem the FR-019/FR-020 gate is meant to prevent."""
+    path = _write(
+        tmp_path / "bad_event_id.json",
+        json.dumps({"events": [{"event_id": bad_event_id, "type": "connected", "timestamp": _T}]}),
+    )
+    with pytest.raises(MalformedFixtureError, match="'event_id' must be a string"):
+        validate_fixture(path)
+
+
+@pytest.mark.parametrize(
+    "bad_timestamp",
+    [
+        "2026-05-19T17:00:00Z",  # missing milliseconds
+        "2026-05-19 17:00:00.000Z",  # space instead of 'T'
+        "2026-05-19T17:00:00.000+00:00",  # offset instead of 'Z'
+        "not a timestamp",  # gibberish
+        "",  # empty string
+        1234567890,  # not a string at all
+        None,  # null
+    ],
+    ids=["no_ms", "space_separator", "offset_not_Z", "gibberish", "empty", "int", "null"],
+)
+def test_validate_fixture_rejects_invalid_timestamp(tmp_path: Path, bad_timestamp) -> None:
+    """FR-020 (defensive): a timestamp not matching the canonical UtcMs schema would
+    raise pydantic.ValidationError mid-stream when MockCallEvent.received_at is
+    constructed — after partial state is already committed. Validate against the
+    canonical UtcMs TypeAdapter at pre-validation time."""
+    path = _write(
+        tmp_path / "bad_ts.json",
+        json.dumps(
+            {"events": [{"event_id": "e1", "type": "connected", "timestamp": bad_timestamp}]}
+        ),
+    )
+    with pytest.raises(MalformedFixtureError, match="'timestamp' is not a valid UTC-ms"):
+        validate_fixture(path)
+
+
+def test_validate_fixture_accepts_canonical_utc_ms_timestamp(tmp_path: Path) -> None:
+    """A canonical ``YYYY-MM-DDTHH:MM:SS.mmmZ`` timestamp passes validation."""
+    path = _write(
+        tmp_path / "ok_ts.json",
+        json.dumps({"events": [{"event_id": "e1", "type": "connected", "timestamp": _T}]}),
+    )
+    events = validate_fixture(path)
+    assert events[0]["timestamp"] == _T
+
+
 def test_validate_fixture_reports_first_malformed_event_index(tmp_path: Path) -> None:
     """A well-formed prefix followed by a malformed event is rejected; the error names
     the offending event's id (the first malformed one) for operator triage."""

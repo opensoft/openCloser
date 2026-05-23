@@ -18,8 +18,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from opencloser.core import ids
-from opencloser.models import EventType, MockCallEvent, QueueItem
+from opencloser.models import EventType, MockCallEvent, QueueItem, UtcMs
+
+# Validate timestamps against the canonical UtcMs schema (models.py §UtcMs) instead of
+# duplicating the regex — keeps the contract in one place if the pattern ever evolves.
+_UTC_MS_VALIDATOR: TypeAdapter[str] = TypeAdapter(UtcMs)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +120,29 @@ def validate_fixture(fixture_path: str | Path) -> list[dict[str, Any]]:
                 f"(event_id={raw_event.get('event_id')!r}): 'type' must be a string, "
                 f"got {type(raw_event['type']).__name__}"
             )
+        # ``event_id`` must be a string — MockCallEvent.event_id is ``str``, and a
+        # non-string value would raise pydantic.ValidationError mid-stream (event_stream
+        # constructs MockCallEvent per event), after the orchestrator has already
+        # created the session row and incremented the attempt count. Reject up-front.
+        if not isinstance(raw_event["event_id"], str):
+            raise MalformedFixtureError(
+                f"transport fixture {path.name!r}: event #{idx}: 'event_id' must be a "
+                f"string, got {type(raw_event['event_id']).__name__}"
+            )
+        # ``timestamp`` must match the canonical UtcMs schema (models.UtcMs) — same
+        # rationale: MockCallEvent.received_at is UtcMs, so any non-conforming value
+        # would raise ValidationError mid-stream after partial state is already
+        # committed. Validating against the TypeAdapter reuses the single source of
+        # truth instead of duplicating the regex here.
+        try:
+            _UTC_MS_VALIDATOR.validate_python(raw_event["timestamp"])
+        except ValidationError as exc:
+            raise MalformedFixtureError(
+                f"transport fixture {path.name!r}: event #{idx} "
+                f"(event_id={raw_event['event_id']!r}): 'timestamp' is not a valid "
+                f"UTC-ms timestamp (expected 'YYYY-MM-DDTHH:MM:SS.mmmZ'), "
+                f"got {raw_event['timestamp']!r}"
+            ) from exc
     return events
 
 
