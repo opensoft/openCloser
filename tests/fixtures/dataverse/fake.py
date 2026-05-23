@@ -26,6 +26,11 @@ from opencloser.models import RetryConfig
 
 _API_PREFIX = "/api/data/v9.2/"
 _ENTITY_DEF_RE = re.compile(r"^EntityDefinitions\(LogicalName='([^']+)'\)(/Attributes)?$")
+_PICKLIST_RE = re.compile(
+    r"^EntityDefinitions\(LogicalName='([^']+)'\)"
+    r"/Attributes\(LogicalName='([^']+)'\)"
+    r"/Microsoft\.Dynamics\.CRM\.PicklistAttributeMetadata$"
+)
 _RECORD_RE = re.compile(r"^([A-Za-z0-9_]+)\(([^)]+)\)$")
 
 
@@ -48,11 +53,14 @@ class DataverseFake:
         *,
         entities: dict[str, Iterable[str]],
         records: dict[str, list[dict[str, Any]]] | None = None,
+        option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
         env_url: str = "https://fake.crm.dynamics.com",
     ) -> None:
         self.env_url = env_url
         self._entities = {name: set(attrs) for name, attrs in entities.items()}
         self._records = {name: [dict(r) for r in recs] for name, recs in (records or {}).items()}
+        # (entity_logical, attribute_logical) -> set of valid option-set integer values
+        self._option_sets = {k: set(v) for k, v in (option_sets or {}).items()}
         self._fail_remaining = 0
         self._fail_status = 503
         self.created: list[tuple[str, dict[str, Any]]] = []  # (entity, record) — POST log
@@ -95,6 +103,10 @@ class DataverseFake:
         resource = path[len(_API_PREFIX) :]
         method = request.method.upper()
 
+        picklist = _PICKLIST_RE.match(resource)
+        if picklist is not None and method == "GET":
+            return self._handle_picklist_metadata(request, picklist.group(1), picklist.group(2))
+
         meta = _ENTITY_DEF_RE.match(resource)
         if meta is not None:
             return self._handle_metadata(request, meta.group(1), bool(meta.group(2)))
@@ -118,6 +130,24 @@ class DataverseFake:
             value = [{"LogicalName": attr} for attr in sorted(self._entities[logical_name])]
             return httpx.Response(200, json={"value": value}, request=request)
         return httpx.Response(200, json={"LogicalName": logical_name}, request=request)
+
+    def _handle_picklist_metadata(
+        self, request: httpx.Request, entity_logical: str, attr_logical: str
+    ) -> httpx.Response:
+        """Serve the OptionSet for an attribute (or 404 when the entity/attribute is
+        unknown or no option_set was registered for it)."""
+        if (
+            entity_logical not in self._entities
+            or attr_logical not in self._entities[entity_logical]
+        ):
+            return httpx.Response(404, request=request)
+        values = self._option_sets.get((entity_logical, attr_logical))
+        if values is None:
+            return httpx.Response(404, request=request)
+        options = [{"Value": v} for v in sorted(values)]
+        return httpx.Response(
+            200, json={"OptionSet": {"Options": options}}, request=request
+        )
 
     def _handle_query(self, request: httpx.Request, entity: str) -> httpx.Response:
         if entity not in self._entities:

@@ -40,6 +40,19 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     return entities
 
 
+def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
+    """Build the fake's option-set table — (entity_logical, attr_logical) -> set of
+    integer values — from a mapping artifact's `option_sets` section."""
+    out: dict[tuple[str, str], set[int]] = {}
+    for entry in mapping.option_sets.values():
+        field_ref = mapping.fields.get(entry.field)
+        if field_ref is None or field_ref.entity not in mapping.entities:
+            continue
+        entity_logical = mapping.entities[field_ref.entity].logical_name
+        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
+    return out
+
+
 def _queue_record(
     *,
     status: int = 0,
@@ -70,7 +83,7 @@ def _queue_record(
 
 
 def test_verify_ok_for_complete_metadata() -> None:
-    fake = DataverseFake(entities=_entities(_MAPPING))
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING))
     report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is True
     assert report.missing == []
@@ -80,7 +93,7 @@ def test_verify_ok_for_complete_metadata() -> None:
 def test_verify_reports_missing_entity() -> None:
     entities = _entities(_MAPPING)
     del entities["task"]  # the Task table is absent from this environment
-    report = verify(DataverseFake(entities=entities).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    report = verify(DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING)).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is False
     assert any("task" in item for item in report.missing)
 
@@ -88,22 +101,36 @@ def test_verify_reports_missing_entity() -> None:
 def test_verify_reports_missing_field() -> None:
     entities = _entities(_MAPPING)
     entities["medx_callqueueitem"].discard("medx_callstatus")  # status column not present
-    report = verify(DataverseFake(entities=entities).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    report = verify(DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING)).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is False
     assert any("queue.status" in item for item in report.missing)
+
+
+def test_verify_reports_option_set_value_mismatch() -> None:
+    """`verify` MUST check that every mapped option-set integer is present in the
+    live Dataverse picklist (contracts/metadata-discovery-verification.md), not just
+    that the field exists."""
+    option_sets = _option_sets(_MAPPING)
+    # Remove `ready` (0) from the medx_callstatus picklist so the mapping's
+    # queue_status.ready entry no longer matches a live value.
+    option_sets[("medx_callqueueitem", "medx_callstatus")].discard(0)
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=option_sets)
+    report = verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
+    assert report.ok is False
+    assert any("queue_status.ready" in m for m in report.missing)
 
 
 def test_verify_propagates_non_404_permanent_errors() -> None:
     """A 401/403/400 during metadata lookup is a real failure (auth/permission/bad
     request), not "entity missing" — `_entity_attributes` MUST propagate it."""
-    fake = DataverseFake(entities=_entities(_MAPPING))
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING))
     fake.fail_next(1, status=403)  # the first metadata call gets a 403 forbidden
     with pytest.raises(PermanentDataverseError):
         verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
 
 
 def test_discover_refreshes_and_requires_reapproval() -> None:
-    fake = DataverseFake(entities=_entities(_MAPPING))
+    fake = DataverseFake(entities=_entities(_MAPPING), option_sets=_option_sets(_MAPPING))
     refreshed = discover(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert refreshed.meta.discovered_at == _NOW
     assert refreshed.meta.approved is False  # a fresh discovery needs PR re-approval
@@ -113,7 +140,7 @@ def test_discover_refreshes_and_requires_reapproval() -> None:
 def test_discover_raises_when_metadata_unverifiable() -> None:
     entities = _entities(_MAPPING)
     entities["medx_callqueueitem"].discard("medx_donotcall")
-    fake = DataverseFake(entities=entities)
+    fake = DataverseFake(entities=entities, option_sets=_option_sets(_MAPPING))
     with pytest.raises(MetadataError, match=r"queue\.dnc"):
         discover(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
 
@@ -124,7 +151,11 @@ def test_discover_raises_when_metadata_unverifiable() -> None:
 
 
 def _loader(records: dict[str, list[dict]]) -> DataverseQueueLoader:
-    fake = DataverseFake(entities=_entities(_MAPPING), records=records)
+    fake = DataverseFake(
+        entities=_entities(_MAPPING),
+        records=records,
+        option_sets=_option_sets(_MAPPING),
+    )
     return DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(_MAPPING))
 
 
@@ -217,7 +248,11 @@ def test_load_next_ready_uses_configured_callable_status() -> None:
         ],
         "account": [_ACCOUNT],
     }
-    fake = DataverseFake(entities=_entities(_MAPPING), records=loader_args_in_progress)
+    fake = DataverseFake(
+        entities=_entities(_MAPPING),
+        records=loader_args_in_progress,
+        option_sets=_option_sets(_MAPPING),
+    )
     loader = DataverseQueueLoader(
         fake.client(_RETRY), MappingTranslator(_MAPPING), callable_status="in_progress"
     )
