@@ -179,10 +179,10 @@ def test_us5_orchestrator_rejects_malformed_fixture_with_no_state_mutations(
     fixture before writing any session, eligibility decision, attempt, idempotency
     key, mock-call event, or queue-status change.
 
-    The orchestrator's pre-session ``place_call`` gate is what makes this true — a
-    regression that moves session creation back ahead of ``place_call`` would surface
-    here as a non-empty ``sessions`` / ``eligibility_decisions`` table after the
-    expected ``MalformedFixtureError``.
+    The orchestrator's pre-session ``transport.pre_validate_fixture(...)`` hook is
+    what makes this true — a regression that drops that call (or moves session
+    creation back ahead of it) would surface here as a non-empty ``sessions`` /
+    ``eligibility_decisions`` table after the expected ``MalformedFixtureError``.
     """
     del case  # parametrization label only
     _seed_queue_item(tmp_state_db)

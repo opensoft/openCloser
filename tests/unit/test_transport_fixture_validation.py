@@ -227,6 +227,30 @@ def test_validate_fixture_rejects_non_dict_event(tmp_path: Path) -> None:
         validate_fixture(path)
 
 
+@pytest.mark.parametrize(
+    "bad_type",
+    [
+        ["connected"],  # list
+        {"name": "connected"},  # dict
+        42,  # int
+        None,  # null
+        True,  # bool
+    ],
+    ids=["list", "dict", "int", "null", "bool"],
+)
+def test_validate_fixture_rejects_non_string_event_type(tmp_path: Path, bad_type) -> None:
+    """FR-020 (defensive): a non-string ``type`` field would let ``EventType(...)`` raise
+    ``TypeError`` mid-stream — escaping ``event_stream``'s unknown-type handler (which
+    only catches ``ValueError``) and bypassing the FR-020 single-class rejection
+    contract. Reject at pre-validation time instead."""
+    path = _write(
+        tmp_path / "bad_type.json",
+        json.dumps({"events": [{"event_id": "e1", "type": bad_type, "timestamp": _T}]}),
+    )
+    with pytest.raises(MalformedFixtureError, match="'type' must be a string"):
+        validate_fixture(path)
+
+
 def test_validate_fixture_reports_first_malformed_event_index(tmp_path: Path) -> None:
     """A well-formed prefix followed by a malformed event is rejected; the error names
     the offending event's id (the first malformed one) for operator triage."""

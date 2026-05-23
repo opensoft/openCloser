@@ -153,7 +153,7 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 
 ### Implementation for User Story 5
 
-- [X] T035 [US5] Add `validate_fixture()` to `src/opencloser/transport/mock.py`, called inside `place_call` before any state mutation — raise `MalformedFixtureError` for invalid JSON, missing `events` array, an event missing `type`/`event_id`/`timestamp`, or a missing fixture file (FR-019/FR-020; contracts/transport-fixture-validation.md). This is the only permitted change to the transport module (FR-014).
+- [X] T035 [US5] Add `validate_fixture()` and `MalformedFixtureError` to `src/opencloser/transport/mock.py`, called inside `place_call` so a malformed fixture cannot reach the orchestrator's state-mutating path; add a side-effect-free `pre_validate_fixture(fixture_id)` hook to the `CallTransport` protocol (`src/opencloser/transport/base.py`) and have the orchestrator (`src/opencloser/core/orchestrator.py`) call it before session-row creation so a malformed fixture leaves no session row, no attempt consumed, and no CRM queue change (FR-019/FR-020; contracts/transport-fixture-validation.md). These three edits — mock.py, transport/base.py, and orchestrator.py — are the FR-014 allowed exception for fixture pre-validation; no other Slice-2-specific behavior is added to those modules.
 
 **Checkpoint**: GitHub issue #2 is resolved; malformed fixtures consume no attempt.
 

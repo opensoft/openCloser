@@ -105,6 +105,15 @@ def validate_fixture(fixture_path: str | Path) -> list[dict[str, Any]]:
                 f"(event_id={raw_event.get('event_id')!r}) is missing required field(s): "
                 f"{sorted(missing)}"
             )
+        # ``type`` must be a string — otherwise EventType(raw_event["type"]) would raise
+        # TypeError mid-stream (event_stream only catches ValueError for unknown types),
+        # escape the orchestrator, and bypass the FR-020 single-class rejection contract.
+        if not isinstance(raw_event["type"], str):
+            raise MalformedFixtureError(
+                f"transport fixture {path.name!r}: event #{idx} "
+                f"(event_id={raw_event.get('event_id')!r}): 'type' must be a string, "
+                f"got {type(raw_event['type']).__name__}"
+            )
     return events
 
 
