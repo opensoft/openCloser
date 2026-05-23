@@ -72,15 +72,24 @@ class DataverseQueueLoader:
             # Deterministic next-ready ordering (FR-008): earliest next_attempt_at,
             # then the stable primary id as tie-breaker.
             #
-            # Scope by `selector.campaign` when the mapping carries a `queue.campaign`
-            # field (contracts/dataverse-queue-loader.md). When the mapping omits the
-            # field the loader cannot translate the campaign to a Dataverse column,
-            # so the CLI gate in `run-crm` (which already requires a non-empty
-            # campaign for --next-ready) is the user-facing signal; the query stays
-            # campaign-agnostic for the unmapped case rather than blocking the run.
+            # Scope by `selector.campaign` per contracts/dataverse-queue-loader.md.
+            # A non-empty selector campaign WITHOUT a `queue.campaign` mapping is
+            # a hard error: in a multi-campaign environment, a campaign-agnostic
+            # query would pick a row from the wrong campaign and write back to
+            # the wrong record set. Failing fast here surfaces the missing
+            # mapping at the queue-load step instead of silently
+            # mis-targeting a write.
             clauses = [f"{status_field} eq {ready_value}"]
             campaign_field_ref = self._t.mapping.fields.get("queue.campaign")
-            if campaign_field_ref is not None and selector.campaign:
+            if selector.campaign:
+                if campaign_field_ref is None:
+                    raise QueueLoadError(
+                        "--next-ready selector requires a mapped `queue.campaign` "
+                        "field for campaign-scoped selection, but the mapping "
+                        "artifact does not include one. Add `queue.campaign` to "
+                        "dataverse_mapping.json (or select an explicit "
+                        "--queue-item-id)."
+                    )
                 campaign_field = campaign_field_ref.logical_name
                 clauses.append(f"{campaign_field} eq {odata_string_literal(selector.campaign)}")
             rows = self._query(

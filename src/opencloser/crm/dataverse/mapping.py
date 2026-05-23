@@ -28,7 +28,7 @@ _ENTITY_SET_OVERRIDES: dict[str, str] = {
     "activity": "activitypointers",
     "opportunity": "opportunities",
     "businessunit": "businessunits",
-    "currency": "transactioncurrencies",
+    "transactioncurrency": "transactioncurrencies",
 }
 
 

@@ -393,7 +393,11 @@ def test_owner_override_resolved_team_binds_to_teams(tmp_state_db: sqlite3.Conne
 
 def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Connection) -> None:
     """If the configured default owner cannot be verified as an active enabled user
-    or team, Task emission is blocked rather than writing an unverified id (FR-025)."""
+    or team, Task emission is blocked — surfaced as `DataverseWriteBackError`
+    (and a `crm_correlations(write_status=failed)` row + a warning) rather than
+    silently completing a run that should have produced a Task (FR-025)."""
+    from opencloser.crm.dataverse.adapter import DataverseWriteBackError
+
     mapping = load_mapping(_MAPPING_FIXTURE)
     _seed_local_state(tmp_state_db, Disposition.INTERESTED_CALLBACK_REQUESTED)
     records: dict[str, list[dict]] = {"account": [{"accountid": "a-0001", "name": "ALF"}]}
@@ -408,10 +412,18 @@ def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Conn
         task_owners=TaskOwnersConfig(callback="missing-owner-id", review="missing-review-id"),
     )
 
-    adapter.emit_task(_task("callback"))
+    with pytest.raises(DataverseWriteBackError, match="no verifiable default or override owner"):
+        adapter.emit_task(_task("callback"))
 
+    # No Task created and the unverifiable-default warning is recorded.
     assert [b for e, b in fake.created if e == "tasks"] == []
     assert any(w.code == "task_owner_default_unverifiable" for w in adapter.warnings())
+    # The failure-recording try/except persisted a failed correlation.
+    rows = tmp_state_db.execute(
+        "SELECT write_status FROM crm_correlations WHERE session_id = ? AND record_kind = ?;",
+        (_SID, "task"),
+    ).fetchall()
+    assert [r["write_status"] for r in rows] == ["failed"]
 
 
 def test_build_writeback_assembles_aggregate(tmp_state_db: sqlite3.Connection) -> None:

@@ -197,9 +197,17 @@ class DataverseWriteBackAdapter:
         try:
             resolved = self._resolve_task_owner(payload)
             if resolved is None:
-                # FR-025 unverifiable-default branch already recorded an
-                # operator-visible warning; nothing to write to the ledger.
-                return
+                # FR-025 unverifiable-default-owner branch — `_resolve_task_owner`
+                # has already recorded an operator-visible warning. We raise
+                # `DataverseWriteBackError` so the outer try/except records a
+                # failed correlation + blocks the run (the disposition asked
+                # for a Task and we cannot create one without a valid owner —
+                # silently returning would let the run report `completed`
+                # while the required human follow-up went unwritten).
+                raise DataverseWriteBackError(
+                    f"task emission blocked for session {payload.session_id!r}: "
+                    "no verifiable default or override owner (FR-025)"
+                )
             owner_id, owner_entity_set = resolved
             body = self._task_body(
                 payload,
@@ -446,26 +454,48 @@ class DataverseWriteBackAdapter:
     ) -> None:
         """Persist a `crm_correlations` row with `write_status=failed` and stamp the
         per-session resume ledger so audit/recovery can distinguish "not attempted"
-        from "attempted and failed"."""
+        from "attempted and failed".
+
+        Preserves a prior `CONFIRMED` correlation rather than downgrading it — a
+        later transient failure on an already-confirmed record (e.g. a duplicate
+        emit retry) must not undo audit truth. Likewise, the `*_done` flag stays
+        True when it was already set: regressing it would mislead the resume
+        coordinator into replaying a write that already succeeded (and which the
+        adapter's idempotency pre-query would detect anyway, but the ledger
+        should not lie).
+        """
         now = self._now_utc_ms()
         existing = store.get_crm_correlation(self._conn, session_id, record_kind)
+        previously_confirmed = (
+            existing is not None and existing.write_status is CrmWriteStatus.CONFIRMED
+        )
         store.upsert_crm_correlation(
             self._conn,
             CrmCorrelation(
                 session_id=session_id,
                 record_kind=record_kind,
                 idempotency_key=session_id,
-                dataverse_record_id=dataverse_record_id,
-                write_status=CrmWriteStatus.FAILED,
+                # Keep the confirmed record id when the prior write succeeded.
+                dataverse_record_id=(
+                    existing.dataverse_record_id if previously_confirmed else dataverse_record_id
+                ),
+                write_status=(
+                    CrmWriteStatus.CONFIRMED if previously_confirmed else CrmWriteStatus.FAILED
+                ),
                 created_at=existing.created_at if existing else now,
                 updated_at=now,
             ),
         )
+        # Don't regress a `*_done=True` flag set by a prior successful emit —
+        # only mark it False when it hasn't been completed yet.
+        progress = self._load_progress(session_id)
+        already_done = bool(progress and getattr(progress, progress_key))
+        progress_update: dict[str, bool] = {} if already_done else {progress_key: False}
         self._mark_progress(
             session_id,
             last_error=str(error),
             run_status=RunStatus.BLOCKED,
-            **{progress_key: False},
+            **progress_update,
         )
 
     # ----- ownership resolution (FR-025) -----------------------------------
@@ -558,6 +588,13 @@ class DataverseWriteBackAdapter:
         Active-enabled gate per spec §Definitions §Approved owner override:
         - `systemuser`: row must exist AND `isdisabled == false`.
         - `team`: row must exist (teams have no `isdisabled` column).
+
+        404 on the systemuser path (the table genuinely doesn't carry this id)
+        is treated as "not found here, try teams next". Every OTHER permanent
+        Dataverse error — 401/403 from a permission regression, 400 from a
+        malformed query — is allowed to propagate so emit_task's outer
+        try/except records a failed task correlation rather than silently
+        degrading the run to "owner unverifiable → fallback".
         """
         for entity_set, primary_id, extra_filter in (
             ("systemusers", "systemuserid", " and isdisabled eq false"),
@@ -576,8 +613,14 @@ class DataverseWriteBackAdapter:
                     .json()
                     .get("value", [])
                 )
-            except PermanentDataverseError:
-                continue
+            except PermanentDataverseError as exc:
+                # Only HTTP 404 (table truly absent in this environment) is
+                # benign — try the next entity set. Anything else (401/403
+                # permission regression, 400 malformed query) is real and must
+                # surface, so emit_task can record a failed task correlation.
+                if "HTTP 404" in str(exc):
+                    continue
+                raise
             if rows:
                 return entity_set
         return None
