@@ -65,6 +65,9 @@ _ALLOWED: dict[str, set[str]] = {
     },
     "artifacts": {
         "opencloser.models",
+        # contracts/redaction-layer.md §Behavior: the writer calls the RedactionLayer
+        # immediately before any transcript disk write (FR-028..FR-030).
+        "opencloser.redaction",
         "opencloser.artifacts",  # intra-boundary submodules
     },
     # ---- Slice 2 boundaries (contracts/redaction-layer.md, contracts/cli-slice2.md) ----

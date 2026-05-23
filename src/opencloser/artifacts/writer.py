@@ -23,6 +23,7 @@ from opencloser.models import (
     TaskPayload,
     WriteBack,
 )
+from opencloser.redaction.layer import RedactionLayer
 
 _TRANSCRIPT_FILENAME = "transcript.txt"
 _SESSION_RESULT_FILENAME = "session-result.json"
@@ -55,8 +56,15 @@ def write_session_artifacts(
     transcript_text: str | None = None,
     conflicting_events: list[ConflictingEventAuditRecord] | None = None,
     task: TaskPayload | None = None,
+    redaction_layer: RedactionLayer | None = None,
 ) -> ArtifactPaths:
-    """Write all per-session artifacts into ``<artifact_root>/<session_id>/`` atomically."""
+    """Write all per-session artifacts into ``<artifact_root>/<session_id>/`` atomically.
+
+    Transcript text always passes through the configured ``RedactionLayer`` before disk
+    write (FR-028..FR-030). When the layer's retention mode is ``"summary-only"``, no
+    transcript file is written; the session-result summary and the rest of the Slice 1
+    artifact contract are preserved.
+    """
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,8 +81,11 @@ def write_session_artifacts(
 
     transcript_path: Path | None = None
     if transcript_text is not None:
-        transcript_path = session_dir / _TRANSCRIPT_FILENAME
-        _write_text_atomic(transcript_path, transcript_text)
+        effective_layer = redaction_layer or RedactionLayer.default()
+        if effective_layer.retention_mode() == "full":
+            transcript_path = session_dir / _TRANSCRIPT_FILENAME
+            _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
+        # else summary-only retention (FR-030): no transcript file is written.
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
     _write_json_atomic(eligibility_path, eligibility_decision)

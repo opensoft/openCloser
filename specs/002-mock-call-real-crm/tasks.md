@@ -167,12 +167,12 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 
 ### Tests for User Story 6
 
-- [ ] T039 [P] [US6] Tests — US6: `[REDACTED]` replacement, summary-only retention writes no transcript file, no-op policy preserves the Slice 1 artifact contract, and a malformed redaction policy fails readiness, in `tests/unit/test_redaction.py` and `tests/integration/test_us6_redaction.py` (SC-009)
+- [X] T039 [P] [US6] Tests — US6: `[REDACTED]` replacement, summary-only retention writes no transcript file, no-op policy preserves the Slice 1 artifact contract, and a malformed redaction policy fails readiness, in `tests/unit/test_redaction.py` and `tests/integration/test_us6_redaction.py` (SC-009)
 
 ### Implementation for User Story 6
 
-- [ ] T037 [P] [US6] Implement `src/opencloser/redaction/layer.py` — `RedactionLayer` with `RegexRedactionPolicy` (default `[REDACTED]`), `NoOpPolicy`, and summary-only retention (FR-028–FR-030; contracts/redaction-layer.md)
-- [ ] T038 [US6] Route transcript text through `RedactionLayer` in `src/opencloser/artifacts/writer.py` before any transcript disk write, honoring summary-only retention and preserving the Slice 1 summary + transcript-pointer contract
+- [X] T037 [P] [US6] Implement `src/opencloser/redaction/layer.py` — `RedactionLayer` with `RegexRedactionPolicy` (default `[REDACTED]`), `NoOpPolicy`, and summary-only retention (FR-028–FR-030; contracts/redaction-layer.md)
+- [X] T038 [US6] Route transcript text through `RedactionLayer` in `src/opencloser/artifacts/writer.py` before any transcript disk write, honoring summary-only retention and preserving the Slice 1 summary + transcript-pointer contract
 
 **Checkpoint**: The transcript artifact path is privacy-hardened.
 
