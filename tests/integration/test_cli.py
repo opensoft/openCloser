@@ -312,10 +312,11 @@ def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
       1. Emits a `warning:` instead of `error:` for the missing secrets,
       2. Proceeds into the dry-run path with placeholder credentials,
       3. Fails AT the queue-load step (the placeholder creds can't authenticate
-         against the placeholder env_url) — exit_status="failed", exit code 1.
+         against the placeholder env_url) — exit_status="failed", which the
+         `_EXIT_CODE` table maps to CLI exit code 2.
 
-    The test asserts the new gate-softening behavior, not the queue-load
-    failure detail (which depends on httpx version)."""
+    The test asserts the new gate-softening behavior (warning + non-zero exit)
+    rather than the specific exit code or queue-load failure detail."""
     config_path = _write_config(tmp_path)
     run = _runner.invoke(
         app,

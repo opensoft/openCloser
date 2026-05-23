@@ -3,17 +3,21 @@
 End-to-end integration tests that exercise the FR-031 dry-run path against the
 in-process Dataverse fake. The dry-run path:
 
-- validates the local mapping artifact but does NOT call live `verify()` (FR-007
-  "for the selected run mode" — spec §Edge Cases "Dry-run requested but write
-  credentials are absent");
+- validates the local mapping artifact AND still calls live ``verify()`` per
+  ``contracts/metadata-discovery-verification.md`` §5 (so real missing-fields
+  / option-set / drift gaps surface), but tolerates a narrow set of
+  ``verify()`` failures — ``TransientDataverseError`` and 401
+  PermanentDataverseError — so the spec §Edge Cases "Dry-run requested but
+  write credentials are absent" scenario does not block readiness. 403 /
+  404 / other PermanentDataverseError / MetadataError still block dry-run;
 - runs the same Slice 1 orchestrator loop (FR-014 — eligibility, transport,
   persona) so the produced session-result + planned write-back match what a
   write-enabled run would emit;
 - routes every `emit_*` through `DataverseWriteBackAdapter` constructed with
   `dry_run=True` so zero POST / PATCH operations reach Dataverse for
-  write-back (FR-031, SC-002, SC-013) — Note: the runner still issues GETs
-  to load the queue item from Dataverse via `DataverseQueueLoader`; the
-  "zero writes" guarantee is scoped to write-back, not all I/O;
+  write-back (FR-031, SC-002, SC-013). The runner still issues GETs to load
+  the queue item from Dataverse via `DataverseQueueLoader`; the "zero
+  writes" guarantee is scoped to write-back, not all I/O;
 - writes the FR-031 dry-run marker alongside the orchestrator's session
   artifacts so an inspector can tell the session was a rehearsal (SC-002).
 
@@ -21,9 +25,9 @@ Covered scenarios:
 
 - happy path (interested_callback_requested) — SC-002, SC-013
 - incomplete mapping surfaces the gap — SC-002, US2 §AC3
-- dry-run skips live `verify()` even when it would fail in write-enabled mode
-  (mode-aware readiness from spec §Edge Cases) — verifies that the same
-  inputs that would block a write-enabled run still succeed in dry-run.
+- dry-run tolerates a 401 verify() failure (missing creds) — spec §Edge Cases
+- dry-run BLOCKS on a 403 permission regression (real verify gap, not a
+  missing-creds story) — Codex round-3 P1 regression test
 """
 
 from __future__ import annotations
@@ -203,9 +207,11 @@ def test_us2_dry_run_blocks_when_mapping_missing(
     # against future regressions where readiness fails but a session-result /
     # writeback / dry-run-marker still gets written (Sourcery PR #7 review).
     assert report.artifact_dir is None
-    assert (
-        not tmp_artifact_dir.exists() or list(tmp_artifact_dir.iterdir()) == []
-    ), f"readiness block must not write artifacts; found {list(tmp_artifact_dir.iterdir())}"
+    # Build the diagnostic message without eagerly evaluating iterdir() when
+    # the directory does not exist (would raise FileNotFoundError and mask
+    # the real assertion outcome — Copilot PR #7 round-3 review).
+    leaked = list(tmp_artifact_dir.iterdir()) if tmp_artifact_dir.exists() else []
+    assert leaked == [], f"readiness block must not write artifacts; found {leaked}"
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +253,16 @@ def _broken_dataverse_client() -> DataverseClient:
     )
 
 
-def test_us2_dry_run_readiness_tolerates_verify_connectivity_failure(
+def test_us2_dry_run_end_to_end_with_working_dataverse(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
-    """Confirms that dry-run readiness calls live `verify()` (per
-    `contracts/metadata-discovery-verification.md` §5) but tolerates
-    auth/connectivity failures (the spec §Edge Cases "dry-run + missing write
-    credentials" rule). With a working fake the dry-run completes; the
-    metadata report is the live one (drift may be populated)."""
+    """End-to-end dry-run against a working Dataverse fake. Confirms that
+    dry-run readiness completes when ``verify()`` succeeds (the happy path of
+    the contract that dry-run still runs ``verify()`` per
+    ``contracts/metadata-discovery-verification.md`` §5). Connectivity-failure
+    tolerance is exercised by the next two tests, which use a broken /
+    forbidden client (Copilot PR #7 round-3 rename — the previous name claimed
+    a tolerance scenario that this test does NOT simulate)."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
 

@@ -141,13 +141,19 @@ def run_one_crm_item(
 
     ``run_mode`` selects between **write-enabled** (the default — performs live
     metadata verification, claims/mutates the Dataverse queue item, and POSTs /
-    PATCHes the write-back records) and **dry-run** (FR-031 — skips live
-    `verify()`, never mutates the Dataverse queue item per FR-010, constructs
-    the adapter with ``dry_run=True`` so every ``emit_*`` captures the planned
-    payload without issuing any GET / POST / PATCH, and writes the FR-031
-    dry-run marker artifact alongside the orchestrator's session artifacts).
-    The CLI default is dry-run (FR-031, SC-013); the write-enabled path
-    requires an explicit ``--write`` flag.
+    PATCHes the write-back records) and **dry-run** (FR-031 — still calls live
+    ``verify()`` to surface real mapping/option-set gaps per
+    ``contracts/metadata-discovery-verification.md`` §5, but tolerates a narrow
+    set of failures (``TransientDataverseError`` + 401 PermanentDataverseError)
+    so an environment without write credentials does not block the rehearsal
+    per spec §Edge Cases. Never mutates the Dataverse queue item per FR-010,
+    constructs the adapter with ``dry_run=True`` so every ``emit_*`` captures
+    the planned payload without issuing any POST / PATCH (and skips the GET
+    pre-queries within ``emit_*``; the queue load itself still uses GETs via
+    ``DataverseQueueLoader``), and writes the FR-031 dry-run marker artifact
+    alongside the orchestrator's session artifacts). The CLI default is
+    dry-run (FR-031, SC-013); the write-enabled path requires an explicit
+    ``--write`` flag.
     """
     clk = clock or SystemClock()
     persona = persona or ALFAppointmentSetterPersona()
