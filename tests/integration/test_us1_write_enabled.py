@@ -89,9 +89,9 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
         attrs = {primary_id}
         attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
         if ekey == "phone_call_activity":
-            attrs |= {"subject", "description", "actualstart", "actualend"}
+            attrs |= {"subject", "description", "actualstart", "actualend", "activityid"}
         if ekey == "task":
-            attrs |= {"subject", "description", "ownerid"}
+            attrs |= {"subject", "description", "ownerid", "activityid"}
         entities[eref.logical_name] = attrs
     if mapping.task_owner_override_field:
         entities["medx_callqueueitem"].add(mapping.task_owner_override_field)

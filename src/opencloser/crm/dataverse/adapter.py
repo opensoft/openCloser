@@ -58,21 +58,27 @@ class DataverseWriteBackError(RuntimeError):
     """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
 
 
-# Conceptual entity key -> Dataverse entity-set (collection) name overrides.
-# Dataverse Web API uses the entity-set (plural) name in record URIs — e.g.
-# `POST /api/data/v9.2/phonecalls`, NOT `/phonecall`. For the entities Slice 2
-# touches the rule is `logical_name + "s"`; this map lets a deployment override
-# any irregular plural without re-writing the mapping artifact.
-_ENTITY_SET_OVERRIDES: dict[str, str] = {}
+# Known-irregular Dataverse entity-set names (the OOTB system tables whose
+# `EntitySetName` doesn't follow the `logical_name + "s"` convention). A
+# deployment can also populate `DataverseEntityRef.entity_set_name` per entry
+# in `config/dataverse_mapping.json` to override this map.
+_ENTITY_SET_OVERRIDES: dict[str, str] = {
+    "activity": "activitypointers",
+    "opportunity": "opportunities",
+    "businessunit": "businessunits",
+    "currency": "transactioncurrencies",
+}
 
 
-def _entity_set_name(logical_name: str) -> str:
-    """Return the Dataverse entity-set (collection) name for a logical name.
+def _derive_entity_set(logical_name: str) -> str:
+    """Fallback derivation when the mapping omits `entity_set_name`.
 
-    Defaults to `logical_name + "s"` — the standard Dataverse pluralization for
-    every entity Slice 2 references (`phonecall`/`task`/`medx_callqueueitem`/
-    `systemuser`/`team`/`account`). Irregular plurals (e.g. `opportunity` →
-    `opportunities`) require an entry in `_ENTITY_SET_OVERRIDES`.
+    Returns the known irregular plural when one is registered, otherwise
+    appends `"s"`. This covers every entity Slice 2 references in practice
+    (`phonecall`/`task`/`medx_*`/`systemuser`/`team`/`account`); for any other
+    OOTB or custom table the mapping artifact MUST populate
+    `entity_set_name` explicitly — `discover-crm` would normally read this
+    from `EntityDefinition.EntitySetName` against live Dataverse.
     """
     return _ENTITY_SET_OVERRIDES.get(logical_name, logical_name + "s")
 
@@ -114,12 +120,21 @@ class DataverseWriteBackAdapter:
     def emit_phone_call_activity(self, payload: PhoneCallActivityPayload) -> None:
         entity_key = "phone_call_activity"
         idempotency_field = self._t.logical_name("phone_call.idempotency_key")
-        record_id = self._idempotent_create(
-            entity_key=entity_key,
-            idempotency_field=idempotency_field,
-            idempotency_value=payload.session_id,
-            body=self._phone_call_body(payload, idempotency_field),
-        )
+        try:
+            record_id = self._idempotent_create(
+                entity_key=entity_key,
+                idempotency_field=idempotency_field,
+                idempotency_value=payload.session_id,
+                body=self._phone_call_body(payload, idempotency_field),
+            )
+        except (PermanentDataverseError, DataverseWriteBackError, MappingError) as exc:
+            self._record_failure(
+                session_id=payload.session_id,
+                record_kind=CrmRecordKind.PHONE_CALL_ACTIVITY,
+                error=exc,
+                progress_key="phone_call_activity_done",
+            )
+            raise
         self._record_correlation(
             session_id=payload.session_id,
             record_kind=CrmRecordKind.PHONE_CALL_ACTIVITY,
@@ -130,7 +145,7 @@ class DataverseWriteBackAdapter:
         self._aggregate(payload.session_id).phone_call_activity = payload
 
     def emit_queue_status_update(self, payload: QueueStatusUpdatePayload) -> None:
-        entity_set = _entity_set_name(self._t.entity_logical_name("queue_item"))
+        entity_set = self._entity_set("queue_item")
         # PATCH is keyed by the queue row's primary id directly; the FR-024 idempotency
         # signal lives in the `last_session_id` column rather than a synthetic key
         # column. A row whose `last_session_id` already equals this session has been
@@ -151,12 +166,13 @@ class DataverseWriteBackAdapter:
         path = f"{entity_set}({payload.queue_item_id})"
         try:
             self._client.patch(path, json=body)
-        except PermanentDataverseError as exc:
-            self._mark_progress(
-                payload.session_id,
-                queue_status_update_done=False,
-                last_error=str(exc),
-                run_status=RunStatus.BLOCKED,
+        except (PermanentDataverseError, MappingError) as exc:
+            self._record_failure(
+                session_id=payload.session_id,
+                record_kind=CrmRecordKind.QUEUE_STATUS,
+                error=exc,
+                progress_key="queue_status_update_done",
+                dataverse_record_id=payload.queue_item_id,
             )
             raise
         self._record_correlation(
@@ -194,12 +210,21 @@ class DataverseWriteBackAdapter:
             owner_entity_set=owner_entity_set,
         )
 
-        record_id = self._idempotent_create(
-            entity_key=entity_key,
-            idempotency_field=idempotency_field,
-            idempotency_value=payload.session_id,
-            body=body,
-        )
+        try:
+            record_id = self._idempotent_create(
+                entity_key=entity_key,
+                idempotency_field=idempotency_field,
+                idempotency_value=payload.session_id,
+                body=body,
+            )
+        except (PermanentDataverseError, DataverseWriteBackError, MappingError) as exc:
+            self._record_failure(
+                session_id=payload.session_id,
+                record_kind=CrmRecordKind.TASK,
+                error=exc,
+                progress_key="task_done",
+            )
+            raise
         self._record_correlation(
             session_id=payload.session_id,
             record_kind=CrmRecordKind.TASK,
@@ -339,8 +364,8 @@ class DataverseWriteBackAdapter:
         without the new record's id, and silently storing an empty id would mask
         the failure on every later resume/audit.
         """
-        entity_set = _entity_set_name(self._t.entity_logical_name(entity_key))
-        primary_id = self._primary_id(entity_key, entity_set)
+        entity_set = self._entity_set(entity_key)
+        primary_id = self._primary_id(entity_key)
         existing = (
             self._client.get(
                 entity_set,
@@ -372,8 +397,8 @@ class DataverseWriteBackAdapter:
         return record_id
 
     def _fetch_queue_last_session(self, queue_item_id: str) -> str | None:
-        entity_set = _entity_set_name(self._t.entity_logical_name("queue_item"))
-        primary_id = self._primary_id("queue_item", entity_set)
+        entity_set = self._entity_set("queue_item")
+        primary_id = self._primary_id("queue_item")
         last_session_field = self._t.logical_name("queue.last_session_id")
         rows = (
             self._client.get(
@@ -392,17 +417,63 @@ class DataverseWriteBackAdapter:
         value = rows[0].get(last_session_field)
         return None if value is None else str(value)
 
-    def _primary_id(self, entity_key: str, entity_set: str) -> str:
-        """Mapped primary-id column for an entity. Falls back to `<logical>id` when
-        the mapping leaves it unset — but the mapped value is preferred because
-        Dataverse activity tables use names like `activityid` rather than the
-        logical-name-plus-id pattern (e.g. `phonecall` → `activityid`)."""
+    def _entity_set(self, entity_key: str) -> str:
+        """Resolve the Dataverse Web API entity-set (collection) name for an entity
+        key. Prefers the mapping's `entity_set_name` when populated (discover-crm
+        reads `EntityDefinition.EntitySetName`); falls back to the irregular-plural
+        override map / `+s` rule otherwise."""
         ref = self._t.mapping.entities.get(entity_key)
-        if ref is not None and ref.primary_id:
-            return ref.primary_id
-        # Strip the trailing 's' from the entity-set form to recover the logical
-        # name when the mapping omits primary_id.
-        return entity_set.rstrip("s") + "id"
+        if ref is not None and ref.entity_set_name:
+            return ref.entity_set_name
+        logical = self._t.entity_logical_name(entity_key)
+        return _derive_entity_set(logical)
+
+    def _primary_id(self, entity_key: str) -> str:
+        """Return the mapped primary-id column for an entity. Raises `MappingError`
+        when the mapping omits it — Dataverse activity tables use `activityid`
+        (not `<logical>id`), so a silent fallback would generate broken $select
+        clauses for `phone_call_activity` / `task` (FR-001/FR-004)."""
+        ref = self._t.mapping.entities.get(entity_key)
+        if ref is None or not ref.primary_id:
+            raise MappingError(
+                f"mapping artifact is missing entities[{entity_key!r}].primary_id — "
+                "Dataverse activity tables use 'activityid', not '<logical>id', and "
+                "the adapter refuses to guess. Set primary_id in dataverse_mapping.json."
+            )
+        return ref.primary_id
+
+    def _record_failure(
+        self,
+        *,
+        session_id: str,
+        record_kind: CrmRecordKind,
+        error: Exception,
+        progress_key: str,
+        dataverse_record_id: str | None = None,
+    ) -> None:
+        """Persist a `crm_correlations` row with `write_status=failed` and stamp the
+        per-session resume ledger so audit/recovery can distinguish "not attempted"
+        from "attempted and failed"."""
+        now = self._now_utc_ms()
+        existing = store.get_crm_correlation(self._conn, session_id, record_kind)
+        store.upsert_crm_correlation(
+            self._conn,
+            CrmCorrelation(
+                session_id=session_id,
+                record_kind=record_kind,
+                idempotency_key=session_id,
+                dataverse_record_id=dataverse_record_id,
+                write_status=CrmWriteStatus.FAILED,
+                created_at=existing.created_at if existing else now,
+                updated_at=now,
+            ),
+        )
+        self._mark_progress(
+            session_id,
+            last_error=str(error),
+            run_status=RunStatus.BLOCKED,
+            **{progress_key: False},
+        )
 
     # ----- ownership resolution (FR-025) -----------------------------------
 
@@ -466,8 +537,8 @@ class DataverseWriteBackAdapter:
         override_field = self._t.mapping.task_owner_override_field
         if not override_field:
             return None
-        entity_set = _entity_set_name(self._t.entity_logical_name("queue_item"))
-        primary_id = self._primary_id("queue_item", entity_set)
+        entity_set = self._entity_set("queue_item")
+        primary_id = self._primary_id("queue_item")
         rows = (
             self._client.get(
                 entity_set,

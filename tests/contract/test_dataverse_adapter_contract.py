@@ -76,9 +76,9 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
         # non-approved base fields are part of the entity schema we POST against,
         # not gated by `approved_update_field`).
         if ekey == "phone_call_activity":
-            attrs |= {"subject", "description", "actualstart", "actualend"}
+            attrs |= {"subject", "description", "actualstart", "actualend", "activityid"}
         if ekey == "task":
-            attrs |= {"subject", "description", "ownerid"}
+            attrs |= {"subject", "description", "ownerid", "activityid"}
         entities[eref.logical_name] = attrs
     # Owner-override column on the queue row (out-of-mapping `fields` because it is
     # the source field for `task_owner_override_field`, not a write target).

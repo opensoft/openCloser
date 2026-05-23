@@ -7,9 +7,9 @@
     "_comment": "Verified fixture mapping for the in-process Dataverse fake (tests only). Real runs produce config/dataverse_mapping.json via `opencloser discover-crm`."
   },
   "entities": {
-    "queue_item": { "logical_name": "medx_callqueueitem", "primary_id": "medx_callqueueitemid" },
-    "phone_call_activity": { "logical_name": "phonecall" },
-    "task": { "logical_name": "task" }
+    "queue_item": { "logical_name": "medx_callqueueitem", "primary_id": "medx_callqueueitemid", "entity_set_name": "medx_callqueueitems" },
+    "phone_call_activity": { "logical_name": "phonecall", "primary_id": "phonecallid", "entity_set_name": "phonecalls" },
+    "task": { "logical_name": "task", "primary_id": "activityid", "entity_set_name": "tasks" }
   },
   "fields": {
     "queue.facility_account": { "entity": "queue_item", "logical_name": "medx_accountid", "type": "lookup", "lookup_target": "account" },

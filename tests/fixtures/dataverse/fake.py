@@ -28,6 +28,13 @@ _API_PREFIX = "/api/data/v9.2/"
 _ENTITY_DEF_RE = re.compile(r"^EntityDefinitions\(LogicalName='([^']+)'\)(/Attributes)?$")
 _RECORD_RE = re.compile(r"^([A-Za-z0-9_]+)\(([^)]+)\)$")
 
+# Dataverse activity tables share `activityid` as a canonical primary-key alias
+# alongside their own `<logical>id` column. The fake stamps both on records of
+# these entities so the mapping artifact can address them by either column.
+_ACTIVITY_ENTITY_NAMES: frozenset[str] = frozenset(
+    {"phonecall", "phonecalls", "task", "tasks", "email", "emails", "appointment", "appointments"}
+)
+
 
 class _StubToken:
     """A token provider stub — the fake does not authenticate."""
@@ -169,11 +176,15 @@ class DataverseFake:
             return httpx.Response(404, request=request)
         body = json.loads(request.content or b"{}")
         record_id = str(uuid.uuid4())
-        # Stamp both the singular-name primary id (`<logical>id`) so
+        # Stamp the singular-name primary id (`<logical>id`) so
         # `_handle_patch`/test introspection finds the row regardless of which
         # URL form (logical name or entity-set) the caller used.
         primary_key = _primary_id_field(entity)
         body.setdefault(primary_key, record_id)
+        # Activities share `activityid` as a canonical primary-key alias — stamp
+        # it too so mappings that use either column resolve correctly.
+        if entity in _ACTIVITY_ENTITY_NAMES:
+            body.setdefault("activityid", record_id)
         self._records.setdefault(entity, []).append(dict(body))
         self.created.append((entity, dict(body)))
         entity_uri = f"{self.env_url}{_API_PREFIX}{entity}({record_id})"

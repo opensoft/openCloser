@@ -245,22 +245,19 @@ def _stage_queue_item(conn: sqlite3.Connection, queue_item: QueueItem) -> None:
     """Insert or refresh the queue row in local SQLite from the live Dataverse
     snapshot so the unchanged orchestrator's eligibility evaluator reads current
     state (not whatever a prior run last wrote). FK consumers (sessions, etc.)
-    keep their references — only the mutable columns are refreshed."""
+    keep their references — only the mutable columns are refreshed.
+
+    On refresh, every mutable column is overwritten — including null clears
+    (Dataverse may legitimately clear `phone_number`/`timezone`). A `None` from
+    the live snapshot must mean "the cell is now empty", not "leave the stale
+    local value alone"."""
     existing = store.get_queue_item(conn, queue_item.queue_item_id)
     if existing is None:
         with store.transaction(conn):
             store.insert_queue_item(conn, queue_item)
         return
     with store.transaction(conn):
-        store.update_queue_item_status(
-            conn,
-            queue_item.queue_item_id,
-            callable_status=queue_item.callable_status,
-            dnc_flag=queue_item.dnc_flag,
-            phone_number=queue_item.phone_number,
-            timezone=queue_item.timezone,
-            attempt_count=queue_item.attempt_count,
-        )
+        store.replace_queue_item_mutable_fields(conn, queue_item)
 
 
 def _load_conversation_fixture(path: Path) -> ConversationFixture:

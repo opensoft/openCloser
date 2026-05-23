@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from opencloser.models import DataverseFieldRef, DataverseMapping
 
 
@@ -19,7 +21,12 @@ class MappingError(RuntimeError):
 
 
 def load_mapping(path: str | Path) -> DataverseMapping:
-    """Load and validate the Dataverse mapping artifact (FR-004)."""
+    """Load and validate the Dataverse mapping artifact (FR-004).
+
+    Both JSON-decode failures and Pydantic schema-validation failures surface as
+    `MappingError`, so callers (the runner, the discover-crm CLI) handle a single
+    error type for "mapping artifact is wrong".
+    """
     artifact = Path(path)
     if not artifact.exists():
         raise MappingError(f"mapping artifact not found: {artifact}")
@@ -27,7 +34,10 @@ def load_mapping(path: str | Path) -> DataverseMapping:
         raw = json.loads(artifact.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise MappingError(f"mapping artifact is not valid JSON: {exc}") from exc
-    return DataverseMapping.model_validate(raw)
+    try:
+        return DataverseMapping.model_validate(raw)
+    except ValidationError as exc:
+        raise MappingError(f"mapping artifact failed schema validation: {exc}") from exc
 
 
 class MappingTranslator:
@@ -83,9 +93,7 @@ class MappingTranslator:
         """Logical names of the approved Slice 2 update fields (FR-003 — only these may
         be written)."""
         return {
-            ref.logical_name
-            for ref in self._mapping.fields.values()
-            if ref.approved_update_field
+            ref.logical_name for ref in self._mapping.fields.values() if ref.approved_update_field
         }
 
     def preserve_if_present(self) -> list[str]:

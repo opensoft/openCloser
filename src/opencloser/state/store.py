@@ -166,10 +166,13 @@ def update_queue_item_status(
     callable_status: CallableStatus | None = None,
     dnc_flag: bool | None = None,
     last_decision_at: str | None = None,
-    phone_number: str | None = None,
-    timezone: str | None = None,
-    attempt_count: int | None = None,
 ) -> None:
+    """Partial-update DAO: `None` means "leave this column alone".
+
+    For Slice 2's runner staging — where every mutable column on the queue row
+    must mirror the live Dataverse snapshot including null clears — use
+    `replace_queue_item_mutable_fields` instead.
+    """
     fields: list[str] = []
     values: list[Any] = []
     if callable_status is not None:
@@ -181,21 +184,55 @@ def update_queue_item_status(
     if last_decision_at is not None:
         fields.append("last_decision_at = ?")
         values.append(last_decision_at)
-    if phone_number is not None:
-        fields.append("phone_number = ?")
-        values.append(phone_number)
-    if timezone is not None:
-        fields.append("timezone = ?")
-        values.append(timezone)
-    if attempt_count is not None:
-        fields.append("attempt_count = ?")
-        values.append(attempt_count)
     if not fields:
         return
     values.append(queue_item_id)
     conn.execute(
         f"UPDATE queue_items SET {', '.join(fields)} WHERE queue_item_id = ?;",
         tuple(values),
+    )
+
+
+def replace_queue_item_mutable_fields(
+    conn: sqlite3.Connection,
+    queue_item: QueueItem,
+) -> None:
+    """Overwrite every mutable column on the local queue row from a fresh source
+    snapshot — including null clears.
+
+    `update_queue_item_status` treats `None` as "don't update", so a Dataverse
+    field that has been cleared to null since the last run never propagates to
+    local state. Slice 2's runner needs the opposite semantics when re-staging
+    a row read live from Dataverse: every mutable column should mirror the
+    snapshot, null included, so eligibility evaluates against current state
+    rather than whatever a prior run last wrote.
+    """
+    conn.execute(
+        """
+        UPDATE queue_items SET
+            facility_name = ?,
+            phone_number = ?,
+            timezone = ?,
+            default_tz_applied = ?,
+            email = ?,
+            attempt_count = ?,
+            dnc_flag = ?,
+            callable_status = ?,
+            last_decision_at = ?
+        WHERE queue_item_id = ?;
+        """,
+        (
+            queue_item.facility_name,
+            queue_item.phone_number,
+            queue_item.timezone,
+            int(queue_item.default_tz_applied),
+            queue_item.email,
+            queue_item.attempt_count,
+            int(queue_item.dnc_flag),
+            queue_item.callable_status.value,
+            queue_item.last_decision_at,
+            queue_item.queue_item_id,
+        ),
     )
 
 

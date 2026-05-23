@@ -617,12 +617,21 @@ class DataverseMappingMeta(BaseModel):
 
 
 class DataverseEntityRef(BaseModel):
-    """One entry of the mapping artifact's `entities` map."""
+    """One entry of the mapping artifact's `entities` map.
+
+    `entity_set_name` is the Dataverse Web API collection name used in record
+    URIs (e.g. `phonecalls` for the `phonecall` table). It defaults to None;
+    the adapter falls back to `logical_name + "s"` only when this is unset.
+    Real-environment discovery should populate this from
+    `EntityDefinition.EntitySetName` so irregular plurals work without code
+    changes (FR-001/FR-004).
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     logical_name: str
     primary_id: str | None = None
+    entity_set_name: str | None = None
 
 
 class DataverseFieldRef(BaseModel):
