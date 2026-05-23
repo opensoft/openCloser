@@ -101,6 +101,21 @@ def run_one_crm_item(
     clk = clock or SystemClock()
     persona = persona or ALFAppointmentSetterPersona()
 
+    # Persona-version gate — the orchestrator hands `persona.version` to every
+    # write-back payload (`PhoneCallActivityPayload`, `TaskPayload`), so running
+    # against a mismatched persona silently produces records tagged with a
+    # different version than the operator configured. The Slice 1 CLI's run-one
+    # checks this and the Slice 2 runner now mirrors that fail-fast behavior.
+    if persona.version != slice1_config.persona.version:
+        return CrmRunReport(
+            exit_status="blocked",
+            message=(
+                f"persona version mismatch: slice1.toml requires "
+                f"{slice1_config.persona.version!r} but the running persona is "
+                f"{persona.version!r}"
+            ),
+        )
+
     # 1) Readiness — load + validate the mapping artifact, then verify live metadata.
     try:
         mapping = load_mapping(slice2_config.dataverse.mapping_artifact)

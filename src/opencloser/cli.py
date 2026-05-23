@@ -13,6 +13,7 @@ Slice 2 subcommands (contracts/cli-slice2.md):
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated
 
@@ -59,6 +60,15 @@ _EXIT_CODE: dict[str, int] = {
     "resume_needed": 2,
     "failed": 2,
 }
+
+# Dataverse GUIDs are 8-4-4-4-12 lowercase/uppercase hex with hyphens. The CLI
+# validates `--queue-item-id` against this shape before it lands in any OData
+# `$filter` or record URL — that closes a filter-injection vector for
+# operator-supplied input and surfaces a typo as a clean error rather than a
+# 404 from the queue loader.
+_GUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 @app.command(name="init-state")
@@ -347,6 +357,15 @@ def run_crm(
     except (FileNotFoundError, ValueError) as exc:
         typer.echo(f"error:       config load failed: {exc}", err=True)
         raise typer.Exit(code=2) from None
+
+    if queue_item_id is not None and not _GUID_RE.match(queue_item_id):
+        typer.echo(
+            f"error:       --queue-item-id {queue_item_id!r} is not a valid "
+            "Dataverse GUID (expected 8-4-4-4-12 hex digits, e.g. "
+            "22222222-2222-2222-2222-222222222222).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     effective_campaign = campaign or slice2_config.run.campaign
     selector = _build_selector(
