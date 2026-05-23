@@ -8,6 +8,7 @@ later, per FR-010). See contracts/dataverse-queue-loader.md.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from opencloser.crm.dataverse.client import DataverseClient
@@ -18,6 +19,26 @@ from opencloser.models import CallableStatus, QueueItem
 # next-ready tie-breaker between two rows with the same next_attempt_at
 # (FR-008, contracts/dataverse-queue-loader.md).
 _DATAVERSE_CREATED_AT_FIELD = "createdon"
+
+# Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we accept any
+# value matching this safe alphanumeric+dash+underscore pattern (which covers real
+# GUIDs and the test fixture ids) and reject anything containing OData reserved or
+# whitespace characters so a malformed/hostile value cannot break the filter or
+# inject extra clauses.
+_SAFE_ODATA_TOKEN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _odata_token(value: object) -> str:
+    """Return `value` if it is a safe unquoted OData filter token (alphanumeric +
+    `_` / `-`), else raise. Used for record-id and lookup-id values that Dataverse
+    expects unquoted; reserved characters (`'`, ` `, `,`, `)`, ...) would corrupt
+    the `$filter` or enable injection."""
+    text = str(value)
+    if not _SAFE_ODATA_TOKEN.fullmatch(text):
+        raise QueueLoadError(
+            f"unsafe OData filter value {value!r} — must match [A-Za-z0-9_-]+"
+        )
+    return text
 
 
 class QueueLoadError(RuntimeError):
@@ -69,7 +90,9 @@ class DataverseQueueLoader:
         primary_id = self._t.mapping.entities["queue_item"].primary_id or f"{entity}id"
 
         if isinstance(selector, ExplicitId):
-            rows = self._query(entity, flt=f"{primary_id} eq {selector.queue_item_id}", top=1)
+            rows = self._query(
+                entity, flt=f"{primary_id} eq {_odata_token(selector.queue_item_id)}", top=1
+            )
         else:
             status_field = self._t.logical_name("queue.status")
             callable_value = self._t.option_set_value(f"queue_status.{self._callable_status}")
@@ -80,7 +103,9 @@ class DataverseQueueLoader:
             # a single-campaign queue table where this filter is unnecessary.
             campaign_field = self._optional_logical_name("queue.campaign")
             if campaign_field and selector.campaign:
-                filter_clauses.append(f"{campaign_field} eq {selector.campaign}")
+                filter_clauses.append(
+                    f"{campaign_field} eq {_odata_token(selector.campaign)}"
+                )
             rows = self._query(
                 entity,
                 flt=" and ".join(filter_clauses),
@@ -152,7 +177,7 @@ class DataverseQueueLoader:
             self._client.get(
                 account_entity,
                 params={
-                    "$filter": f"accountid eq {account_id}",
+                    "$filter": f"accountid eq {_odata_token(account_id)}",
                     "$select": "name",
                     "$top": "1",
                 },

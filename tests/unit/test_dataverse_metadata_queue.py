@@ -251,6 +251,26 @@ def test_load_unmapped_status_raises() -> None:
         loader.load(ExplicitId(_QUEUE_GUID))
 
 
+def test_load_explicit_id_rejects_unsafe_odata_token() -> None:
+    """An id containing OData reserved characters MUST be rejected before it can
+    inject into the `$filter` (defensive — Dataverse expects GUIDs, but the
+    selector takes a string)."""
+    loader = _loader(
+        {"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")], "account": []}
+    )
+    with pytest.raises(QueueLoadError, match="unsafe OData"):
+        loader.load(ExplicitId("foo' or 1 eq 1"))
+
+
+def test_load_next_ready_rejects_unsafe_campaign_token() -> None:
+    """Same defensive validation on the campaign filter value."""
+    loader = _loader(
+        {"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")], "account": []}
+    )
+    with pytest.raises(QueueLoadError, match="unsafe OData"):
+        loader.load(NextReady("bad') or (1 eq 1"))
+
+
 def test_load_missing_account_falls_back_to_id() -> None:
     loader = _loader(
         {"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")], "account": []}
