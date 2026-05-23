@@ -38,24 +38,24 @@ from opencloser.core.clock import FrozenClock
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.mapping import load_mapping
 from opencloser.crm.dataverse.queue_loader import ExplicitId
-from opencloser.models import (
-    ArtifactsConfig,
-    CallWindowConfig,
-    DataverseConfig,
-    Disposition,
-    EligibilityConfig,
-    PersonaConfig,
-    RedactionPolicyConfig,
-    RetryConfig,
-    RunConfig,
-    RunMode,
-    Slice2Config,
-    SliceConfig,
-    StateConfig,
-    TaskOwnersConfig,
-)
+from opencloser.models import Disposition, RetryConfig, RunMode, Slice2Config
 from opencloser.slice2.runner import run_one_crm_item
 from tests.fixtures.dataverse.helpers import fake_for_mapping
+from tests.fixtures.slice2_configs import (
+    OWNER_CALLBACK as _OWNER_CALLBACK,
+)
+from tests.fixtures.slice2_configs import (
+    QID as _QID,
+)
+from tests.fixtures.slice2_configs import (
+    seed as _seed,
+)
+from tests.fixtures.slice2_configs import (
+    slice1_config as _slice1_config,
+)
+from tests.fixtures.slice2_configs import (
+    slice2_config as _slice2_config_shared,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -64,69 +64,14 @@ _MAPPING_FIXTURE = _REPO_ROOT / "tests/fixtures/dataverse/dataverse_mapping.json
 _CONVERSATIONS = _REPO_ROOT / "tests/fixtures/conversations"
 _TRANSPORT_FIXTURES = _REPO_ROOT / "tests/fixtures/transport_events"
 
-_QID = "22222222-2222-2222-2222-222222222222"
-_OWNER_CALLBACK = "owner-callback-id"
-_OWNER_REVIEW = "owner-review-id"
-
 # FrozenClock inside the configured call window for deterministic eligibility.
 _CLOCK = FrozenClock(datetime(2026, 5, 22, 19, 0, 0, tzinfo=UTC))
 
 
-def _slice1_config(artifact_dir: Path, db_path: Path) -> SliceConfig:
-    return SliceConfig(
-        call_window=CallWindowConfig(start="09:00", end="20:00"),
-        eligibility=EligibilityConfig(max_attempts=5, default_timezone="America/Los_Angeles"),
-        artifacts=ArtifactsConfig(dir=str(artifact_dir)),
-        persona=PersonaConfig(version="alf-appointment-setter@0.1.0"),
-        state=StateConfig(db=str(db_path)),
-    )
-
-
 def _slice2_config(mapping_path: Path = _MAPPING_FIXTURE) -> Slice2Config:
-    return Slice2Config(
-        # CLI default per FR-031 is dry-run; mirror that here so the config and
-        # the explicit run_mode arg below agree.
-        run=RunConfig(default_mode=RunMode.DRY_RUN, campaign="alf-q2-davis"),
-        dataverse=DataverseConfig(
-            mapping_artifact=str(mapping_path),
-            callable_status="ready",
-        ),
-        retry=RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0),
-        task_owners=TaskOwnersConfig(callback=_OWNER_CALLBACK, review=_OWNER_REVIEW),
-        redaction=RedactionPolicyConfig(policy="regex", retention="full", patterns=[]),
-    )
-
-
-def _seed() -> dict[str, list[dict]]:
-    return {
-        "account": [{"accountid": "11111111-1111-1111-1111-111111111111", "name": "Sunage ALF"}],
-        "medx_callqueueitem": [
-            {
-                "medx_callqueueitemid": _QID,
-                "_medx_accountid_value": "11111111-1111-1111-1111-111111111111",
-                "medx_phonenumber": "+15305551234",
-                "medx_timezone": "America/Los_Angeles",
-                "medx_attemptcount": 0,
-                "medx_maxattempts": 5,
-                "medx_donotcall": False,
-                "medx_callstatus": 0,
-                "medx_lastdisposition": None,
-                "medx_lastsessionid": None,
-                "medx_lasterror": None,
-                "medx_nextattemptat": "2026-05-22T16:00:00.000Z",
-                "_medx_campaignid_value": "alf-q2-davis",
-                "medx_assignedownerid": None,
-            }
-        ],
-        # Dry-run skips owner verification (uses configured default directly),
-        # so seeding the owner records is NOT required — but include them so
-        # the same seed works if a follow-up test mutates a scenario to
-        # write-enabled.
-        "systemuser": [
-            {"systemuserid": _OWNER_CALLBACK, "isdisabled": False},
-            {"systemuserid": _OWNER_REVIEW, "isdisabled": False},
-        ],
-    }
+    """US2-flavored slice2 config — CLI default per FR-031 is dry-run; mirror
+    that here so the config and the explicit run_mode arg below agree."""
+    return _slice2_config_shared(mapping_path=mapping_path, default_mode=RunMode.DRY_RUN)
 
 
 def _run_dry(
@@ -252,6 +197,13 @@ def test_us2_dry_run_blocks_when_mapping_missing(
     # No artifacts were produced and no Dataverse calls occurred.
     assert fake.created == []
     assert fake.patched == []
+    # A readiness block must leave NO partial artifacts on disk — protects
+    # against future regressions where readiness fails but a session-result /
+    # writeback / dry-run-marker still gets written (Sourcery PR #7 review).
+    assert report.artifact_dir is None
+    assert (
+        not tmp_artifact_dir.exists() or list(tmp_artifact_dir.iterdir()) == []
+    ), f"readiness block must not write artifacts; found {list(tmp_artifact_dir.iterdir())}"
 
 
 # ---------------------------------------------------------------------------
