@@ -97,6 +97,7 @@ class CrmRunReport:
 class _ReadinessResult:
     translator: MappingTranslator
     metadata_report: MetadataVerificationReport
+    redaction_layer: RedactionLayer
 
 
 _DRY_RUN_TOLERABLE_AUTH_STATUS_CODES: frozenset[int] = frozenset({400, 401})
@@ -183,6 +184,7 @@ def run_one_crm_item(
         return readiness
     translator = readiness.translator
     report = readiness.metadata_report
+    redaction_layer = readiness.redaction_layer
 
     queue_item_result = _load_dataverse_queue_item(
         selector=selector,
@@ -237,6 +239,7 @@ def run_one_crm_item(
             conversation_fixture=conversation,
             transport_fixture_id=transport_fixture_id,
             clock=clk,
+            redaction_layer=redaction_layer,
         )
     except QueueItemNotFound as exc:
         return CrmRunReport(exit_status="failed", message=f"queue item not found locally: {exc}")
@@ -387,9 +390,13 @@ def _verify_readiness(
     # 2) T028 — redaction-policy validation. Default-on in both modes
     # (FR-028); a malformed regex MUST fail readiness before any transcript
     # write, session creation, or attempt increment (spec §Edge Cases
-    # "Malformed redaction policy").
+    # "Malformed redaction policy"). The constructed layer is kept and
+    # threaded to `process_one_queue_item` below so operator-configured
+    # patterns/retention are actually applied during artifact export
+    # (Copilot PR #8 review: previously the layer was constructed for
+    # validation only, then discarded — a real correctness bug).
     try:
-        RedactionLayer.from_config(slice2_config.redaction)
+        redaction_layer = RedactionLayer.from_config(slice2_config.redaction)
     except (ValueError, re_error) as exc:
         return CrmRunReport(
             exit_status="blocked",
@@ -418,6 +425,7 @@ def _verify_readiness(
                     drift=[],
                     checked_at=clk.now_utc_ms(),
                 ),
+                redaction_layer=redaction_layer,
             )
         # All other paths (write-enabled, OR dry-run with a non-tolerable
         # error) are operator-visible-blocked rather than an unhandled
@@ -453,13 +461,18 @@ def _verify_readiness(
                 "idempotency-key field(s) not mapped: "
                 f"{', '.join(missing_keys)} — SC-015 requires every "
                 "write-enabled run to verify these key fields as real "
-                "Dataverse fields. Add them to `config/dataverse_mapping.json` "
-                "and re-run `discover-crm`."
+                "Dataverse fields. Add them to "
+                f"{slice2_config.dataverse.mapping_artifact!r} and re-run "
+                "`discover-crm` (Copilot PR #8 review: reference the "
+                "configured mapping path so operators are not pointed at a "
+                "default that may not match their deployment)."
             ),
             metadata_report=report,
         )
 
-    return _ReadinessResult(translator=translator, metadata_report=report)
+    return _ReadinessResult(
+        translator=translator, metadata_report=report, redaction_layer=redaction_layer
+    )
 
 
 def _load_dataverse_queue_item(

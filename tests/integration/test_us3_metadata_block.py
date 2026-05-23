@@ -80,24 +80,27 @@ _CLOCK = FrozenClock(datetime(2026, 5, 22, 19, 0, 0, tzinfo=UTC))
 def _write_mapping_variant(
     tmp_path: Path,
     *,
-    drop_field: str | None = None,
     add_unmapped_option_set: bool = False,
     drop_idempotency_key: str | None = None,
+    approved: bool = True,
 ) -> Path:
     """Copy the fixture mapping with surgical mutations to exercise FR-002 gates.
 
-    - ``drop_field``: a key in ``mapping.fields`` to remove (so the field is
-      unmapped — exercises the SC-015 / FR-002 missing-mapping path).
     - ``add_unmapped_option_set``: append an option-set entry whose integer
       value is not present in the live picklist (exercises
       ``_check_option_set_values``).
     - ``drop_idempotency_key``: ``"phone_call"`` or ``"task"`` — removes the
       corresponding ``*.idempotency_key`` entry to exercise the SC-015
       explicit idempotency-key gate.
+    - ``approved``: set ``_meta.approved`` (defaults True so the variant
+      reaches gates beyond the approval check; pass False to exercise the
+      approval-gate path).
+
+    (Sourcery PR #8 review: dropped the unused ``drop_field`` parameter and
+    folded the ``approved`` flag in so tests don't need to mutate the JSON
+    twice.)
     """
     raw = json.loads(_MAPPING_FIXTURE.read_text(encoding="utf-8"))
-    if drop_field is not None and drop_field in raw["fields"]:
-        del raw["fields"][drop_field]
     if drop_idempotency_key is not None:
         key = f"{drop_idempotency_key}.idempotency_key"
         if key in raw["fields"]:
@@ -107,6 +110,7 @@ def _write_mapping_variant(
             "field": "queue.status",
             "value": 999,  # not in the fixture picklist
         }
+    raw["_meta"]["approved"] = approved
     out_path = tmp_path / "mapping-variant.json"
     out_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     return out_path
@@ -205,10 +209,6 @@ def test_us3_blocks_when_option_set_value_missing(
     fake = fake_for_mapping(original_mapping, _seed())
 
     mapping_variant = _write_mapping_variant(tmp_path, add_unmapped_option_set=True)
-    raw = json.loads(mapping_variant.read_text(encoding="utf-8"))
-    raw["_meta"]["approved"] = True
-    mapping_variant.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-
     cfg = _slice2_config_shared(mapping_path=mapping_variant)
     report = _run_write_enabled(
         conn=tmp_state_db,
@@ -272,12 +272,6 @@ def test_us3_blocks_when_idempotency_key_field_unmapped(
     unmapped. The explicit T029a check produces a message naming the missing
     key and pointing the operator at ``discover-crm``."""
     mapping_variant = _write_mapping_variant(tmp_path, drop_idempotency_key=drop_kind)
-    # Mark approved so we reach the idempotency-key gate (which runs AFTER
-    # the approval + verify gates).
-    raw = json.loads(mapping_variant.read_text(encoding="utf-8"))
-    raw["_meta"]["approved"] = True
-    mapping_variant.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-
     mapping = load_mapping(mapping_variant)
     fake = fake_for_mapping(mapping, _seed())
     cfg = _slice2_config_shared(mapping_path=mapping_variant)
