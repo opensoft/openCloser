@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from pydantic import ValidationError
+
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
 from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
@@ -149,11 +151,14 @@ def run_one_crm_item(
         )
 
     # 2) Load the queue item. Any mapping/option-set/transient failure surfaces as a
-    # structured `failed` report instead of an unhandled exception.
+    # structured `failed` report instead of an unhandled exception. `ValidationError`
+    # is included because `loader.load(...)` constructs a `QueueItem` from the
+    # Dataverse row, and a schema-corrupted row (e.g. a negative `attempt_count`
+    # the CHECK clause would also reject) surfaces from there.
     loader = DataverseQueueLoader(client, translator)
     try:
         queue_item = loader.load(selector)
-    except (MappingError, QueueLoadError, DataverseError) as exc:
+    except (MappingError, QueueLoadError, DataverseError, ValidationError) as exc:
         return CrmRunReport(exit_status="failed", message=f"queue loader error: {exc}")
     if queue_item is None:
         return CrmRunReport(
