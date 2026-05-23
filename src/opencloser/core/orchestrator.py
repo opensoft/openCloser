@@ -140,6 +140,17 @@ def process_one_queue_item(
     if decision.outcome != "block" and transport_fixture_id is None:
         raise ValueError("transport_fixture_id is required when eligibility allows the call")
 
+    # FR-019/FR-020 (Slice 2 / GitHub issue #2 / FR-014 allowed exception):
+    # structurally pre-validate the transport fixture BEFORE any session/decision/
+    # queue-status row is written, so a malformed fixture raises MalformedFixtureError
+    # here — leaving no session row, no eligibility-decision row, no attempt consumed,
+    # and no Dataverse queue change (SC-006). The hook is side-effect-free (no call
+    # id allocated, no real call dialed) so the long-standing "session row before
+    # call attempt" ordering contract is preserved for any future real transport.
+    if decision.outcome != "block":
+        assert transport_fixture_id is not None  # narrowed by the check above
+        transport.pre_validate_fixture(transport_fixture_id)
+
     # ----- step 3: create session row (always, per Q3) ----------------------
     session_id = ids.new_session_id()
     started_at = clock.now_utc_ms()
@@ -297,15 +308,18 @@ def _run_allowed_session(
 ) -> RunReport:
     del eligibility  # already used; kept for signature symmetry
 
-    # transport_fixture_id is pre-validated by process_one_queue_item (P1-5) before
-    # the session row is created — by here it is guaranteed present.
+    # transport_fixture_id was pre-validated (None-check + structural via
+    # transport.pre_validate_fixture) by process_one_queue_item before the session
+    # row was created — by here it is guaranteed present and structurally sound.
     assert transport_fixture_id is not None
 
     # Transition session to eligibility_evaluated.
     with store.transaction(conn):
         store.update_session(conn, session.session_id, state=SessionState.ELIGIBILITY_EVALUATED)
 
-    # Place call.
+    # Place call. place_call re-runs validate_fixture as defense in depth (idempotent
+    # with pre_validate_fixture in process_one_queue_item), then allocates the
+    # mock_provider_call_id and stashes the validated event snapshot.
     mock_call_id = transport.place_call(queue_item, transport_fixture_id)
     with store.transaction(conn):
         store.update_session(
