@@ -733,8 +733,18 @@ class DataverseWriteBackAdapter:
         queue_status_update_done: bool | None = None,
         task_done: bool | None = None,
         last_error: str | None = None,
-        run_status: RunStatus = RunStatus.IN_PROGRESS,
+        run_status: RunStatus | None = None,
     ) -> None:
+        """Upsert the per-session resume ledger. `None` for any kwarg means
+        "leave the existing value alone".
+
+        `run_status` defaults to `None` (preserve existing) rather than
+        `IN_PROGRESS` so a per-emit `*_done` flip cannot regress an already-
+        terminal `COMPLETED`/`BLOCKED` row back to `IN_PROGRESS`. The first call
+        for a brand-new session falls back to `IN_PROGRESS` via
+        `_new_progress`; later callers either omit the kwarg (preserving
+        whatever is there) or pass an explicit terminal value.
+        """
         progress = self._load_progress(session_id) or self._new_progress(session_id)
         store.upsert_writeback_progress(
             self._conn,
@@ -751,7 +761,7 @@ class DataverseWriteBackAdapter:
                     else queue_status_update_done
                 ),
                 task_done=progress.task_done if task_done is None else task_done,
-                run_status=run_status,
+                run_status=progress.run_status if run_status is None else run_status,
                 last_error=last_error if last_error is not None else progress.last_error,
                 updated_at=self._now_utc_ms(),
             ),
