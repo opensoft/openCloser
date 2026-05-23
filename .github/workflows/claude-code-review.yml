@@ -1,0 +1,38 @@
+name: Claude Code Review
+
+# Triggers a Claude code review on every PR open/sync. Authentication uses
+# the repo secret `CLAUDE_CODE_OAUTH_TOKEN`, billed against the Claude.ai
+# Max-plan subscription that minted the token.
+#
+# A second `@claude` mention workflow is intentionally NOT included here —
+# add a separate file `.github/workflows/claude-mention.yml` listening on
+# `issue_comment` if you want to invoke Claude via PR comments later.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        # actions/checkout v4.2.2 — pinned to SHA per SonarCloud supply-chain
+        # hotspot rule (unpinned major-version tags can silently move).
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Claude review
+        # anthropics/claude-code-action v0 — pinned to SHA per same rule.
+        # Upgrade to v1 (latest) is a separate change so any behavior shift
+        # is reviewed in isolation.
+        uses: anthropics/claude-code-action@67b447c25f760f201a0e703433a01b0739c3d5df
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
