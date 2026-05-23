@@ -621,10 +621,12 @@ class DataverseEntityRef(BaseModel):
 
     `entity_set_name` is the Dataverse Web API collection name used in record
     URIs (e.g. `phonecalls` for the `phonecall` table). It defaults to None;
-    the adapter falls back to `logical_name + "s"` only when this is unset.
-    Real-environment discovery should populate this from
-    `EntityDefinition.EntitySetName` so irregular plurals work without code
-    changes (FR-001/FR-004).
+    the adapter falls back to `logical_name + "s"` (plus a curated irregular-
+    plural map) only when this is unset. Operators populate `entity_set_name`
+    by hand on PR review for any entity whose `EntitySetName` doesn't follow
+    that rule. Today `discover-crm` does NOT auto-populate this field — that's
+    a follow-on enhancement (read `EntityDefinition.EntitySetName` during
+    discovery and write it into the artifact alongside `primary_id`).
     """
 
     model_config = ConfigDict(extra="ignore")

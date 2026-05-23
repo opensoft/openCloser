@@ -348,14 +348,28 @@ def run_crm(
         typer.echo(f"error:       config load failed: {exc}", err=True)
         raise typer.Exit(code=2) from None
 
+    effective_campaign = campaign or slice2_config.run.campaign
     selector = _build_selector(
         queue_item_id=queue_item_id,
         next_ready=next_ready,
-        campaign=campaign or slice2_config.run.campaign,
+        campaign=effective_campaign,
     )
     if selector is None:
         typer.echo(
             "error:       provide exactly one of --queue-item-id or --next-ready",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    # `--next-ready` requires a non-empty campaign so the queue-loader's
+    # selector carries the scope the contract demands (cli-slice2.md). Without
+    # one, the loader's query is currently campaign-agnostic — surfacing this
+    # at the CLI is the smallest fix that avoids silently picking items
+    # outside the operator's intended campaign. (Filtering the actual loader
+    # query by campaign is a queue-loader (T014) concern and tracked in US3.)
+    if next_ready and not effective_campaign:
+        typer.echo(
+            "error:       --next-ready requires --campaign (or a non-empty "
+            "[run].campaign in slice2.toml).",
             err=True,
         )
         raise typer.Exit(code=2)

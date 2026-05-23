@@ -77,8 +77,10 @@ def _derive_entity_set(logical_name: str) -> str:
     appends `"s"`. This covers every entity Slice 2 references in practice
     (`phonecall`/`task`/`medx_*`/`systemuser`/`team`/`account`); for any other
     OOTB or custom table the mapping artifact MUST populate
-    `entity_set_name` explicitly — `discover-crm` would normally read this
-    from `EntityDefinition.EntitySetName` against live Dataverse.
+    `entity_set_name` explicitly. Today `discover-crm` only refreshes
+    `_meta.discovered_at`/`approved` and does NOT auto-populate
+    `entity_set_name` from `EntityDefinition.EntitySetName` — operators set
+    it by hand on PR review. (Auto-population is tracked for a later slice.)
     """
     return _ENTITY_SET_OVERRIDES.get(logical_name, logical_name + "s")
 
