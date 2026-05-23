@@ -125,10 +125,24 @@ def test_us6_summary_only_removes_stale_transcript(tmp_artifact_dir: Path) -> No
     assert sr["transcript_pointer"] is None
 
 
-def test_us6_no_transcript_text_nulls_pointer(tmp_artifact_dir: Path) -> None:
+def test_us6_no_transcript_text_nulls_pointer_and_removes_stale(
+    tmp_artifact_dir: Path,
+) -> None:
     """When the caller supplies no transcript text, ``transcript_pointer`` must be
-    null in session-result.json so no artifact reader is led to a missing file."""
+    null in session-result.json AND any transcript file from an earlier run must
+    be removed so the exported pointer stays consistent with what is on disk."""
     session_id = "ses_us6_none"
+
+    # Prime the session dir with a stale transcript file (as if a prior run wrote one).
+    write_session_artifacts(
+        artifact_root=tmp_artifact_dir,
+        session_id=session_id,
+        **_inputs(session_id),
+    )
+    stale = tmp_artifact_dir / session_id / "transcript.txt"
+    assert stale.exists()
+
+    # Now re-emit with no transcript text — the writer must clean up.
     paths = write_session_artifacts(
         artifact_root=tmp_artifact_dir,
         session_id=session_id,
@@ -136,6 +150,7 @@ def test_us6_no_transcript_text_nulls_pointer(tmp_artifact_dir: Path) -> None:
         **make_artifact_inputs(session_id, transcript_text=None, summary=_SUMMARY),
     )
     assert paths.transcript is None
+    assert not stale.exists(), "Stale transcript must be removed when no transcript_text supplied"
     sr = json.loads(paths.session_result.read_text(encoding="utf-8"))
     assert sr["transcript_pointer"] is None
     assert sr["summary"] == _SUMMARY

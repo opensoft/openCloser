@@ -42,8 +42,11 @@ def make_artifact_inputs(
         persona_version="alf-appointment-setter@0.1.0",
         final_disposition=Disposition.INTERESTED_CALLBACK_REQUESTED,
         summary=summary,
-        # Mirror the orchestrator: only advertise a transcript file when one will
-        # actually be written. Keeps the fixture from generating dangling pointers.
+        # Mirror what an orchestrator would carry: when callers supply transcript
+        # text, advertise the conventional filename; when they don't, leave the
+        # pointer null. The writer still has the final say (e.g. summary-only
+        # retention will null the pointer it actually emits) — this just keeps
+        # the fixture from injecting a guaranteed-dangling pointer at the source.
         transcript_pointer="transcript.txt" if transcript_text is not None else None,
         callback_requested=True,
         preferred_callback_window="Thursday 14:00",

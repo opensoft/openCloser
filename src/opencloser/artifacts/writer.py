@@ -105,9 +105,11 @@ def write_session_artifacts(
     if transcript_will_be_written:
         transcript_path = session_dir / _TRANSCRIPT_FILENAME
         _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
-    elif summary_only:
-        # FR-030: idempotent re-emit under summary-only must not leave a stale
-        # transcript on disk from an earlier run with a different retention mode.
+    else:
+        # FR-030 + FR-019: when no transcript will be written (summary-only retention
+        # OR no transcript_text supplied), any transcript file from an earlier run
+        # must be removed so session-result.json's null pointer stays consistent with
+        # what is actually on disk and no stale PII is preserved.
         (session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
