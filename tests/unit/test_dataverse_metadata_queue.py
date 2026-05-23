@@ -187,7 +187,7 @@ def test_load_next_ready_rejects_when_campaign_unmapped() -> None:
             "account": [_ACCOUNT],
         }
     )
-    with pytest.raises(QueueLoadError, match="queue.campaign"):
+    with pytest.raises(QueueLoadError, match=r"queue\.campaign"):
         loader.load(NextReady("any-campaign"))
 
 

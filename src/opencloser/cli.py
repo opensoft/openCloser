@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 
 from opencloser.core.clock import SystemClock
 from opencloser.core.config import (
@@ -242,7 +243,7 @@ def discover_crm(
     """
     try:
         slice2_config = load_slice2_config(slice2_config_path)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, ValidationError) as exc:
         typer.echo(f"error:       could not load {slice2_config_path}: {exc}", err=True)
         raise typer.Exit(code=2) from None
 
@@ -354,7 +355,7 @@ def run_crm(
     try:
         slice1_config = load_config(config_path)
         slice2_config = load_slice2_config(slice2_config_path)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, ValidationError) as exc:
         typer.echo(f"error:       config load failed: {exc}", err=True)
         raise typer.Exit(code=2) from None
 
@@ -381,10 +382,10 @@ def run_crm(
         raise typer.Exit(code=2)
     # `--next-ready` requires a non-empty campaign so the queue-loader's
     # selector carries the scope the contract demands (cli-slice2.md). The
-    # loader's NextReady path now filters by campaign when the mapping carries
-    # a `queue.campaign` field; when the mapping omits that field, the query
-    # falls back to a campaign-agnostic match and this CLI gate is the only
-    # user-facing protection against picking the wrong campaign's row.
+    # loader's NextReady path filters by `queue.campaign` when the mapping
+    # carries that field, and raises `QueueLoadError` when it doesn't — this
+    # CLI gate just turns a missing operator argument into a clean exit code
+    # instead of a deeper failure.
     if next_ready and not effective_campaign:
         typer.echo(
             "error:       --next-ready requires --campaign (or a non-empty "

@@ -64,7 +64,10 @@ ExitStatus = Literal[
     "failed",
 ]
 
-# Anchored E.164: leading +, then 1-15 digits.
+# Anchored E.164: leading `+`, then a non-zero leading digit, then 1-14 more
+# digits (so 2-15 digits total). The minimum-two requirement comes from the
+# mandatory `[1-9]` prefix; in practice every real-world E.164 number has at
+# least a country code plus a subscriber digit.
 _E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 
 
@@ -186,13 +189,26 @@ def run_one_crm_item(
     # 5) Construct the boundary objects + adapter and call the orchestrator. The
     # conversation-fixture load is inside the try block so a missing or malformed
     # fixture file produces an exit_status=failed report rather than an unhandled
-    # exception.
+    # exception. A `failure_conn_factory` opens a peer SQLite connection so the
+    # adapter's failure ledger writes survive the orchestrator's
+    # `with store.transaction(conn)` rollback on emit_* failure.
+    state_db_path = slice1_config.state.db
+
+    def _open_failure_conn() -> sqlite3.Connection:
+        peer = store.connect(state_db_path)
+        # `store.connect()` configures WAL + foreign_keys; combined with
+        # autocommit (`isolation_level=None`) and no explicit BEGIN here, each
+        # upsert commits independently of the orchestrator's transaction on
+        # the main `conn`.
+        return peer
+
     adapter = DataverseWriteBackAdapter(
         conn=conn,
         client=client,
         translator=translator,
         task_owners=slice2_config.task_owners,
         now_utc_ms=clk.now_utc_ms,
+        failure_conn_factory=_open_failure_conn,
     )
     for warning in runner_warnings:
         adapter.add_warning(warning)
@@ -240,7 +256,7 @@ def run_one_crm_item(
             warnings=adapter.warnings(),
         )
 
-    # 7) Stamp terminal progress for the resume ledger.
+    # 6) Stamp terminal progress for the resume ledger.
     terminal_status = _terminal_run_status(orchestrator_report)
     adapter.finalize_progress(orchestrator_report.session_id, run_status=terminal_status)
 

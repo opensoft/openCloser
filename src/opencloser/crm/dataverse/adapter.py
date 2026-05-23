@@ -92,6 +92,7 @@ class DataverseWriteBackAdapter:
         translator: MappingTranslator,
         task_owners: TaskOwnersConfig,
         now_utc_ms: Callable[[], str] | None = None,
+        failure_conn_factory: Callable[[], sqlite3.Connection] | None = None,
     ) -> None:
         self._conn = conn
         self._client = client
@@ -101,6 +102,14 @@ class DataverseWriteBackAdapter:
         self._aggregates: dict[str, _AggregateBuilder] = {}
         # Operator-visible warnings (e.g. owner-override fallback per FR-025).
         self._warnings: list[DataQualityWarning] = []
+        # `_record_failure` needs to commit ITS rows even when the orchestrator's
+        # `with store.transaction(conn)` block rolls back the failing emit. A
+        # caller-supplied factory opens a peer SQLite connection (same WAL db)
+        # so the failure markers persist independently. When unset (legacy
+        # construction in older unit tests), `_record_failure` falls back to
+        # the shared connection — fine for tests that don't sit inside the
+        # orchestrator's transaction wrapper.
+        self._failure_conn_factory = failure_conn_factory
 
     # ----- public protocol surface -----------------------------------------
 
@@ -463,38 +472,82 @@ class DataverseWriteBackAdapter:
         coordinator into replaying a write that already succeeded (and which the
         adapter's idempotency pre-query would detect anyway, but the ledger
         should not lie).
+
+        When a `failure_conn_factory` is configured, the writes commit on a peer
+        SQLite connection so they survive the orchestrator's `with
+        store.transaction(conn)` rollback that fires when this method's caller
+        re-raises. Without that factory (older unit-test construction), the
+        writes go on the shared connection and may be rolled back — acceptable
+        for tests that don't sit inside the orchestrator transaction wrapper.
         """
         now = self._now_utc_ms()
         existing = store.get_crm_correlation(self._conn, session_id, record_kind)
         previously_confirmed = (
             existing is not None and existing.write_status is CrmWriteStatus.CONFIRMED
         )
-        store.upsert_crm_correlation(
-            self._conn,
-            CrmCorrelation(
-                session_id=session_id,
-                record_kind=record_kind,
-                idempotency_key=session_id,
-                # Keep the confirmed record id when the prior write succeeded.
-                dataverse_record_id=(
-                    existing.dataverse_record_id if previously_confirmed else dataverse_record_id
-                ),
-                write_status=(
-                    CrmWriteStatus.CONFIRMED if previously_confirmed else CrmWriteStatus.FAILED
-                ),
-                created_at=existing.created_at if existing else now,
-                updated_at=now,
+        correlation = CrmCorrelation(
+            session_id=session_id,
+            record_kind=record_kind,
+            idempotency_key=session_id,
+            # Keep the confirmed record id when the prior write succeeded.
+            dataverse_record_id=(
+                existing.dataverse_record_id if previously_confirmed else dataverse_record_id
             ),
+            write_status=(
+                CrmWriteStatus.CONFIRMED if previously_confirmed else CrmWriteStatus.FAILED
+            ),
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
         )
         # Don't regress a `*_done=True` flag set by a prior successful emit —
-        # only mark it False when it hasn't been completed yet.
+        # only mark it False when it hasn't been completed yet. Similarly,
+        # preserve a terminal COMPLETED run_status: a later transient failure
+        # on an already-confirmed session must not regress the ledger from
+        # COMPLETED back to BLOCKED.
         progress = self._load_progress(session_id)
         already_done = bool(progress and getattr(progress, progress_key))
-        progress_update: dict[str, bool] = {} if already_done else {progress_key: False}
+        next_run_status = (
+            RunStatus.COMPLETED
+            if progress is not None and progress.run_status is RunStatus.COMPLETED
+            else RunStatus.BLOCKED
+        )
+        new_progress = WriteBackProgress(
+            session_id=session_id,
+            phone_call_activity_done=(
+                progress.phone_call_activity_done if progress else False
+            ),
+            queue_status_update_done=(
+                progress.queue_status_update_done if progress else False
+            ),
+            task_done=progress.task_done if progress else False,
+            run_status=next_run_status,
+            last_error=str(error),
+            updated_at=now,
+        )
+        if not already_done:
+            # The single flag the caller said failed regresses to False; the
+            # others keep whatever they had.
+            new_progress = new_progress.model_copy(update={progress_key: False})
+
+        # Persist on a peer connection when one is available so the writes
+        # survive the orchestrator's rolling-back transaction.
+        if self._failure_conn_factory is not None:
+            failure_conn = self._failure_conn_factory()
+            try:
+                store.upsert_crm_correlation(failure_conn, correlation)
+                store.upsert_writeback_progress(failure_conn, new_progress)
+            finally:
+                failure_conn.close()
+            return
+
+        # Fallback: shared connection. Used by tests that don't run inside the
+        # orchestrator's transaction wrapper.
+        progress_update = {} if already_done else {progress_key: False}
+        store.upsert_crm_correlation(self._conn, correlation)
         self._mark_progress(
             session_id,
             last_error=str(error),
-            run_status=RunStatus.BLOCKED,
+            run_status=next_run_status,
             **progress_update,
         )
 
