@@ -23,11 +23,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        # actions/checkout v4.2.2 — pinned to SHA per SonarCloud supply-chain
+        # hotspot rule (unpinned major-version tags can silently move).
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
       - name: Claude review
-        uses: anthropics/claude-code-action@v0
+        # anthropics/claude-code-action v0 — pinned to SHA per same rule.
+        # Upgrade to v1 (latest) is a separate change so any behavior shift
+        # is reviewed in isolation.
+        uses: anthropics/claude-code-action@67b447c25f760f201a0e703433a01b0739c3d5df
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
