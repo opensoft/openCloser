@@ -3,6 +3,11 @@
 Reads a transport fixture JSON file at place_call time; yields its events verbatim via
 event_stream. Stateless with respect to opencloser persistence — the orchestrator records
 events as they arrive.
+
+Slice 2 addendum (FR-019/FR-020, GitHub issue #2): `validate_fixture` performs structural
+pre-validation; `place_call` calls it before allocating a `mock_provider_call_id` so a
+malformed fixture cannot trigger any orchestrator state mutation, attempt consumption, or
+Dataverse queue update (see contracts/transport-fixture-validation.md).
 """
 
 from __future__ import annotations
@@ -21,6 +26,63 @@ logger = logging.getLogger(__name__)
 _REQUIRED_EVENT_KEYS = frozenset({"type", "event_id", "timestamp"})
 
 
+class MalformedFixtureError(ValueError):
+    """A transport fixture failed FR-019/FR-020 structural pre-validation.
+
+    Raised by :func:`validate_fixture` (and transitively by ``place_call``). The run is
+    expected to fail with no session row, no consumed attempt, and no Dataverse queue
+    update — see specs/002-mock-call-real-crm/contracts/transport-fixture-validation.md.
+
+    Inherits from :class:`ValueError` so existing operator-input error handlers (the
+    Slice 1 CLI catches ``(ValueError, OSError)`` for bad fixture input) surface a clean
+    ``error:`` line + exit code 2 rather than an uncaught traceback.
+    """
+
+
+def validate_fixture(fixture_path: str | Path) -> None:
+    """FR-019/FR-020 structural pre-validation for a transport fixture.
+
+    Raises :class:`MalformedFixtureError` if any of the following holds:
+
+    - the fixture file does not exist,
+    - the file's contents are not valid JSON,
+    - the parsed JSON is not an object with an ``events`` list,
+    - any event lacks ``type``, ``event_id``, or ``timestamp``.
+
+    Structurally valid but semantically inconsistent event sequences (e.g. out-of-order
+    timestamps, late conflicting events) are intentionally accepted; that is a
+    test-authoring concern, not a Slice 2 fixture-validation concern (spec §Edge Cases).
+    """
+    path = Path(fixture_path)
+    if not path.exists():
+        raise MalformedFixtureError(f"transport fixture not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise MalformedFixtureError(
+            f"transport fixture {path.name!r} is not valid JSON ({exc.msg})"
+        ) from exc
+    if not isinstance(data, dict) or "events" not in data:
+        raise MalformedFixtureError(
+            f"transport fixture {path.name!r} is not a JSON object with an 'events' array"
+        )
+    events = data["events"]
+    if not isinstance(events, list):
+        raise MalformedFixtureError(f"transport fixture {path.name!r}: 'events' must be a list")
+    for idx, raw_event in enumerate(events):
+        if not isinstance(raw_event, dict):
+            raise MalformedFixtureError(
+                f"transport fixture {path.name!r}: event #{idx} must be a JSON object"
+            )
+        missing = _REQUIRED_EVENT_KEYS - raw_event.keys()
+        if missing:
+            raise MalformedFixtureError(
+                f"transport fixture {path.name!r}: event #{idx} "
+                f"(event_id={raw_event.get('event_id')!r}) is missing required field(s): "
+                f"{sorted(missing)}"
+            )
+
+
 class FixtureDrivenTransport:
     """Stateless transport that yields a fixture's events in order."""
 
@@ -30,11 +92,12 @@ class FixtureDrivenTransport:
         self._pending: dict[str, Path] = {}
 
     def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:
-        """FR-007: assign a globally-unique mock_provider_call_id and stash the fixture path."""
+        """FR-007 + FR-019: assign a globally-unique mock_provider_call_id and stash
+        the fixture path, after structural pre-validation rejects malformed fixtures
+        before any call id is allocated."""
         del queue_item  # unused — the mock transport is queue-item-agnostic
         fixture_path = self._resolve_fixture_path(fixture_id)
-        if not fixture_path.exists():
-            raise FileNotFoundError(f"Transport fixture not found: {fixture_path}")
+        validate_fixture(fixture_path)  # FR-019/FR-020: raises MalformedFixtureError
         call_id = ids.new_mock_provider_call_id()
         self._pending[call_id] = fixture_path
         return call_id

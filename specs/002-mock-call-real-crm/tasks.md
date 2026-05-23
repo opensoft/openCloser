@@ -149,11 +149,11 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 
 ### Tests for User Story 5
 
-- [ ] T036 [P] [US5] Tests — US5: invalid JSON, missing `events` array, event missing an identity field, and a missing fixture file → no session row, no attempt consumed, no Dataverse queue change, in `tests/unit/test_transport_fixture_validation.py` and `tests/integration/test_us5_malformed_fixture.py` (SC-006)
+- [X] T036 [P] [US5] Tests — US5: invalid JSON, missing `events` array, event missing an identity field, and a missing fixture file → no session row, no attempt consumed, no Dataverse queue change, in `tests/unit/test_transport_fixture_validation.py` and `tests/integration/test_us5_malformed_fixture.py` (SC-006)
 
 ### Implementation for User Story 5
 
-- [ ] T035 [US5] Add `validate_fixture()` to `src/opencloser/transport/mock.py`, called inside `place_call` before any state mutation — raise `MalformedFixtureError` for invalid JSON, missing `events` array, an event missing `type`/`event_id`/`timestamp`, or a missing fixture file (FR-019/FR-020; contracts/transport-fixture-validation.md). This is the only permitted change to the transport module (FR-014).
+- [X] T035 [US5] Add `validate_fixture()` to `src/opencloser/transport/mock.py`, called inside `place_call` before any state mutation — raise `MalformedFixtureError` for invalid JSON, missing `events` array, an event missing `type`/`event_id`/`timestamp`, or a missing fixture file (FR-019/FR-020; contracts/transport-fixture-validation.md). This is the only permitted change to the transport module (FR-014).
 
 **Checkpoint**: GitHub issue #2 is resolved; malformed fixtures consume no attempt.
 
