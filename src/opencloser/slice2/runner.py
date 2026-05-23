@@ -392,15 +392,37 @@ def _verify_readiness(
     # write, session creation, or attempt increment (spec §Edge Cases
     # "Malformed redaction policy"). The constructed layer is kept and
     # threaded to `process_one_queue_item` below so operator-configured
-    # patterns/retention are actually applied during artifact export
-    # (Copilot PR #8 review: previously the layer was constructed for
-    # validation only, then discarded — a real correctness bug).
+    # patterns/retention are actually applied during artifact export.
     try:
         redaction_layer = RedactionLayer.from_config(slice2_config.redaction)
     except (ValueError, re_error) as exc:
         return CrmRunReport(
             exit_status="blocked",
             message=f"redaction policy invalid: {exc}",
+        )
+
+    # 3) T029a + SC-015 — explicit idempotency-key field check. Pure mapping
+    # lookup (no Dataverse), so it runs BEFORE `verify()` to ensure both
+    # write-enabled AND the dry-run-tolerated `verify()` failure path enforce
+    # SC-015 ("100% of the time when the mapped idempotency-key field for
+    # Phone Call activity or Task cannot be verified"). Without this ordering,
+    # a dry-run with missing creds AND a missing key-field mapping would
+    # silently pass.
+    missing_keys = [
+        key for key in ("phone_call.idempotency_key", "task.idempotency_key")
+        if key not in mapping.fields
+    ]
+    if missing_keys:
+        return CrmRunReport(
+            exit_status="blocked",
+            message=(
+                "idempotency-key field(s) not mapped: "
+                f"{', '.join(missing_keys)} — SC-015 requires every "
+                "write-enabled run to verify these key fields as real "
+                "Dataverse fields. Add them to "
+                f"{slice2_config.dataverse.mapping_artifact!r} and re-run "
+                "`discover-crm`."
+            ),
         )
 
     translator = MappingTranslator(mapping)
@@ -442,31 +464,6 @@ def _verify_readiness(
         return CrmRunReport(
             exit_status="blocked",
             message="metadata verification failed: " + "; ".join(report.missing),
-            metadata_report=report,
-        )
-
-    # T029a + SC-015 — explicit idempotency-key field check. Without these
-    # mapping entries the adapter's `_idempotent_create` would fail at write
-    # time; SC-015 requires the block to be 100% at startup. `verify()` already
-    # checks fields THAT ARE MAPPED exist in Dataverse, but here we require
-    # the mapping to declare the two idempotency-key entries at all.
-    missing_keys = [
-        key for key in ("phone_call.idempotency_key", "task.idempotency_key")
-        if key not in mapping.fields
-    ]
-    if missing_keys:
-        return CrmRunReport(
-            exit_status="blocked",
-            message=(
-                "idempotency-key field(s) not mapped: "
-                f"{', '.join(missing_keys)} — SC-015 requires every "
-                "write-enabled run to verify these key fields as real "
-                "Dataverse fields. Add them to "
-                f"{slice2_config.dataverse.mapping_artifact!r} and re-run "
-                "`discover-crm` (Copilot PR #8 review: reference the "
-                "configured mapping path so operators are not pointed at a "
-                "default that may not match their deployment)."
-            ),
             metadata_report=report,
         )
 

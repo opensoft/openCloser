@@ -258,28 +258,51 @@ def test_us3_blocks_when_dataverse_unreachable_at_start_in_write_enabled(
 
 
 @pytest.mark.parametrize(
-    "drop_kind",
-    ["phone_call", "task"],
+    ("drop_kind", "run_mode"),
+    [
+        ("phone_call", RunMode.WRITE_ENABLED),
+        ("task", RunMode.WRITE_ENABLED),
+        # Copilot PR #8 round-1 finding: the dry-run-tolerated `verify()`
+        # failure path previously skipped the SC-015 check. Lock in the
+        # corrected ordering: even with a broken client (verify fails with a
+        # tolerable 401), an unmapped idempotency-key MUST still block.
+        ("phone_call", RunMode.DRY_RUN),
+        ("task", RunMode.DRY_RUN),
+    ],
 )
 def test_us3_blocks_when_idempotency_key_field_unmapped(
     tmp_state_db: sqlite3.Connection,
     tmp_artifact_dir: Path,
     tmp_path: Path,
     drop_kind: str,
+    run_mode: RunMode,
 ) -> None:
-    """SC-015: write-enabled processing MUST be blocked 100% of the time when
-    either ``phone_call.idempotency_key`` or ``task.idempotency_key`` is
-    unmapped. The explicit T029a check produces a message naming the missing
-    key and pointing the operator at ``discover-crm``."""
+    """SC-015: processing MUST be blocked 100% of the time when either
+    ``phone_call.idempotency_key`` or ``task.idempotency_key`` is unmapped —
+    in BOTH write-enabled and dry-run. The dry-run case additionally proves
+    that the explicit SC-015 check runs BEFORE `verify()` (so the
+    dry-run-tolerated `verify()` failure path doesn't bypass it), which was
+    the Copilot PR #8 round-1 finding."""
     mapping_variant = _write_mapping_variant(tmp_path, drop_idempotency_key=drop_kind)
     mapping = load_mapping(mapping_variant)
     fake = fake_for_mapping(mapping, _seed())
     cfg = _slice2_config_shared(mapping_path=mapping_variant)
-    report = _run_write_enabled(
-        conn=tmp_state_db,
-        client=fake.client(cfg.retry),
-        artifact_dir=tmp_artifact_dir,
+
+    # For dry-run, use a broken client to prove the SC-015 gate runs BEFORE
+    # `verify()` — even when verify would tolerate the failure, the missing
+    # idempotency-key mapping MUST still block.
+    client = _broken_client() if run_mode is RunMode.DRY_RUN else fake.client(cfg.retry)
+
+    report = run_one_crm_item(
+        selector=ExplicitId(_QID),
+        transport_fixture=_TRANSPORT_FIXTURES / "connected.json",
+        conversation_fixture=_CONVERSATIONS / "interested_callback_requested.json",
+        slice1_config=_slice1_config(tmp_artifact_dir, Path(":memory:")),
         slice2_config=cfg,
+        client=client,
+        conn=tmp_state_db,
+        clock=_CLOCK,
+        run_mode=run_mode,
     )
 
     assert report.exit_status == "blocked"
