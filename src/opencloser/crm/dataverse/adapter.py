@@ -31,7 +31,6 @@ from opencloser.crm.dataverse.errors import (
 from opencloser.crm.dataverse.mapping import (
     MappingError,
     MappingTranslator,
-    resolve_entity_set,
 )
 from opencloser.models import (
     CrmCorrelation,
@@ -64,10 +63,6 @@ _TASK_EXCLUDED_DISPOSITIONS: frozenset[Disposition] = frozenset(
 
 class DataverseWriteBackError(RuntimeError):
     """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
-
-
-# Entity-set resolution moved to `mapping.derive_entity_set` so the queue loader
-# and the adapter share one source of truth.
 
 
 class _AggregateBuilder:
@@ -457,17 +452,17 @@ class DataverseWriteBackAdapter:
 
     def _entity_set(self, entity_key: str) -> str:
         """Resolve the Dataverse Web API entity-set (collection) name for an entity
-        key. Thin wrapper around the shared `mapping.resolve_entity_set` helper —
-        kept as a method so the adapter's call sites read naturally."""
-        return resolve_entity_set(self._t.mapping, entity_key)
+        key. Thin wrapper around `MappingTranslator.entity_set_name` so the
+        adapter's call sites read naturally."""
+        return self._t.entity_set_name(entity_key)
 
     def _primary_id(self, entity_key: str) -> str:
         """Return the mapped primary-id column for an entity. Raises `MappingError`
         when the mapping omits it — Dataverse activity tables use `activityid`
         (not `<logical>id`), so a silent fallback would generate broken $select
         clauses for `phone_call_activity` / `task` (FR-001/FR-004)."""
-        ref = self._t.mapping.entities.get(entity_key)
-        if ref is None or not ref.primary_id:
+        ref = self._t.entity(entity_key)
+        if not ref.primary_id:
             raise MappingError(
                 f"mapping artifact is missing entities[{entity_key!r}].primary_id — "
                 "Dataverse activity tables use 'activityid', not '<logical>id', and "
@@ -686,7 +681,7 @@ class DataverseWriteBackAdapter:
                 # benign — try the next entity set. Anything else (401/403
                 # permission regression, 400 malformed query) is real and must
                 # surface, so emit_task can record a failed task correlation.
-                if "HTTP 404" in str(exc):
+                if exc.status_code == 404:
                     continue
                 raise
             if rows:

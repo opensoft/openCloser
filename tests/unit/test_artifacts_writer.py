@@ -8,17 +8,12 @@ import pytest
 
 from opencloser.artifacts.writer import write_session_artifacts
 from opencloser.models import (
-    CallableStatus,
     ConflictingEventAuditRecord,
     Disposition,
     EventType,
-    ExportedEligibilityDecision,
-    NormalizedResult,
-    PhoneCallActivityPayload,
-    QueueStatusUpdatePayload,
-    TaskPayload,
     WriteBack,
 )
+from tests.fixtures.artifact_inputs import make_artifact_inputs
 
 pytestmark = pytest.mark.module("artifacts")
 
@@ -26,70 +21,7 @@ _T = "2026-05-19T17:00:00.000Z"
 
 
 def _make_inputs(session_id: str = "ses_1") -> dict[str, object]:
-    nr = NormalizedResult(
-        session_id=session_id,
-        queue_item_id="q1",
-        mock_provider_call_id="call_x",
-        persona_version="alf-appointment-setter@0.1.0",
-        final_disposition=Disposition.INTERESTED_CALLBACK_REQUESTED,
-        summary="Decision-maker confirmed interested; callback requested Thursday 14:00.",
-        transcript_pointer="transcript.txt",
-        callback_requested=True,
-        preferred_callback_window="Thursday 14:00",
-        captured_email="ok@example.com",
-        started_at=_T,
-        ended_at=_T,
-    )
-    activity = PhoneCallActivityPayload(
-        session_id=session_id,
-        queue_item_id="q1",
-        mock_provider_call_id="call_x",
-        persona_version="alf-appointment-setter@0.1.0",
-        final_disposition=Disposition.INTERESTED_CALLBACK_REQUESTED,
-        summary=nr.summary or "",
-        started_at=_T,
-        ended_at=_T,
-    )
-    status = QueueStatusUpdatePayload(
-        session_id=session_id,
-        queue_item_id="q1",
-        previous_status=CallableStatus.READY,
-        new_status=CallableStatus.READY,
-        transition_reason="interested_callback_requested",
-        transition_at=_T,
-    )
-    task = TaskPayload(
-        task_id="task_1",
-        session_id=session_id,
-        queue_item_id="q1",
-        task_kind="callback",
-        subject="Callback Thursday 14:00",
-        preferred_callback_window="Thursday 14:00",
-        captured_email="ok@example.com",
-        persona_version="alf-appointment-setter@0.1.0",
-        created_at=_T,
-    )
-    writeback = WriteBack(
-        session_id=session_id,
-        phone_call_activity=activity,
-        queue_status_update=status,
-        task=task,
-    )
-    eligibility = ExportedEligibilityDecision(
-        decision_id="dec_1",
-        queue_item_id="q1",
-        session_id=session_id,
-        decided_at=_T,
-        outcome="allow",
-        rules={"a": True, "b": True, "c": True, "d": True, "e": True, "f": True},
-    )
-    return {
-        "normalized_result": nr,
-        "writeback": writeback,
-        "eligibility_decision": eligibility,
-        "task": task,
-        "transcript_text": "[persona] Hi, this is an AI assistant.\n[contact] Sure.\n",
-    }
+    return make_artifact_inputs(session_id)
 
 
 def test_artifacts_written_to_session_dir(tmp_artifact_dir: Path) -> None:

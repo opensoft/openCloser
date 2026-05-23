@@ -71,7 +71,12 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     for ekey, eref in mapping.entities.items():
         primary_id = eref.primary_id or f"{eref.logical_name}id"
         attrs = {primary_id}
-        attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
+        for field in mapping.fields.values():
+            if field.entity != ekey:
+                continue
+            attrs.add(field.logical_name)
+            if field.type == "lookup":
+                attrs.add(f"_{field.logical_name}_value")
         # Phone Call activity / Task base fields the adapter writes (FR-003
         # non-approved base fields are part of the entity schema we POST against,
         # not gated by `approved_update_field`).
@@ -90,10 +95,40 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     return entities
 
 
+def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
+    entity_sets = {
+        eref.logical_name: eref.entity_set_name
+        for eref in mapping.entities.values()
+        if eref.entity_set_name
+    }
+    entity_sets.update({"systemuser": "systemusers", "team": "teams"})
+    return entity_sets
+
+
+def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
+    out: dict[tuple[str, str], set[int]] = {}
+    for entry in mapping.option_sets.values():
+        field_ref = mapping.fields.get(entry.field)
+        if field_ref is None or field_ref.entity not in mapping.entities:
+            continue
+        entity_logical = mapping.entities[field_ref.entity].logical_name
+        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
+    return out
+
+
+def _fake(mapping: DataverseMapping, records: dict[str, list[dict]]) -> DataverseFake:
+    return DataverseFake(
+        entities=_entities(mapping),
+        records=records,
+        option_sets=_option_sets(mapping),
+        entity_sets=_entity_sets(mapping),
+    )
+
+
 def _seed_queue_row(records: dict[str, list[dict]], override_owner: str | None = None) -> None:
     row = {
         "medx_callqueueitemid": _QID,
-        "medx_accountid": "a-0001",
+        "_medx_accountid_value": "a-0001",
         "medx_phonenumber": "+15305551234",
         "medx_timezone": "America/Los_Angeles",
         "medx_attemptcount": 0,
@@ -104,6 +139,7 @@ def _seed_queue_row(records: dict[str, list[dict]], override_owner: str | None =
         "medx_lastsessionid": None,
         "medx_lasterror": None,
         "medx_nextattemptat": "2026-05-22T16:00:00.000Z",
+        "_medx_campaignid_value": "alf-q2-davis",
         "medx_assignedownerid": override_owner,
     }
     records.setdefault("medx_callqueueitem", []).append(row)
@@ -150,7 +186,7 @@ def _adapter(
 ) -> tuple[DataverseWriteBackAdapter, DataverseFake]:
     mapping = load_mapping(_MAPPING_FIXTURE)
     _seed_default_owners(records)
-    fake = DataverseFake(entities=_entities(mapping), records=records)
+    fake = _fake(mapping, records)
     adapter = DataverseWriteBackAdapter(
         conn=conn,
         client=fake.client(_RETRY),
@@ -250,7 +286,7 @@ def test_per_disposition_emission_matches_contract(
         adapter.emit_task(_task(task_kind))
 
     # Phone Call activity: created iff the map says so.
-    phonecall_creates = [body for entity, body in fake.created if entity == "phonecalls"]
+    phonecall_creates = [body for entity, body in fake.created if entity == "phonecall"]
     assert (len(phonecall_creates) == 1) is emits_pca, (
         f"phone_call_activity emission mismatch for {disposition.value}"
     )
@@ -259,7 +295,7 @@ def test_per_disposition_emission_matches_contract(
 
     # Queue PATCH always happens (FR-029 — exactly one queue_status_update per session).
     queue_patches = [
-        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitems"
+        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
     ]
     assert len(queue_patches) == 1, f"expected exactly one queue PATCH for {disposition.value}"
     patch = queue_patches[0]
@@ -278,7 +314,7 @@ def test_per_disposition_emission_matches_contract(
     assert set(patch.keys()) <= approved
 
     # Task: created iff the map says so.
-    task_creates = [body for entity, body in fake.created if entity == "tasks"]
+    task_creates = [body for entity, body in fake.created if entity == "task"]
     assert (len(task_creates) == 1) is emits_task, f"task emission mismatch for {disposition.value}"
     if emits_task:
         body = task_creates[0]
@@ -305,7 +341,7 @@ def test_emit_phone_call_activity_is_idempotent(tmp_state_db: sqlite3.Connection
     adapter.emit_phone_call_activity(payload)
     adapter.emit_phone_call_activity(payload)
 
-    assert sum(1 for e, _ in fake.created if e == "phonecalls") == 1
+    assert sum(1 for e, _ in fake.created if e == "phonecall") == 1
 
 
 def test_emit_task_belt_and_suspenders_blocks_excluded_dispositions(
@@ -318,7 +354,7 @@ def test_emit_task_belt_and_suspenders_blocks_excluded_dispositions(
     _seed_queue_row(records)
     adapter, fake = _adapter(tmp_state_db, records)
     adapter.emit_task(_task("callback"))
-    assert not [b for e, b in fake.created if e == "tasks"]
+    assert not [b for e, b in fake.created if e == "task"]
 
 
 def test_owner_override_falls_back_with_warning_when_unverifiable(
@@ -333,7 +369,7 @@ def test_owner_override_falls_back_with_warning_when_unverifiable(
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "tasks")
+    task_body = next(b for e, b in fake.created if e == "task")
     assert task_body["ownerid@odata.bind"] == "/systemusers(owner-callback-id)"
     warnings = adapter.warnings()
     assert any(w.code == "task_owner_override_unverifiable" for w in warnings)
@@ -351,7 +387,7 @@ def test_owner_override_used_when_verifiable(tmp_state_db: sqlite3.Connection) -
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "tasks")
+    task_body = next(b for e, b in fake.created if e == "task")
     assert task_body["ownerid@odata.bind"] == "/systemusers(approved-user-id)"
     assert adapter.warnings() == []
 
@@ -369,7 +405,7 @@ def test_owner_override_skips_disabled_systemuser(tmp_state_db: sqlite3.Connecti
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "tasks")
+    task_body = next(b for e, b in fake.created if e == "task")
     assert task_body["ownerid@odata.bind"] == "/systemusers(owner-callback-id)"
     assert any(w.code == "task_owner_override_unverifiable" for w in adapter.warnings())
 
@@ -386,7 +422,7 @@ def test_owner_override_resolved_team_binds_to_teams(tmp_state_db: sqlite3.Conne
 
     adapter.emit_task(_task("callback"))
 
-    task_body = next(b for e, b in fake.created if e == "tasks")
+    task_body = next(b for e, b in fake.created if e == "task")
     assert task_body["ownerid@odata.bind"] == "/teams(approved-team-id)"
     assert adapter.warnings() == []
 
@@ -404,7 +440,7 @@ def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Conn
     _seed_queue_row(records)  # no override
     # Deliberately do NOT seed the default systemuser/team — _seed_default_owners
     # would add it, so build the fake directly here.
-    fake = DataverseFake(entities=_entities(mapping), records=records)
+    fake = _fake(mapping, records)
     adapter = DataverseWriteBackAdapter(
         conn=tmp_state_db,
         client=fake.client(_RETRY),
@@ -416,7 +452,7 @@ def test_task_blocked_when_default_owner_unverifiable(tmp_state_db: sqlite3.Conn
         adapter.emit_task(_task("callback"))
 
     # No Task created and the unverifiable-default warning is recorded.
-    assert [b for e, b in fake.created if e == "tasks"] == []
+    assert [b for e, b in fake.created if e == "task"] == []
     assert any(w.code == "task_owner_default_unverifiable" for w in adapter.warnings())
     # The failure is staged in memory; the runner persists it after the
     # orchestrator's transaction rolls back. Drive the flush here directly

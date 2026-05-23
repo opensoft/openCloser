@@ -158,7 +158,11 @@ def run_one_crm_item(
     # is included because `loader.load(...)` constructs a `QueueItem` from the
     # Dataverse row, and a schema-corrupted row (e.g. a negative `attempt_count`
     # the CHECK clause would also reject) surfaces from there.
-    loader = DataverseQueueLoader(client, translator)
+    loader = DataverseQueueLoader(
+        client,
+        translator,
+        callable_status=slice2_config.dataverse.callable_status,
+    )
     try:
         queue_item = loader.load(selector)
     except (MappingError, QueueLoadError, DataverseError, ValidationError) as exc:

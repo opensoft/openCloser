@@ -619,21 +619,25 @@ class DataverseMappingMeta(BaseModel):
 class DataverseEntityRef(BaseModel):
     """One entry of the mapping artifact's `entities` map.
 
-    `entity_set_name` is the Dataverse Web API collection name used in record
-    URIs (e.g. `phonecalls` for the `phonecall` table). It defaults to None;
-    the adapter falls back to `logical_name + "s"` (plus a curated irregular-
-    plural map) only when this is unset. Operators populate `entity_set_name`
-    by hand on PR review for any entity whose `EntitySetName` doesn't follow
-    that rule. Today `discover-crm` does NOT auto-populate this field — that's
-    a follow-on enhancement (read `EntityDefinition.EntitySetName` during
-    discovery and write it into the artifact alongside `primary_id`).
+    Dataverse Web API addresses tables under TWO names that may differ:
+
+    - `logical_name` — the singular table logical name used by metadata endpoints
+      (e.g. `EntityDefinitions(LogicalName='account')`).
+    - `entity_set_name` — the (often plural) entity-set name used in record CRUD
+      URLs (e.g. `/api/data/v9.2/accounts(id)`). Many publisher-prefixed custom
+      tables pluralize differently (e.g. `medx_callqueueitem` → `medx_callqueueitems`),
+      so we cannot derive it by appending `s`.
+
+    `entity_set_name` is optional and falls back to `logical_name` for backward
+    compatibility, but every mapping intended for live Dataverse SHOULD set both
+    explicitly (Copilot PR #3 review).
     """
 
     model_config = ConfigDict(extra="ignore")
 
     logical_name: str
-    primary_id: str | None = None
     entity_set_name: str | None = None
+    primary_id: str | None = None
 
 
 class DataverseFieldRef(BaseModel):
@@ -669,6 +673,21 @@ class DataverseMapping(BaseModel):
     task_owner_override_field: str | None = None
     preserve_if_present: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _require_entities(self) -> DataverseMapping:
+        # An artifact with no entities would parse cleanly and then pass `verify()`
+        # vacuously (ok=True after checking nothing) — a readiness-gate false
+        # positive that defers the real failure to runtime mapping errors in queue
+        # loading. Reject at load time so the failure surfaces during startup
+        # (Codex review on PR #3). `fields`/`option_sets` may legitimately be empty
+        # for a deployment that only touches the queue table without option-set or
+        # update fields, so they remain optional.
+        if not self.entities:
+            raise ValueError(
+                "DataverseMapping must declare at least one entry in `entities`"
+            )
+        return self
+
 
 # ---- Slice 2 configuration (config/slice2.toml — data-model.md §3) ----
 
@@ -683,11 +702,16 @@ class RunConfig(BaseModel):
 
 
 class DataverseConfig(BaseModel):
-    """`[dataverse]` section of slice2.toml."""
+    """`[dataverse]` section of slice2.toml.
+
+    Note: the Dataverse environment URL is **not** here — it lives only in
+    `DataverseSecrets.env_url` (loaded from the `DATAVERSE_ENV_URL` env var) so the
+    runtime has a single authoritative source for the connection target. Keeping a
+    second copy in this config file risked the two values drifting.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    env_url: str
     mapping_artifact: str
     callable_status: str
 
@@ -711,6 +735,29 @@ class TaskOwnersConfig(BaseModel):
     review: str
 
 
+# Default ``[redaction] patterns`` for the regex policy: email + NA phone numbers.
+#
+# Lives on the config so the implicit and config-driven defaults cannot diverge —
+# ``RegexRedactionPolicy`` compiles exactly the patterns it is given, no implicit
+# prepending. Operators who supply a custom ``patterns`` list replace these
+# defaults outright (set ``policy = "noop"`` to disable redaction entirely).
+#
+# Phone-number regex is privacy-conservative: separators are OPTIONAL so bare
+# 10-digit forms (e.g. ``5551234567``) are also redacted (aligned with the
+# default in ``config/slice2.toml``). This may over-match true 10-digit IDs in
+# transcript text — operators with that concern should configure stricter
+# patterns explicitly.
+_BUILTIN_REDACTION_PATTERNS: tuple[str, ...] = (
+    # Email addresses.
+    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    # North American phone numbers. Matches all of: 555-123-4567, 5551234567,
+    # 555.123.4567, (555) 123-4567, +1 555 123 4567.
+    r"(?:\+?\d{1,2}[\s.-])?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}",
+)
+
+BUILTIN_REDACTION_PATTERNS: tuple[str, ...] = _BUILTIN_REDACTION_PATTERNS
+
+
 class RedactionPolicyConfig(BaseModel):
     """`[redaction]` section (FR-028, FR-029, FR-030)."""
 
@@ -718,7 +765,9 @@ class RedactionPolicyConfig(BaseModel):
 
     policy: Literal["regex", "noop"] = "regex"
     retention: Literal["full", "summary-only"] = "full"
-    patterns: list[str] = Field(default_factory=list)
+    patterns: list[str] = Field(
+        default_factory=lambda: list(_BUILTIN_REDACTION_PATTERNS),
+    )
 
 
 class Slice2Config(BaseModel):

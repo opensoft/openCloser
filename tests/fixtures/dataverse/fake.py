@@ -26,14 +26,15 @@ from opencloser.models import RetryConfig
 
 _API_PREFIX = "/api/data/v9.2/"
 _ENTITY_DEF_RE = re.compile(r"^EntityDefinitions\(LogicalName='([^']+)'\)(/Attributes)?$")
-_RECORD_RE = re.compile(r"^([A-Za-z0-9_]+)\(([^)]+)\)$")
-
-# Dataverse activity tables share `activityid` as a canonical primary-key alias
-# alongside their own `<logical>id` column. The fake stamps both on records of
-# these entities so the mapping artifact can address them by either column.
-_ACTIVITY_ENTITY_NAMES: frozenset[str] = frozenset(
-    {"phonecall", "phonecalls", "task", "tasks", "email", "emails", "appointment", "appointments"}
+# Match Picklist OR Status metadata casts — Dataverse exposes option-set columns
+# under several derived types and the loader/verifier tries them in order.
+_OPTION_SET_META_RE = re.compile(
+    r"^EntityDefinitions\(LogicalName='([^']+)'\)"
+    r"/Attributes\(LogicalName='([^']+)'\)"
+    r"/Microsoft\.Dynamics\.CRM\.(Picklist|Status)AttributeMetadata$"
 )
+_RECORD_RE = re.compile(r"^(\w+)\(([^)]+)\)$")
+_ACTIVITY_LOGICAL_NAMES = frozenset({"phonecall", "task", "email", "appointment"})
 
 
 class _StubToken:
@@ -55,45 +56,47 @@ class DataverseFake:
         *,
         entities: dict[str, Iterable[str]],
         records: dict[str, list[dict[str, Any]]] | None = None,
+        option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
+        status_option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
+        global_option_sets: dict[tuple[str, str], Iterable[int]] | None = None,
+        entity_sets: dict[str, str] | None = None,
         env_url: str = "https://fake.crm.dynamics.com",
     ) -> None:
         self.env_url = env_url
-        # Auto-alias each registered entity with its `<name>s` form so both the
-        # logical-name URL (e.g. `/medx_callqueueitem`) and the OData entity-set
-        # URL (e.g. `/medx_callqueueitems`) resolve to the same attribute set and
-        # the same records list. Real Dataverse uses the entity-set form for
-        # record operations; the Slice 2 adapter follows that, while the Slice 2
-        # foundation `queue_loader`/`metadata` still use logical names. Aliasing
-        # lets one fake serve both consumers within a single test.
-        self._entities: dict[str, set[str]] = {}
-        for name, attrs in entities.items():
-            attr_set = set(attrs)
-            self._entities.setdefault(name, attr_set)
-            self._entities.setdefault(name + "s", attr_set)
-        # Pre-allocate ONE shared list per registered entity (even those without
-        # seed records), then alias both `<name>` and `<name>s` to it. A later
-        # POST under the entity-set name and a subsequent GET under the
-        # singular form (or vice versa) observe the same list — without this,
-        # entities like `phonecall`/`task` that start empty in the seed would
-        # diverge between their singular and plural keys after the first
-        # create.
-        self._records: dict[str, list[dict[str, Any]]] = {}
-        for name in entities:
-            shared: list[dict[str, Any]] = []
-            self._records[name] = shared
-            self._records[name + "s"] = shared
-        for name, recs in (records or {}).items():
-            target = self._records.get(name)
-            if target is None:
-                target = []
-                self._records[name] = target
-                self._records[name + "s"] = target
-            target.extend(dict(r) for r in recs)
+        self._entities = {name: set(attrs) for name, attrs in entities.items()}
+        self._records = {name: [dict(r) for r in recs] for name, recs in (records or {}).items()}
+        # (entity_logical, attribute_logical) -> set of valid option-set integer values,
+        # keyed by metadata cast ('Picklist' or 'Status'). The loader/verifier tries
+        # casts in order and accepts the first hit (Codex review on PR #3).
+        self._option_sets_by_cast: dict[str, dict[tuple[str, str], set[int]]] = {
+            "Picklist": {k: set(v) for k, v in (option_sets or {}).items()},
+            "Status": {k: set(v) for k, v in (status_option_sets or {}).items()},
+        }
+        # Global-choice option-sets: values come back under `GlobalOptionSet`
+        # instead of `OptionSet` (Codex review on PR #3).
+        self._global_option_sets: dict[tuple[str, str], set[int]] = {
+            k: set(v) for k, v in (global_option_sets or {}).items()
+        }
+        # logical → entity-set name, for serving `EntitySetName` in entity-def
+        # metadata responses (Codex review on PR #3).
+        self._entity_set_names: dict[str, str] = dict(entity_sets or {})
+        # Record-URL collection-name → internal logical key. Real Dataverse uses the
+        # entity-set name (e.g. `accounts`) for record CRUD URLs but the logical name
+        # for metadata URLs; the fake accepts EITHER as a record-URL collection so
+        # legacy tests (logical-only) keep working alongside set-name-driven tests
+        # (Copilot PR #3 review on `queue_loader.py`).
+        self._collection_to_logical: dict[str, str] = {name: name for name in self._entities}
+        for logical, set_name in (entity_sets or {}).items():
+            self._collection_to_logical[set_name] = logical
         self._fail_remaining = 0
         self._fail_status = 503
         self.created: list[tuple[str, dict[str, Any]]] = []  # (entity, record) — POST log
         self.patched: list[tuple[str, str, dict[str, Any]]] = []  # (entity, id, changes)
         self.request_count = 0
+
+    def _resolve_collection(self, url_name: str) -> str | None:
+        """URL record-collection name → internal logical key, or None if unknown."""
+        return self._collection_to_logical.get(url_name)
 
     # -- failure injection -------------------------------------------------
 
@@ -131,6 +134,15 @@ class DataverseFake:
         resource = path[len(_API_PREFIX) :]
         method = request.method.upper()
 
+        option_set_meta = _OPTION_SET_META_RE.match(resource)
+        if option_set_meta is not None and method == "GET":
+            return self._handle_option_set_metadata(
+                request,
+                option_set_meta.group(1),
+                option_set_meta.group(2),
+                option_set_meta.group(3),  # 'Picklist' or 'Status'
+            )
+
         meta = _ENTITY_DEF_RE.match(resource)
         if meta is not None:
             return self._handle_metadata(request, meta.group(1), bool(meta.group(2)))
@@ -153,12 +165,56 @@ class DataverseFake:
         if attributes:
             value = [{"LogicalName": attr} for attr in sorted(self._entities[logical_name])]
             return httpx.Response(200, json={"value": value}, request=request)
-        return httpx.Response(200, json={"LogicalName": logical_name}, request=request)
+        # The entity-definition payload carries `EntitySetName` in real Dataverse;
+        # surface what's registered in `entity_sets` (or fall back to the logical
+        # name) so verification can compare against the mapping (Codex PR #3 review).
+        body = {
+            "LogicalName": logical_name,
+            "EntitySetName": self._entity_set_names.get(logical_name, logical_name),
+        }
+        return httpx.Response(200, json=body, request=request)
+
+    def _handle_option_set_metadata(
+        self, request: httpx.Request, entity_logical: str, attr_logical: str, cast: str
+    ) -> httpx.Response:
+        """Serve the OptionSet for an attribute under the requested metadata cast
+        ('Picklist' or 'Status'). Returns 404 when the entity/attribute is unknown
+        OR when no option-set was registered for this cast (Codex review on PR #3).
+
+        Values registered in `option_sets`/`status_option_sets` come back under
+        `OptionSet`; values registered in `global_option_sets` come back under
+        `GlobalOptionSet` with `OptionSet` null — mirroring how Dataverse exposes
+        local vs. referenced-global choices.
+        """
+        if (
+            entity_logical not in self._entities
+            or attr_logical not in self._entities[entity_logical]
+        ):
+            return httpx.Response(404, request=request)
+        values = self._option_sets_by_cast[cast].get((entity_logical, attr_logical))
+        if values is not None:
+            options = [{"Value": v} for v in sorted(values)]
+            return httpx.Response(
+                200, json={"OptionSet": {"Options": options}}, request=request
+            )
+        global_values = self._global_option_sets.get((entity_logical, attr_logical))
+        if global_values is not None:
+            options = [{"Value": v} for v in sorted(global_values)]
+            return httpx.Response(
+                200,
+                json={
+                    "OptionSet": None,
+                    "GlobalOptionSet": {"Options": options},
+                },
+                request=request,
+            )
+        return httpx.Response(404, request=request)
 
     def _handle_query(self, request: httpx.Request, entity: str) -> httpx.Response:
-        if entity not in self._entities:
+        logical = self._resolve_collection(entity)
+        if logical is None:
             return httpx.Response(404, request=request)
-        rows = list(self._records.get(entity, []))
+        rows = list(self._records.get(logical, []))
         params = request.url.params
 
         flt = params.get("$filter")
@@ -173,69 +229,63 @@ class DataverseFake:
         select = params.get("$select")
         if select:
             keys = [k.strip() for k in select.split(",")]
-            unknown = [k for k in keys if k not in self._entities[entity]]
+            unknown = [k for k in keys if k not in self._entities[logical]]
             if unknown:  # a $select of an unmapped field is a Dataverse 400
                 return httpx.Response(
-                    400,
-                    json={"error": {"message": f"unknown field(s): {unknown}"}},
+                    400, json={"error": {"message": f"unknown field(s): {unknown}"}},
                     request=request,
                 )
             rows = [{k: r.get(k) for k in keys} for r in rows]
         return httpx.Response(200, json={"value": rows}, request=request)
 
     def _handle_create(self, request: httpx.Request, entity: str) -> httpx.Response:
-        if entity not in self._entities:
+        logical = self._resolve_collection(entity)
+        if logical is None:
             return httpx.Response(404, request=request)
         body = json.loads(request.content or b"{}")
         record_id = str(uuid.uuid4())
-        # Stamp the singular-name primary id (`<logical>id`) so
-        # `_handle_patch`/test introspection finds the row regardless of which
-        # URL form (logical name or entity-set) the caller used.
-        primary_key = _primary_id_field(entity)
-        body.setdefault(primary_key, record_id)
-        # Activities share `activityid` as a canonical primary-key alias — stamp
-        # it too so mappings that use either column resolve correctly.
-        if entity in _ACTIVITY_ENTITY_NAMES:
+        body.setdefault(f"{logical}id", record_id)
+        if logical in _ACTIVITY_LOGICAL_NAMES:
             body.setdefault("activityid", record_id)
-        self._records.setdefault(entity, []).append(dict(body))
-        self.created.append((entity, dict(body)))
+        self._records.setdefault(logical, []).append(dict(body))
+        self.created.append((logical, dict(body)))
         entity_uri = f"{self.env_url}{_API_PREFIX}{entity}({record_id})"
         return httpx.Response(204, headers={"OData-EntityId": entity_uri}, request=request)
 
     def _handle_patch(self, request: httpx.Request, entity: str, record_id: str) -> httpx.Response:
-        if entity not in self._entities:
+        logical = self._resolve_collection(entity)
+        if logical is None:
             return httpx.Response(404, request=request)
         changes = json.loads(request.content or b"{}")
         rid = record_id.strip("'")
-        primary_key = _primary_id_field(entity)
-        for row in self._records.get(entity, []):
-            if row.get(primary_key) == rid:
+        for row in self._records.get(logical, []):
+            if row.get(f"{logical}id") == rid or (
+                logical in _ACTIVITY_LOGICAL_NAMES and row.get("activityid") == rid
+            ):
                 row.update(changes)
-                self.patched.append((entity, rid, dict(changes)))
+                self.patched.append((logical, rid, dict(changes)))
                 return httpx.Response(204, request=request)
         return httpx.Response(404, request=request)
 
 
-def _primary_id_field(entity: str) -> str:
-    """Derive the primary-id column for an entity name addressed in the Web API.
-
-    Strips one trailing 's' so OData entity-set names (e.g. `medx_callqueueitems`)
-    map to the singular-form primary key (`medx_callqueueitemid`) that records are
-    actually keyed on. A name without trailing 's' is left alone."""
-    base = entity[:-1] if entity.endswith("s") else entity
-    return f"{base}id"
-
-
 def _matches_filter(row: dict[str, Any], flt: str) -> bool:
     """Support the minimal OData `$filter` Slice 2 uses: `field eq value` (string,
-    int, or guid), optionally joined by ` and `."""
-    for clause in flt.split(" and "):
-        match = re.match(r"\s*([A-Za-z0-9_]+)\s+eq\s+(.+?)\s*$", clause)
-        if match is None:
+    int, or guid), optionally joined by ` and `.
+
+    Implemented with plain string splitting (no regex) — Sonar flagged a previous
+    regex variant for polynomial-backtracking ReDoS risk (rule python:S5852).
+    """
+    for raw_clause in flt.split(" and "):
+        clause = raw_clause.strip()
+        if " eq " not in clause:
             return False
-        field, raw = match.group(1), match.group(2).strip()
+        field, raw = (part.strip() for part in clause.split(" eq ", 1))
+        if not field or not field.replace("_", "").isalnum():
+            return False
         if raw.startswith("'") and raw.endswith("'"):
-            expected: Any = raw[1:-1]
+            # OData string literals escape `'` as `''` — unescape on the way out
+            # so the comparison value matches what the seeded row stores.
+            expected: Any = raw[1:-1].replace("''", "'")
         elif raw.lower() in ("true", "false"):
             expected = raw.lower() == "true"
         else:

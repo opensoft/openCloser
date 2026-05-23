@@ -7,11 +7,18 @@ Entra ID and caches it in-process for the run lifetime. Secrets come from
 
 from __future__ import annotations
 
+import math
 import time
 
 import httpx
 
-from opencloser.crm.dataverse.errors import raise_for_dataverse_response, wrap_transport_error
+from opencloser.crm.dataverse.errors import (
+    DataverseError,
+    PermanentDataverseError,
+    TransientDataverseError,
+    _parse_retry_after,
+    is_transient_status,
+)
 from opencloser.models import DataverseSecrets
 
 _TOKEN_ENDPOINT = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
@@ -54,14 +61,90 @@ class DataverseTokenProvider:
         try:
             response = self._http.post(endpoint, data=form)
         except httpx.HTTPError as exc:
-            raise wrap_transport_error(exc) from exc
-        raise_for_dataverse_response(response)
-        body = response.json()
-        self._token = body["access_token"]
-        lifetime = float(body.get("expires_in", _DEFAULT_EXPIRES_IN))
-        self._expires_at = clock + lifetime - _EXPIRY_SKEW_SECONDS
+            raise _wrap_auth_transport_error(exc, endpoint) from exc
+        if not response.is_success:
+            raise _auth_status_error(response, endpoint)
+        try:
+            body = response.json()
+            access_token = body["access_token"]
+        except (ValueError, KeyError, TypeError) as exc:
+            # A 2xx without a usable `access_token` is an Entra ID protocol/config
+            # error — surface it as permanent so operators see the auth source instead
+            # of a bare JSON/KeyError traceback. The body is NOT echoed: token-endpoint
+            # diagnostics may include request echoes (Copilot review on PR #3).
+            raise PermanentDataverseError(
+                f"Entra ID token endpoint returned a 2xx response without a usable "
+                f"`access_token` field ({type(exc).__name__})"
+            ) from exc
+        # Reject null / empty / non-string access_token — otherwise the cached value
+        # is unusable and downstream Authorization headers will fail in confusing ways
+        # (Codex review on PR #3).
+        if not isinstance(access_token, str) or not access_token:
+            raise PermanentDataverseError(
+                "Entra ID token endpoint returned an empty or non-string "
+                "`access_token` field"
+            )
+        # `expires_in` may be missing, null, non-numeric, or otherwise unparseable —
+        # treat any parse failure as a permanent auth-payload error rather than letting
+        # a raw ValueError/TypeError escape (Codex review on PR #3).
+        raw_expires = body.get("expires_in", _DEFAULT_EXPIRES_IN)
+        try:
+            lifetime = float(raw_expires)
+        except (TypeError, ValueError) as exc:
+            raise PermanentDataverseError(
+                "Entra ID token endpoint returned a non-numeric `expires_in` value"
+            ) from exc
+        # `float()` happily accepts NaN/Infinity, which both break the cache:
+        # NaN comparisons are always False (so `clock >= self._expires_at` never
+        # triggers a refresh) and Infinity means the token never expires. A
+        # non-positive lifetime would similarly make `_expires_at <= clock` and
+        # storm Entra ID with one re-acquire per call. All three cases can only
+        # arise from a malformed token payload, so refuse them permanently
+        # (Codex + Copilot reviews on PR #3).
+        if not math.isfinite(lifetime) or lifetime <= 0:
+            raise PermanentDataverseError(
+                f"Entra ID token endpoint returned an invalid `expires_in` "
+                f"value ({lifetime!r})"
+            )
+        # Short-lived tokens (lifetime < 2 * skew) need a clamped skew, otherwise
+        # `clock + lifetime - skew` is still in the past and the cache is useless —
+        # we'd re-acquire on every Dataverse call and storm the token endpoint
+        # (Codex follow-up review on PR #3). Cap skew at half the lifetime so the
+        # cache always retains at least 50% of the token's window.
+        effective_skew = min(_EXPIRY_SKEW_SECONDS, lifetime / 2.0)
+        self._token = access_token
+        self._expires_at = clock + lifetime - effective_skew
 
     def close(self) -> None:
         """Close the owned httpx client (no-op when an external client was injected)."""
         if self._owns_http:
             self._http.close()
+
+
+# Auth-aware error wrappers — keep the Entra ID/OAuth source visible in messages so
+# operators don't mis-diagnose a token-endpoint outage as a Dataverse Web API outage
+# (Copilot review on PR #3). The transient/permanent split mirrors
+# `errors.wrap_transport_error` exactly: only timeouts and network failures are
+# transient; misconfiguration-class transport errors (UnsupportedProtocol,
+# ProtocolError, ProxyError) are permanent so the retry budget is not burned on
+# impossible requests (Copilot follow-up review on PR #3).
+def _wrap_auth_transport_error(exc: httpx.HTTPError, endpoint: str) -> DataverseError:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return TransientDataverseError(
+            f"Entra ID token endpoint unreachable ({endpoint}): {exc!r}"
+        )
+    return PermanentDataverseError(
+        f"Entra ID token endpoint error ({endpoint}): {exc!r}"
+    )
+
+
+def _auth_status_error(response: httpx.Response, endpoint: str) -> DataverseError:
+    status = response.status_code
+    detail = f"Entra ID token endpoint returned HTTP {status} ({endpoint})"
+    if is_transient_status(status):
+        return TransientDataverseError(
+            detail,
+            retry_after=_parse_retry_after(response.headers.get("Retry-After")),
+            status_code=status,
+        )
+    return PermanentDataverseError(detail, status_code=status)

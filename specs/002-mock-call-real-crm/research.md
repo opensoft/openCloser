@@ -71,7 +71,10 @@ resolved the behavioral unknowns; no `NEEDS CLARIFICATION` remained entering Pha
 - **Decision**: Non-secret Slice 2 config lives in **`config/slice2.toml`** (stdlib
   `tomllib`, env-var override — same loader pattern as `slice1.toml`). Keys: default run
   mode, callable status value, task-owner-per-kind map, redaction policy + retention mode,
-  retry tunables (max retries, base backoff, `Retry-After` cap), Dataverse environment URL.
+  retry tunables (max retries, base backoff, `Retry-After` cap), Dataverse mapping-artifact
+  path. **The Dataverse environment URL is NOT in `slice2.toml`** — it lives only in
+  `DATAVERSE_ENV_URL` (the env-var secrets bundle in §2), so the OAuth scope and Web API
+  base URL come from a single source and cannot drift (Sourcery feedback on PR #3, F5).
   Secrets stay in env vars (§2). The discovered field mapping stays in
   `dataverse_mapping.json` (§4) — config and mapping artifact are deliberately separate files
   (config = deployment knobs; mapping = discovered schema truth).

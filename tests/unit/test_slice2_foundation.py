@@ -148,13 +148,31 @@ def test_raise_for_dataverse_response_transient_with_retry_after() -> None:
     response = httpx.Response(429, headers={"Retry-After": "7"}, request=request)
     with pytest.raises(errors.TransientDataverseError) as exc_info:
         errors.raise_for_dataverse_response(response)
-    assert exc_info.value.retry_after == 7.0
+    assert exc_info.value.retry_after == pytest.approx(7.0)
 
 
 def test_raise_for_dataverse_response_permanent() -> None:
     request = httpx.Request("POST", "https://fake.crm.dynamics.com/api/data/v9.2/x")
-    with pytest.raises(errors.PermanentDataverseError):
+    with pytest.raises(errors.PermanentDataverseError) as exc_info:
         errors.raise_for_dataverse_response(httpx.Response(404, request=request))
+    assert exc_info.value.status_code == 404  # callers can narrow on 404 vs. 401/403
+
+
+def test_raise_for_dataverse_response_strips_query_string() -> None:
+    """Dataverse `$filter` predicates carry session/campaign/record GUIDs that we do
+    not want echoed into operator-visible error messages (Copilot review on PR #3)."""
+    request = httpx.Request(
+        "GET",
+        "https://fake.crm.dynamics.com/api/data/v9.2/medx_callqueueitems"
+        "?$filter=_medx_campaignid_value%20eq%20deadbeef-cafe-1234"
+        "&$select=name",
+    )
+    with pytest.raises(errors.PermanentDataverseError) as exc_info:
+        errors.raise_for_dataverse_response(httpx.Response(404, request=request))
+    message = str(exc_info.value)
+    assert "deadbeef" not in message  # the GUID inside the $filter MUST NOT leak
+    assert "$filter" not in message
+    assert "medx_callqueueitems" in message  # path itself is still useful
 
 
 def test_raise_for_dataverse_response_success_is_noop() -> None:
@@ -165,6 +183,29 @@ def test_raise_for_dataverse_response_success_is_noop() -> None:
 def test_wrap_transport_error_classifies_timeout_as_transient() -> None:
     wrapped = errors.wrap_transport_error(httpx.ConnectTimeout("timed out"))
     assert isinstance(wrapped, errors.TransientDataverseError)
+
+
+def test_wrap_transport_error_classifies_network_error_as_transient() -> None:
+    wrapped = errors.wrap_transport_error(httpx.ConnectError("refused"))
+    assert isinstance(wrapped, errors.TransientDataverseError)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.UnsupportedProtocol("bad scheme"),
+        httpx.LocalProtocolError("bad request line"),
+        httpx.ProxyError("proxy misconfig"),
+    ],
+)
+def test_wrap_transport_error_classifies_misconfiguration_as_permanent(
+    exc: httpx.HTTPError,
+) -> None:
+    """Misconfiguration-class transport errors cannot succeed on retry — classifying
+    them as transient would burn the FR-023 retry budget on impossible requests
+    (Codex review on PR #3)."""
+    wrapped = errors.wrap_transport_error(exc)
+    assert isinstance(wrapped, errors.PermanentDataverseError)
 
 
 # ---------------------------------------------------------------------------
@@ -182,12 +223,40 @@ def test_load_slice2_config() -> None:
     assert len(cfg.redaction.patterns) == 2
 
 
+def test_load_slice2_config_applies_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPENCLOSER_<SECTION>_<KEY> overrides each scalar key in slice2.toml — same
+    loader pattern as Slice 1 (research.md §5)."""
+    monkeypatch.setenv("OPENCLOSER_DATAVERSE_CALLABLE_STATUS", "in_progress")
+    monkeypatch.setenv("OPENCLOSER_RETRY_MAX_RETRIES", "7")
+    monkeypatch.setenv("OPENCLOSER_RETRY_RETRY_AFTER_CAP_SECONDS", "12.5")
+    monkeypatch.setenv("OPENCLOSER_REDACTION_RETENTION", "summary-only")
+    cfg = config.load_slice2_config(_REPO_ROOT / "config/slice2.toml")
+    assert cfg.dataverse.callable_status == "in_progress"
+    assert cfg.retry.max_retries == 7
+    assert cfg.retry.retry_after_cap_seconds == pytest.approx(12.5)
+    assert cfg.redaction.retention == "summary-only"
+
+
 def test_missing_dataverse_secrets_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in config._DATAVERSE_SECRET_ENV:
         monkeypatch.delenv(name, raising=False)
     assert sorted(config.missing_dataverse_secret_env_vars()) == sorted(
         config._DATAVERSE_SECRET_ENV
     )
+    with pytest.raises(config.Slice2ConfigError, match="DATAVERSE_TENANT_ID"):
+        config.load_dataverse_secrets()
+
+
+def test_empty_string_dataverse_secret_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret env var set to "" is just as bad as unset — both fail readiness.
+    (Sourcery suggestion — explicit coverage of the empty-string case.)"""
+    monkeypatch.setenv("DATAVERSE_TENANT_ID", "")  # explicitly empty
+    monkeypatch.setenv("DATAVERSE_CLIENT_ID", "client-x")
+    monkeypatch.setenv("DATAVERSE_CLIENT_SECRET", "secret-x")
+    monkeypatch.setenv("DATAVERSE_ENV_URL", "https://fake.crm.dynamics.com")
+    assert "DATAVERSE_TENANT_ID" in config.missing_dataverse_secret_env_vars()
     with pytest.raises(config.Slice2ConfigError, match="DATAVERSE_TENANT_ID"):
         config.load_dataverse_secrets()
 

@@ -13,70 +13,40 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from opencloser.models import DataverseFieldRef, DataverseMapping
+from opencloser.models import DataverseEntityRef, DataverseFieldRef, DataverseMapping
 
 
 class MappingError(RuntimeError):
     """Raised when the mapping artifact is missing, malformed, or a lookup has no entry."""
 
 
-# Known-irregular Dataverse entity-set names — the OOTB system tables whose
-# `EntitySetName` doesn't follow the `logical_name + "s"` convention. A
-# deployment can also populate `DataverseEntityRef.entity_set_name` per entry
-# in `config/dataverse_mapping.json` to override this map per entity.
-_ENTITY_SET_OVERRIDES: dict[str, str] = {
-    "activity": "activitypointers",
-    "opportunity": "opportunities",
-    "businessunit": "businessunits",
-    "transactioncurrency": "transactioncurrencies",
-}
-
-
-def derive_entity_set(logical_name: str) -> str:
-    """Fallback derivation when the mapping omits `entity_set_name`.
-
-    Returns the known irregular plural when one is registered, otherwise
-    appends `"s"`. This covers every entity Slice 2 references in practice
-    (`phonecall`/`task`/`medx_*`/`systemuser`/`team`/`account`); for any other
-    OOTB or custom table the mapping artifact MUST populate
-    `entity_set_name` explicitly. Today `discover-crm` does not auto-populate
-    `entity_set_name` from `EntityDefinition.EntitySetName` — operators set
-    it by hand on PR review.
-    """
-    return _ENTITY_SET_OVERRIDES.get(logical_name, logical_name + "s")
-
-
-def resolve_entity_set(mapping: DataverseMapping, entity_key: str) -> str:
-    """Return the Dataverse Web API entity-set (collection) name for a
-    conceptual entity key. Prefers the mapping's `entity_set_name` when
-    populated; falls back to `derive_entity_set` otherwise. Raises
-    `MappingError` when the entity key has no mapping at all."""
-    ref = mapping.entities.get(entity_key)
-    if ref is None:
-        raise MappingError(f"no Dataverse entity mapping for {entity_key!r}")
-    if ref.entity_set_name:
-        return ref.entity_set_name
-    return derive_entity_set(ref.logical_name)
-
-
 def load_mapping(path: str | Path) -> DataverseMapping:
     """Load and validate the Dataverse mapping artifact (FR-004).
 
-    Both JSON-decode failures and Pydantic schema-validation failures surface as
-    `MappingError`, so callers (the runner, the discover-crm CLI) handle a single
-    error type for "mapping artifact is wrong".
+    Raises `MappingError` for every load-time failure — file missing, unreadable
+    (permission denied / decode error / other OSError), JSON malformed, or schema
+    invalid — so callers can rely on a single documented exception type
+    (Codex review on PR #3).
     """
     artifact = Path(path)
     if not artifact.exists():
         raise MappingError(f"mapping artifact not found: {artifact}")
     try:
-        raw = json.loads(artifact.read_text(encoding="utf-8"))
+        text = artifact.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MappingError(
+            f"mapping artifact could not be read ({type(exc).__name__}): {exc}"
+        ) from exc
+    try:
+        raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise MappingError(f"mapping artifact is not valid JSON: {exc}") from exc
     try:
         return DataverseMapping.model_validate(raw)
     except ValidationError as exc:
-        raise MappingError(f"mapping artifact failed schema validation: {exc}") from exc
+        raise MappingError(
+            f"mapping artifact failed schema validation: {exc}"
+        ) from exc
 
 
 class MappingTranslator:
@@ -94,12 +64,24 @@ class MappingTranslator:
         """True when the mapping artifact has been PR-reviewed and approved (FR-024)."""
         return self._mapping.meta.approved
 
-    def entity_logical_name(self, entity_key: str) -> str:
-        """The Dataverse table logical name for a conceptual entity (e.g. `queue_item`)."""
-        entity = self._mapping.entities.get(entity_key)
-        if entity is None:
+    def entity(self, entity_key: str) -> DataverseEntityRef:
+        """The full entity-ref entry for a conceptual entity (e.g. `queue_item`)."""
+        ref = self._mapping.entities.get(entity_key)
+        if ref is None:
             raise MappingError(f"no Dataverse entity mapping for {entity_key!r}")
-        return entity.logical_name
+        return ref
+
+    def entity_logical_name(self, entity_key: str) -> str:
+        """The Dataverse table logical name for a conceptual entity — used by metadata
+        endpoints (`EntityDefinitions(LogicalName='...')`)."""
+        return self.entity(entity_key).logical_name
+
+    def entity_set_name(self, entity_key: str) -> str:
+        """The Dataverse entity-set name for a conceptual entity — used by record CRUD
+        URLs (`/api/data/v9.2/{entity_set}`). Falls back to the logical name when the
+        mapping artifact does not specify a separate entity-set name."""
+        ref = self.entity(entity_key)
+        return ref.entity_set_name or ref.logical_name
 
     def field(self, conceptual: str) -> DataverseFieldRef:
         """The full field mapping entry for a conceptual field name."""
@@ -132,7 +114,9 @@ class MappingTranslator:
         """Logical names of the approved Slice 2 update fields (FR-003 — only these may
         be written)."""
         return {
-            ref.logical_name for ref in self._mapping.fields.values() if ref.approved_update_field
+            ref.logical_name
+            for ref in self._mapping.fields.values()
+            if ref.approved_update_field
         }
 
     def preserve_if_present(self) -> list[str]:

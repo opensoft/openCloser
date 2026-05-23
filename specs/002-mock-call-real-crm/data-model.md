@@ -67,9 +67,14 @@ file is the "approval" gate referenced by FR-024.
     "approved": false                       // flipped to true by human PR review
   },
   "entities": {
-    "queue_item": { "logical_name": "<discovered>", "primary_id": "<discovered>" },
-    "phone_call_activity": { "logical_name": "phonecall" },
-    "task": { "logical_name": "task" }
+    // `logical_name` is the singular metadata name used by `EntityDefinitions(...)`;
+    // `entity_set_name` is the (often plural) name used in record CRUD URLs
+    // (`/api/data/v9.2/<entity_set>`). The two MAY differ for custom tables — keep
+    // both explicit. `entity_set_name` falls back to `logical_name` when omitted.
+    "queue_item": { "logical_name": "<discovered>", "entity_set_name": "<discovered>", "primary_id": "<discovered>" },
+    "phone_call_activity": { "logical_name": "phonecall", "entity_set_name": "phonecalls" },
+    "task": { "logical_name": "task", "entity_set_name": "tasks" },
+    "account": { "logical_name": "account", "entity_set_name": "accounts", "primary_id": "accountid" }
   },
   "fields": {
     // conceptual field -> Dataverse attribute
@@ -116,7 +121,8 @@ default_mode = "dry-run"          # FR-031: dry-run unless --write is passed
 campaign = ""                     # default ALF campaign selector (overridable on CLI)
 
 [dataverse]
-env_url = "https://example.crm.dynamics.com"
+# env_url is intentionally NOT here — it lives only in the DATAVERSE_ENV_URL
+# env var so the runtime has a single source of truth for the connection target.
 mapping_artifact = "config/dataverse_mapping.json"
 callable_status = "ready"         # FR-011: the queue status that is eligible to call
 

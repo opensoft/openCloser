@@ -72,7 +72,6 @@ def _slice2_config() -> Slice2Config:
     return Slice2Config(
         run=RunConfig(default_mode=RunMode.WRITE_ENABLED, campaign="alf-q2-davis"),
         dataverse=DataverseConfig(
-            env_url="https://fake.crm.dynamics.com",
             mapping_artifact=str(_MAPPING_FIXTURE),
             callable_status="ready",
         ),
@@ -87,7 +86,12 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     for ekey, eref in mapping.entities.items():
         primary_id = eref.primary_id or f"{eref.logical_name}id"
         attrs = {primary_id}
-        attrs |= {f.logical_name for f in mapping.fields.values() if f.entity == ekey}
+        for field in mapping.fields.values():
+            if field.entity != ekey:
+                continue
+            attrs.add(field.logical_name)
+            if field.type == "lookup":
+                attrs.add(f"_{field.logical_name}_value")
         if ekey == "phone_call_activity":
             attrs |= {"subject", "description", "actualstart", "actualend", "activityid"}
         if ekey == "task":
@@ -99,6 +103,36 @@ def _entities(mapping: DataverseMapping) -> dict[str, set[str]]:
     entities["systemuser"] = {"systemuserid", "isdisabled"}
     entities["team"] = {"teamid"}
     return entities
+
+
+def _entity_sets(mapping: DataverseMapping) -> dict[str, str]:
+    entity_sets = {
+        eref.logical_name: eref.entity_set_name
+        for eref in mapping.entities.values()
+        if eref.entity_set_name
+    }
+    entity_sets.update({"systemuser": "systemusers", "team": "teams"})
+    return entity_sets
+
+
+def _option_sets(mapping: DataverseMapping) -> dict[tuple[str, str], set[int]]:
+    out: dict[tuple[str, str], set[int]] = {}
+    for entry in mapping.option_sets.values():
+        field_ref = mapping.fields.get(entry.field)
+        if field_ref is None or field_ref.entity not in mapping.entities:
+            continue
+        entity_logical = mapping.entities[field_ref.entity].logical_name
+        out.setdefault((entity_logical, field_ref.logical_name), set()).add(entry.value)
+    return out
+
+
+def _fake(mapping: DataverseMapping, records: dict[str, list[dict]]) -> DataverseFake:
+    return DataverseFake(
+        entities=_entities(mapping),
+        records=records,
+        option_sets=_option_sets(mapping),
+        entity_sets=_entity_sets(mapping),
+    )
 
 
 def _seed(
@@ -113,7 +147,7 @@ def _seed(
         "medx_callqueueitem": [
             {
                 "medx_callqueueitemid": _QID,
-                "medx_accountid": "11111111-1111-1111-1111-111111111111",
+                "_medx_accountid_value": "11111111-1111-1111-1111-111111111111",
                 "medx_phonenumber": phone,
                 "medx_timezone": "America/Los_Angeles",
                 "medx_attemptcount": 0,
@@ -124,6 +158,7 @@ def _seed(
                 "medx_lastsessionid": None,
                 "medx_lasterror": None,
                 "medx_nextattemptat": "2026-05-22T16:00:00.000Z",
+                "_medx_campaignid_value": "alf-q2-davis",
                 "medx_assignedownerid": override_owner,
             }
         ],
@@ -167,7 +202,7 @@ def test_us1_interested_callback_requested_writes_full_loop(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = DataverseFake(entities=_entities(mapping), records=_seed())
+    fake = _fake(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -184,9 +219,9 @@ def test_us1_interested_callback_requested_writes_full_loop(
     assert report.artifact_dir is not None
 
     # Dataverse fake recorded: 1 phonecall create + 1 task create + 1 queue PATCH.
-    phonecalls = [b for e, b in fake.created if e == "phonecalls"]
-    tasks = [b for e, b in fake.created if e == "tasks"]
-    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitems"]
+    phonecalls = [b for e, b in fake.created if e == "phonecall"]
+    tasks = [b for e, b in fake.created if e == "task"]
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
     assert len(phonecalls) == 1, "exactly one Phone Call activity per session"
     assert len(tasks) == 1, "one callback Task per session"
     assert len(queue_patches) == 1, "one queue-status PATCH per session"
@@ -236,7 +271,7 @@ def test_us1_interested_email_captured_marks_completed(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = DataverseFake(entities=_entities(mapping), records=_seed())
+    fake = _fake(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -246,7 +281,7 @@ def test_us1_interested_email_captured_marks_completed(
     )
     assert report.exit_status == "completed"
     assert report.final_disposition is Disposition.INTERESTED_EMAIL_CAPTURED
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
     assert queue_patch["medx_callstatus"] == 2  # queue_status.completed
 
 
@@ -254,7 +289,7 @@ def test_us1_needs_human_review_writes_review_task(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = DataverseFake(entities=_entities(mapping), records=_seed())
+    fake = _fake(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -264,11 +299,11 @@ def test_us1_needs_human_review_writes_review_task(
     )
     assert report.exit_status == "completed"
     assert report.final_disposition is Disposition.NEEDS_HUMAN_REVIEW
-    tasks = [b for e, b in fake.created if e == "tasks"]
+    tasks = [b for e, b in fake.created if e == "task"]
     assert len(tasks) == 1
     # Review task is routed to the review owner (FR-025).
     assert tasks[0]["ownerid@odata.bind"] == f"/systemusers({_OWNER_REVIEW})"
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
     assert queue_patch["medx_callstatus"] == 3  # queue_status.blocked
 
 
@@ -276,7 +311,7 @@ def test_us1_do_not_call_sets_dnc_and_emits_no_task(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = DataverseFake(entities=_entities(mapping), records=_seed())
+    fake = _fake(mapping, _seed())
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -287,8 +322,8 @@ def test_us1_do_not_call_sets_dnc_and_emits_no_task(
     assert report.exit_status == "completed"
     assert report.final_disposition is Disposition.DO_NOT_CALL
     # No Task is emitted for DNC (FR-018).
-    assert [b for e, b in fake.created if e == "tasks"] == []
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
+    assert [b for e, b in fake.created if e == "task"] == []
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
     assert queue_patch["medx_callstatus"] == 4  # queue_status.dnc
     assert queue_patch["medx_donotcall"] is True
 
@@ -303,7 +338,7 @@ def test_us1_blocked_by_dnc_does_not_place_call(
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
     # status=3 (blocked) so the eligibility evaluator rejects rule (f).
-    fake = DataverseFake(entities=_entities(mapping), records=_seed(status=3))
+    fake = _fake(mapping, _seed(status=3))
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -315,9 +350,9 @@ def test_us1_blocked_by_dnc_does_not_place_call(
     assert report.final_disposition is Disposition.BLOCKED
     # No Phone Call activity, no Task created. Exactly one queue PATCH carries the
     # block transition_reason via queue.last_error.
-    assert [b for e, b in fake.created if e == "phonecalls"] == []
-    assert [b for e, b in fake.created if e == "tasks"] == []
-    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitems"]
+    assert [b for e, b in fake.created if e == "phonecall"] == []
+    assert [b for e, b in fake.created if e == "task"] == []
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
     assert len(queue_patches) == 1
     assert "blocked_by_eligibility" in str(queue_patches[0].get("medx_lasterror", ""))
 
@@ -331,7 +366,7 @@ def test_us1_non_e164_phone_records_warning(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = DataverseFake(entities=_entities(mapping), records=_seed(phone="555-1234"))
+    fake = _fake(mapping, _seed(phone="555-1234"))
     report = _run(
         conn=tmp_state_db,
         fake=fake,
@@ -343,7 +378,7 @@ def test_us1_non_e164_phone_records_warning(
     assert report.exit_status == "completed"
     assert any(w.code == "non_e164_phone" for w in report.warnings)
     # The queue PATCH carries the warning summary in last_error.
-    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitems")
+    queue_patch = next(c for e, _id, c in fake.patched if e == "medx_callqueueitem")
     assert "non_e164_phone" in str(queue_patch.get("medx_lasterror", ""))
 
 
@@ -356,9 +391,7 @@ def test_us1_empty_queue_is_clean_noop(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
     mapping = load_mapping(_MAPPING_FIXTURE)
-    fake = DataverseFake(
-        entities=_entities(mapping), records={"account": [], "medx_callqueueitem": []}
-    )
+    fake = _fake(mapping, {"account": [], "medx_callqueueitem": []})
     # The runner accepts a transport fixture path even though it will not be used.
     report = run_one_crm_item(
         selector=ExplicitId("does-not-exist"),
