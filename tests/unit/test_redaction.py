@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from opencloser.artifacts.writer import write_session_artifacts
-from opencloser.models import RedactionPolicyConfig
+from opencloser.models import BUILTIN_REDACTION_PATTERNS, RedactionPolicyConfig
 from opencloser.redaction.layer import (
     DEFAULT_REPLACEMENT,
     NoOpPolicy,
@@ -56,7 +56,8 @@ def test_default_layer_redacts_emails_and_phone_numbers() -> None:
     ],
 )
 def test_regex_policy_match_variants(raw: str, expected_redactions: int) -> None:
-    policy = RegexRedactionPolicy.from_patterns()
+    # Exercise the built-in defaults (email + NA phone) as they ship in the config.
+    policy = RegexRedactionPolicy.from_patterns(BUILTIN_REDACTION_PATTERNS)
     out = policy.redact(raw)
     assert out.count(DEFAULT_REPLACEMENT) == expected_redactions
 
@@ -89,8 +90,26 @@ def test_from_config_summary_only_retention() -> None:
     assert layer.retention_mode() == "summary-only"
 
 
-def test_from_config_user_extra_patterns() -> None:
+def test_from_config_user_patterns_replace_builtins() -> None:
+    """An explicit ``patterns`` list replaces the built-in defaults — config + code
+    stay aligned by giving the regex policy exactly what the operator configured.
+    To keep the built-ins, callers must include them explicitly (or omit ``patterns``
+    entirely so the field default supplies them)."""
     cfg = RedactionPolicyConfig(policy="regex", patterns=[r"SECRET-\d{4}"])
+    layer = RedactionLayer.from_config(cfg)
+    out = layer.redact("token SECRET-1234 and phone 555-123-4567")
+    # Only the user pattern matches; the built-in phone pattern is not silently applied.
+    assert out.count(DEFAULT_REPLACEMENT) == 1
+    assert "555-123-4567" in out
+
+
+def test_from_config_user_patterns_can_extend_builtins() -> None:
+    """When operators want built-ins + extras, they spell that out via
+    ``BUILTIN_REDACTION_PATTERNS`` in their config — predictable composition."""
+    cfg = RedactionPolicyConfig(
+        policy="regex",
+        patterns=[*BUILTIN_REDACTION_PATTERNS, r"SECRET-\d{4}"],
+    )
     layer = RedactionLayer.from_config(cfg)
     out = layer.redact("token SECRET-1234 and phone 555-123-4567")
     assert out.count(DEFAULT_REPLACEMENT) == 2

@@ -17,18 +17,6 @@ RetentionMode = Literal["full", "summary-only"]
 
 DEFAULT_REPLACEMENT = "[REDACTED]"
 
-# Built-in redaction patterns applied by ``RegexRedactionPolicy`` in addition to any
-# user-supplied patterns from ``[redaction] patterns``. Covers common direct-identifier
-# leakage in scripted demo transcripts (phone numbers, emails).
-_BUILTIN_PATTERNS: tuple[str, ...] = (
-    # Email addresses.
-    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-    # North American phone numbers — at least one separator required between segments
-    # so bare 10-digit IDs are not redacted. Matches: 555-123-4567, (555) 123-4567,
-    # 555.123.4567, +1 555 123 4567.
-    r"(?:\+?\d{1,2}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}",
-)
-
 
 class Policy(Protocol):
     def redact(self, transcript_text: str) -> str: ...
@@ -44,7 +32,13 @@ class NoOpPolicy:
 
 @dataclass(frozen=True, slots=True)
 class RegexRedactionPolicy:
-    """Replaces every match of the compiled patterns with ``[REDACTED]`` (FR-028)."""
+    """Replaces every match of the compiled patterns with ``[REDACTED]`` (FR-028).
+
+    Compiles exactly the patterns it is given — no implicit built-ins. The
+    config-driven default set lives in
+    ``opencloser.models.BUILTIN_REDACTION_PATTERNS`` and is wired in via
+    ``RedactionPolicyConfig.patterns`` so config and code cannot drift.
+    """
 
     _compiled: tuple[re.Pattern[str], ...]
     replacement: str = DEFAULT_REPLACEMENT
@@ -52,12 +46,12 @@ class RegexRedactionPolicy:
     @classmethod
     def from_patterns(
         cls,
-        extra_patterns: list[str] | tuple[str, ...] = (),
+        patterns: list[str] | tuple[str, ...] = (),
         *,
         replacement: str = DEFAULT_REPLACEMENT,
     ) -> RegexRedactionPolicy:
         compiled: list[re.Pattern[str]] = []
-        for raw in (*_BUILTIN_PATTERNS, *extra_patterns):
+        for raw in patterns:
             try:
                 compiled.append(re.compile(raw))
             except re.error as exc:
