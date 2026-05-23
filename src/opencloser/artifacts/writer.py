@@ -90,6 +90,14 @@ def write_session_artifacts(
     if not transcript_will_be_written and normalized_result.transcript_pointer is not None:
         normalized_result = normalized_result.model_copy(update={"transcript_pointer": None})
 
+    # FR-030 + FR-019: when no transcript will be written (summary-only retention OR no
+    # transcript_text supplied), remove any transcript file from an earlier run BEFORE
+    # writing session-result.json. If the unlink fails (locked file / permissions), we
+    # raise here without having advertised a null transcript_pointer that would leave
+    # the on-disk state both privacy-inconsistent and harder to detect.
+    if not transcript_will_be_written:
+        (session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)
+
     session_result_path = session_dir / _SESSION_RESULT_FILENAME
     _write_json_atomic(session_result_path, normalized_result)
 
@@ -105,12 +113,6 @@ def write_session_artifacts(
     if transcript_will_be_written:
         transcript_path = session_dir / _TRANSCRIPT_FILENAME
         _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
-    else:
-        # FR-030 + FR-019: when no transcript will be written (summary-only retention
-        # OR no transcript_text supplied), any transcript file from an earlier run
-        # must be removed so session-result.json's null pointer stays consistent with
-        # what is actually on disk and no stale PII is preserved.
-        (session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
     _write_json_atomic(eligibility_path, eligibility_decision)
