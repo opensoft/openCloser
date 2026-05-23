@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from opencloser.crm.dataverse.errors import PermanentDataverseError
 from opencloser.crm.dataverse.mapping import MappingTranslator, load_mapping
 from opencloser.crm.dataverse.metadata import MetadataError, discover, verify
 from opencloser.crm.dataverse.queue_loader import (
@@ -90,6 +91,15 @@ def test_verify_reports_missing_field() -> None:
     report = verify(DataverseFake(entities=entities).client(_RETRY), _MAPPING, now_utc_ms=_NOW)
     assert report.ok is False
     assert any("queue.status" in item for item in report.missing)
+
+
+def test_verify_propagates_non_404_permanent_errors() -> None:
+    """A 401/403/400 during metadata lookup is a real failure (auth/permission/bad
+    request), not "entity missing" — `_entity_attributes` MUST propagate it."""
+    fake = DataverseFake(entities=_entities(_MAPPING))
+    fake.fail_next(1, status=403)  # the first metadata call gets a 403 forbidden
+    with pytest.raises(PermanentDataverseError):
+        verify(fake.client(_RETRY), _MAPPING, now_utc_ms=_NOW)
 
 
 def test_discover_refreshes_and_requires_reapproval() -> None:

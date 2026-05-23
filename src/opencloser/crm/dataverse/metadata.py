@@ -19,11 +19,18 @@ class MetadataError(RuntimeError):
 
 def _entity_attributes(client: DataverseClient, logical_name: str) -> set[str] | None:
     """Return a Dataverse table's attribute logical names, or None if the table itself
-    cannot be found (a permanent 404 on its metadata)."""
+    cannot be found (a 404 on its metadata).
+
+    Only HTTP 404 is treated as "entity missing"; other `PermanentDataverseError`
+    cases (400 bad request, 401/403 auth/permission, etc.) are real failures and
+    propagate — they MUST NOT be silently downgraded to "missing".
+    """
     try:
         client.get(f"EntityDefinitions(LogicalName='{logical_name}')")
-    except PermanentDataverseError:
-        return None
+    except PermanentDataverseError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
     response = client.get(
         f"EntityDefinitions(LogicalName='{logical_name}')/Attributes",
         params={"$select": "LogicalName"},

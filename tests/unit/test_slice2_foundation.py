@@ -153,8 +153,9 @@ def test_raise_for_dataverse_response_transient_with_retry_after() -> None:
 
 def test_raise_for_dataverse_response_permanent() -> None:
     request = httpx.Request("POST", "https://fake.crm.dynamics.com/api/data/v9.2/x")
-    with pytest.raises(errors.PermanentDataverseError):
+    with pytest.raises(errors.PermanentDataverseError) as exc_info:
         errors.raise_for_dataverse_response(httpx.Response(404, request=request))
+    assert exc_info.value.status_code == 404  # callers can narrow on 404 vs. 401/403
 
 
 def test_raise_for_dataverse_response_success_is_noop() -> None:
