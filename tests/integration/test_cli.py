@@ -302,9 +302,12 @@ def test_cli_run_crm_rejects_non_guid_queue_item_id(tmp_path: Path) -> None:
     assert "not a valid Dataverse GUID" in out
 
 
-def test_cli_run_crm_without_write_exits_2(tmp_path: Path) -> None:
-    """`run-crm` without `--write` exits 2 with a pointer to US2 — dry-run is
-    intentionally not yet implemented."""
+def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
+    """`run-crm` without `--write` enters the FR-031 dry-run path (the previous
+    "dry-run not implemented" placeholder was removed in US2). With the
+    Dataverse secret env vars absent in the test environment, the secret-loader
+    exits 2 — proving the CLI now reaches the secret-load step rather than
+    short-circuiting on a missing-`--write` gate."""
     config_path = _write_config(tmp_path)
     run = _runner.invoke(
         app,
@@ -318,6 +321,11 @@ def test_cli_run_crm_without_write_exits_2(tmp_path: Path) -> None:
             str(config_path),
         ],
     )
+    # Same exit code (2) but different reason: now it's the credential-load gate,
+    # NOT the removed "dry-run not yet implemented" placeholder. The error must
+    # name the missing secret env vars rather than mentioning dry-run.
     assert run.exit_code == 2
     out = _combined_output(run)
-    assert "dry-run" in out.lower()
+    assert "missing required dataverse secret" in out.lower()
+    assert "dataverse_client_secret" in out.lower()
+    assert "dry-run is not yet implemented" not in out.lower()

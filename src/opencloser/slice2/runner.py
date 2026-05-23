@@ -28,6 +28,7 @@ from typing import Literal
 
 from pydantic import ValidationError
 
+from opencloser.artifacts.writer import write_dry_run_marker
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
 from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
@@ -46,6 +47,7 @@ from opencloser.models import (
     Disposition,
     MetadataVerificationReport,
     QueueItem,
+    RunMode,
     RunStatus,
     Slice2Config,
     SliceConfig,
@@ -102,21 +104,33 @@ def run_one_crm_item(
     conn: sqlite3.Connection,
     clock: Clock | None = None,
     persona: Persona | None = None,
+    run_mode: RunMode = RunMode.WRITE_ENABLED,
 ) -> CrmRunReport:
-    """Execute exactly one write-enabled Slice 2 run end-to-end.
+    """Execute exactly one Slice 2 run end-to-end.
 
     `client` is a configured `DataverseClient` (real or fake). The caller is
     responsible for its lifecycle. `conn` is an open SQLite state connection with
     schema applied.
+
+    ``run_mode`` selects between **write-enabled** (the default — performs live
+    metadata verification, claims/mutates the Dataverse queue item, and POSTs /
+    PATCHes the write-back records) and **dry-run** (FR-031 — skips live
+    `verify()`, never mutates the Dataverse queue item per FR-010, constructs
+    the adapter with ``dry_run=True`` so every ``emit_*`` captures the planned
+    payload without issuing any GET / POST / PATCH, and writes the FR-031
+    dry-run marker artifact alongside the orchestrator's session artifacts).
+    The CLI default is dry-run (FR-031, SC-013); the write-enabled path
+    requires an explicit ``--write`` flag.
     """
     clk = clock or SystemClock()
     persona = persona or ALFAppointmentSetterPersona()
+    is_dry_run = run_mode is RunMode.DRY_RUN
 
     version_report = _persona_version_mismatch_report(persona, slice1_config)
     if version_report is not None:
         return version_report
 
-    readiness = _verify_readiness(slice2_config, client, clk)
+    readiness = _verify_readiness(slice2_config, client, clk, dry_run=is_dry_run)
     if isinstance(readiness, CrmRunReport):
         return readiness
     translator = readiness.translator
@@ -153,6 +167,7 @@ def run_one_crm_item(
         translator=translator,
         task_owners=slice2_config.task_owners,
         now_utc_ms=clk.now_utc_ms,
+        dry_run=is_dry_run,
     )
     for warning in runner_warnings:
         adapter.add_warning(warning)
@@ -201,9 +216,22 @@ def run_one_crm_item(
             warnings=adapter.warnings(),
         )
 
-    # 6) Stamp terminal progress for the resume ledger.
+    # 6) Stamp terminal progress for the resume ledger. In dry-run this is a
+    # no-op inside the adapter (no Dataverse write happened, no
+    # `writeback_progress` row to record).
     terminal_status = _terminal_run_status(orchestrator_report)
     adapter.finalize_progress(orchestrator_report.session_id, run_status=terminal_status)
+
+    # 7) FR-031 dry-run marker — the Slice 1 orchestrator writes the planned
+    # `writeback.json` / `task.json` under their usual filenames (its writer
+    # call is unchanged per FR-014), so an inspector cannot tell from the
+    # filenames alone that no Dataverse write was issued. The marker file
+    # makes the dry-run nature unambiguous (SC-002, SC-013).
+    if is_dry_run and orchestrator_report.artifact_dir is not None:
+        write_dry_run_marker(
+            artifact_root=orchestrator_report.artifact_dir.parent,
+            session_id=orchestrator_report.session_id,
+        )
 
     exit_status: ExitStatus = (
         "blocked" if orchestrator_report.final_disposition is Disposition.BLOCKED else "completed"
@@ -243,6 +271,8 @@ def _verify_readiness(
     slice2_config: Slice2Config,
     client: DataverseClient,
     clk: Clock,
+    *,
+    dry_run: bool = False,
 ) -> _ReadinessResult | CrmRunReport:
     # 1) Readiness — load + validate the mapping artifact, then verify live metadata.
     try:
@@ -258,6 +288,22 @@ def _verify_readiness(
             ),
         )
     translator = MappingTranslator(mapping)
+    if dry_run:
+        # FR-007 "for the selected run mode" + spec §Edge Cases "Dry-run
+        # requested but write credentials are absent": dry-run readiness
+        # validates the local mapping artifact (above) but MUST NOT fail when
+        # live Dataverse verification cannot be performed — that gate belongs
+        # to the write-enabled path. Surface an empty placeholder report so
+        # callers downstream do not see a None.
+        return _ReadinessResult(
+            translator=translator,
+            metadata_report=MetadataVerificationReport(
+                ok=True,
+                missing=[],
+                drift=[],
+                checked_at=clk.now_utc_ms(),
+            ),
+        )
     try:
         report = verify(client, mapping, now_utc_ms=clk.now_utc_ms())
     except (DataverseError, MetadataError) as exc:
