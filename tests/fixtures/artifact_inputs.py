@@ -42,7 +42,9 @@ def make_artifact_inputs(
         persona_version="alf-appointment-setter@0.1.0",
         final_disposition=Disposition.INTERESTED_CALLBACK_REQUESTED,
         summary=summary,
-        transcript_pointer="transcript.txt",
+        # Mirror the orchestrator: only advertise a transcript file when one will
+        # actually be written. Keeps the fixture from generating dangling pointers.
+        transcript_pointer="transcript.txt" if transcript_text is not None else None,
         callback_requested=True,
         preferred_callback_window="Thursday 14:00",
         captured_email=captured_email,

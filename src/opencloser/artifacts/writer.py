@@ -62,24 +62,32 @@ def write_session_artifacts(
     task: TaskPayload | None = None,
     redaction_layer: RedactionLayer | None = None,
 ) -> ArtifactPaths:
-    """Write all per-session artifacts into ``<artifact_root>/<session_id>/`` atomically.
+    """Write all per-session artifacts into ``<artifact_root>/<session_id>/``.
 
-    Transcript text always passes through the configured ``RedactionLayer`` before disk
-    write (FR-028..FR-030). When the layer's retention mode is ``"summary-only"``, no
-    transcript file is written; the session-result summary and the rest of the Slice 1
-    artifact contract are preserved.
+    Each individual file is written atomically (tempfile + ``os.replace``); the set
+    of artifacts as a whole is not transactional. Atomicity is per-file, which is
+    what duplicate-event redelivery (FR-019) and idempotent re-emission need.
+
+    Transcript text always passes through the configured ``RedactionLayer`` before
+    disk write (FR-028..FR-030). When the layer's retention mode is
+    ``"summary-only"`` — or no transcript text was supplied — no transcript file
+    is written; the exported ``transcript_pointer`` is cleared so the
+    session-result never advertises a file that does not exist. Under
+    ``"summary-only"`` retention, any pre-existing transcript file from an
+    earlier run is removed so idempotent re-emit cannot leave PII on disk.
     """
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # Decide retention BEFORE writing session-result, so the exported pointer never
-    # advertises a transcript file that summary-only retention is about to skip
+    # advertises a transcript file that the writer is about to skip
     # (contracts/redaction-layer.md §Behavior; FR-030).
     effective_layer = redaction_layer or _DEFAULT_REDACTION_LAYER
     summary_only = (
         transcript_text is not None and effective_layer.retention_mode() == "summary-only"
     )
-    if summary_only and normalized_result.transcript_pointer is not None:
+    transcript_will_be_written = transcript_text is not None and not summary_only
+    if not transcript_will_be_written and normalized_result.transcript_pointer is not None:
         normalized_result = normalized_result.model_copy(update={"transcript_pointer": None})
 
     session_result_path = session_dir / _SESSION_RESULT_FILENAME
@@ -94,9 +102,13 @@ def write_session_artifacts(
         _write_json_atomic(task_path, task)
 
     transcript_path: Path | None = None
-    if transcript_text is not None and not summary_only:
+    if transcript_will_be_written:
         transcript_path = session_dir / _TRANSCRIPT_FILENAME
         _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
+    elif summary_only:
+        # FR-030: idempotent re-emit under summary-only must not leave a stale
+        # transcript on disk from an earlier run with a different retention mode.
+        (session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
     _write_json_atomic(eligibility_path, eligibility_decision)

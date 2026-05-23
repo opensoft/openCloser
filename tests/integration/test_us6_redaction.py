@@ -96,6 +96,51 @@ def test_us6_noop_policy_preserves_slice1_contract(tmp_artifact_dir: Path) -> No
     assert DEFAULT_REPLACEMENT not in content
 
 
+def test_us6_summary_only_removes_stale_transcript(tmp_artifact_dir: Path) -> None:
+    """FR-030 + FR-019: re-emitting a session under summary-only retention must NOT
+    leave a transcript file from a prior full-retention run on disk."""
+    session_id = "ses_us6_rerun"
+    full_layer = RedactionLayer.from_config(RedactionPolicyConfig())  # regex / full
+    write_session_artifacts(
+        artifact_root=tmp_artifact_dir,
+        session_id=session_id,
+        redaction_layer=full_layer,
+        **_inputs(session_id),
+    )
+    stale = tmp_artifact_dir / session_id / "transcript.txt"
+    assert stale.exists()
+
+    summary_only_layer = RedactionLayer.from_config(
+        RedactionPolicyConfig(policy="regex", retention="summary-only")
+    )
+    paths = write_session_artifacts(
+        artifact_root=tmp_artifact_dir,
+        session_id=session_id,
+        redaction_layer=summary_only_layer,
+        **_inputs(session_id),
+    )
+    assert paths.transcript is None
+    assert not stale.exists(), "Stale transcript must be removed under summary-only retention"
+    sr = json.loads(paths.session_result.read_text(encoding="utf-8"))
+    assert sr["transcript_pointer"] is None
+
+
+def test_us6_no_transcript_text_nulls_pointer(tmp_artifact_dir: Path) -> None:
+    """When the caller supplies no transcript text, ``transcript_pointer`` must be
+    null in session-result.json so no artifact reader is led to a missing file."""
+    session_id = "ses_us6_none"
+    paths = write_session_artifacts(
+        artifact_root=tmp_artifact_dir,
+        session_id=session_id,
+        # No redaction_layer here — exercising the cached default-on layer too.
+        **make_artifact_inputs(session_id, transcript_text=None, summary=_SUMMARY),
+    )
+    assert paths.transcript is None
+    sr = json.loads(paths.session_result.read_text(encoding="utf-8"))
+    assert sr["transcript_pointer"] is None
+    assert sr["summary"] == _SUMMARY
+
+
 def test_us6_malformed_policy_fails_readiness() -> None:
     """SC-009 / FR-028 readiness gate: a malformed regex in ``[redaction] patterns``
     fails layer construction — the orchestrator surfaces this as a readiness failure

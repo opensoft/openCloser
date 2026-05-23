@@ -102,8 +102,6 @@ class RedactionLayer:
 
     @classmethod
     def default(cls) -> RedactionLayer:
-        """Default-on layer: regex policy + full retention (FR-028 default)."""
-        return cls(
-            policy=RegexRedactionPolicy.from_patterns(),
-            _retention_mode="full",
-        )
+        """Default-on layer (FR-028): mirrors the unconfigured ``[redaction]`` section
+        so the implicit default and the config-driven default cannot drift apart."""
+        return cls.from_config(RedactionPolicyConfig())
