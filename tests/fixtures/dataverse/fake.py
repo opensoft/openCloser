@@ -246,7 +246,9 @@ def _matches_filter(row: dict[str, Any], flt: str) -> bool:
         if not field or not field.replace("_", "").isalnum():
             return False
         if raw.startswith("'") and raw.endswith("'"):
-            expected: Any = raw[1:-1]
+            # OData string literals escape `'` as `''` — unescape on the way out
+            # so the comparison value matches what the seeded row stores.
+            expected: Any = raw[1:-1].replace("''", "'")
         elif raw.lower() in ("true", "false"):
             expected = raw.lower() == "true"
         else:

@@ -45,17 +45,20 @@ _BARE_LITERAL_TYPES = frozenset({"lookup", "integer", "boolean"})
 def _odata_value(field_type: str, value: object) -> str:
     """Render `value` as an OData `$filter` RHS appropriate for `field_type`.
 
-    Lookups (`_<name>_value` GUIDs), integers, and booleans go in bare; everything
-    else (including the default `string` case) is wrapped in single quotes — the
-    OData literal form Dataverse requires. The value is always run through
-    `_odata_token` first, so anything carrying reserved characters / quotes is
-    rejected before it can break the filter or inject extra clauses (Codex review
-    on PR #3).
+    Lookups (`_<name>_value` GUIDs), integers, and booleans go in bare and ARE
+    routed through `_odata_token` — those types really shouldn't carry reserved
+    characters and the strict validator catches typos and injection attempts.
+
+    String values use the OData string-literal form: escape `'` → `''` and wrap
+    in single quotes. Validation isn't needed — the single-quote wrapping confines
+    the value, and legitimate campaign names commonly contain spaces, periods, or
+    apostrophes that the strict token validator would reject (Codex follow-up
+    review on PR #3).
     """
-    token = _odata_token(value)
     if field_type in _BARE_LITERAL_TYPES:
-        return token
-    return f"'{token}'"
+        return _odata_token(value)
+    text = str(value)
+    return "'" + text.replace("'", "''") + "'"
 
 # Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we accept any
 # value matching this safe alphanumeric+dash+underscore pattern (which covers real

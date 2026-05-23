@@ -102,8 +102,14 @@ class DataverseTokenProvider:
                 f"Entra ID token endpoint returned a non-positive `expires_in` "
                 f"value ({lifetime!r})"
             )
+        # Short-lived tokens (lifetime < 2 * skew) need a clamped skew, otherwise
+        # `clock + lifetime - skew` is still in the past and the cache is useless —
+        # we'd re-acquire on every Dataverse call and storm the token endpoint
+        # (Codex follow-up review on PR #3). Cap skew at half the lifetime so the
+        # cache always retains at least 50% of the token's window.
+        effective_skew = min(_EXPIRY_SKEW_SECONDS, lifetime / 2.0)
         self._token = access_token
-        self._expires_at = clock + lifetime - _EXPIRY_SKEW_SECONDS
+        self._expires_at = clock + lifetime - effective_skew
 
     def close(self) -> None:
         """Close the owned httpx client (no-op when an external client was injected)."""

@@ -172,6 +172,26 @@ def test_token_response_non_numeric_expires_in_raises_permanent() -> None:
         provider.token(now=0.0)
 
 
+def test_token_short_lived_lifetime_is_cached_not_re_acquired() -> None:
+    """A 30s `expires_in` is positive but shorter than the 60s skew — without
+    clamping, `_expires_at` falls in the past and every token() call re-acquires.
+    The provider must clamp the skew so a short-lived token is still cached for
+    some non-trivial window (Codex follow-up review on PR #3)."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            200, json={"access_token": "tok-short", "expires_in": 30}, request=request
+        )
+
+    provider = DataverseTokenProvider(_SECRETS, http=_mock_client(handler))
+    assert provider.token(now=0.0) == "tok-short"
+    # Half-life later, the token MUST still come from the cache, not a re-acquire.
+    assert provider.token(now=10.0) == "tok-short"
+    assert calls["n"] == 1
+
+
 @pytest.mark.parametrize("bad_lifetime", [0, -1, -3600])
 def test_token_response_non_positive_expires_in_raises_permanent(bad_lifetime: int) -> None:
     """A 0/negative `expires_in` would make every subsequent token() call re-acquire

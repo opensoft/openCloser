@@ -354,29 +354,52 @@ def test_load_next_ready_rejects_empty_campaign_when_mapped() -> None:
         loader.load(NextReady(""))
 
 
-def test_load_next_ready_quotes_string_typed_campaign_field() -> None:
-    """When `queue.campaign` is mapped as a plain string column (not a lookup), the
-    filter RHS must be `'value'`, not a bare token — otherwise the OData predicate
-    is invalid (Codex review on PR #3)."""
+def _string_campaign_loader(campaign_value: str) -> DataverseQueueLoader:
+    """A loader whose mapping types `queue.campaign` as a plain string column (not
+    a lookup), with the seeded row's campaign set to `campaign_value`. Used to
+    exercise the type-aware OData string-literal path."""
     mapping = _MAPPING.model_copy(deep=True)
-    # Convert the campaign field from lookup → string in this mapping copy so the
-    # type-aware quoting branch is exercised.
     mapping.fields["queue.campaign"] = mapping.fields["queue.campaign"].model_copy(
         update={"type": "string", "lookup_target": None}
     )
-    # Mirror that on the seeded row: a string-typed campaign lives under the bare
-    # logical name (no `_<logical>_value` for non-lookups).
     row = _queue_record(next_at="2026-05-22T16:00:00.000Z")
     row.pop("_medx_campaignid_value", None)
-    row["medx_campaignid"] = "alf-q2-davis"
+    row["medx_campaignid"] = campaign_value
     fake = DataverseFake(
         entities=_entities(mapping),
         records={"medx_callqueueitem": [row], "account": [_ACCOUNT]},
         option_sets=_option_sets(mapping),
         entity_sets=_entity_sets(mapping),
     )
-    loader = DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
+    return DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
+
+
+def test_load_next_ready_quotes_string_typed_campaign_field() -> None:
+    """When `queue.campaign` is mapped as a plain string column (not a lookup), the
+    filter RHS must be `'value'`, not a bare token — otherwise the OData predicate
+    is invalid (Codex review on PR #3)."""
+    loader = _string_campaign_loader("alf-q2-davis")
     item = loader.load(NextReady("alf-q2-davis"))
+    assert item is not None and item.queue_item_id == _QUEUE_GUID
+
+
+@pytest.mark.parametrize(
+    "campaign_value",
+    [
+        "ALF Q2 Davis",     # space — common in display names
+        "alf.q2.davis",     # period — also common
+        "It's Davis",       # apostrophe — must be escaped (' → '')
+    ],
+)
+def test_load_next_ready_string_campaign_accepts_common_characters(
+    campaign_value: str,
+) -> None:
+    """String-typed campaign values legitimately contain spaces, periods, and
+    apostrophes. The OData string-literal path must accept them (escaping `'` as
+    `''` per spec) — the strict `[A-Za-z0-9_-]` token validator was wrong here
+    (Codex follow-up review on PR #3)."""
+    loader = _string_campaign_loader(campaign_value)
+    item = loader.load(NextReady(campaign_value))
     assert item is not None and item.queue_item_id == _QUEUE_GUID
 
 
