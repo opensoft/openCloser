@@ -46,12 +46,26 @@ def _write(path: Path, text: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Error-type contract — MalformedFixtureError must remain a ValueError subclass
+# so the Slice 1 CLI's ``(ValueError, OSError)`` handler surfaces it as a clean
+# ``error:`` line + exit 2 rather than an uncaught traceback. A future refactor
+# that broke this contract should fail here before it could reach operators.
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_fixture_error_is_a_value_error_subclass() -> None:
+    assert issubclass(MalformedFixtureError, ValueError)
+
+
+# ---------------------------------------------------------------------------
 # validate_fixture — direct API (the runner's structural gate)
 # ---------------------------------------------------------------------------
 
 
 def test_validate_fixture_accepts_well_formed_fixture(tmp_path: Path) -> None:
-    """A fixture with an ``events`` array of identity-complete events passes."""
+    """A fixture with an ``events`` array of identity-complete events passes, and the
+    validated event list is returned so callers (place_call) can stash an in-memory
+    snapshot instead of re-reading the file (TOCTOU-safe)."""
     path = _write(
         tmp_path / "ok.json",
         json.dumps(
@@ -64,15 +78,16 @@ def test_validate_fixture_accepts_well_formed_fixture(tmp_path: Path) -> None:
             }
         ),
     )
-    # No assertion needed — must simply not raise.
-    validate_fixture(path)
+    events = validate_fixture(path)
+    assert [e["event_id"] for e in events] == ["e1", "e2"]
+    assert [e["type"] for e in events] == ["connected", "completed"]
 
 
 def test_validate_fixture_accepts_empty_events_array(tmp_path: Path) -> None:
     """An empty ``events`` array is structurally well-formed; semantic emptiness is the
     orchestrator's concern, not the transport's."""
     path = _write(tmp_path / "empty.json", json.dumps({"fixture_id": "empty", "events": []}))
-    validate_fixture(path)
+    assert validate_fixture(path) == []
 
 
 def test_validate_fixture_accepts_str_or_path(tmp_path: Path) -> None:
@@ -223,3 +238,52 @@ def test_place_call_propagates_missing_fixture_as_malformed_fixture_error(
     transport = FixtureDrivenTransport(tmp_path)
     with pytest.raises(MalformedFixtureError, match="not found"):
         transport.place_call(_qi(), "missing_one")
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU defense — event_stream consumes place_call's in-memory snapshot, not the
+# file. A fixture that mutates on disk after place_call cannot re-introduce a
+# mid-stream malformed-event failure that the gate is meant to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_event_stream_uses_snapshot_taken_at_place_call_time(tmp_path: Path) -> None:
+    """If the fixture file changes between place_call and event_stream, the stream
+    yields the events captured at place_call time — not whatever's now on disk."""
+    fixture_path = _write(
+        tmp_path / "snapshot.json",
+        json.dumps(
+            {
+                "events": [
+                    {"event_id": "e1", "type": "connected", "timestamp": _T},
+                    {"event_id": "e2", "type": "completed", "timestamp": _T},
+                ]
+            }
+        ),
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "snapshot")
+
+    # Mutate the fixture on disk to a now-malformed payload — event_stream MUST
+    # NOT see this and MUST NOT raise mid-stream.
+    fixture_path.write_text("this is not json anymore", encoding="utf-8")
+
+    events = list(transport.event_stream(call_id))
+    assert [e.event_id for e in events] == ["e1", "e2"]
+
+
+def test_event_stream_yields_snapshot_even_if_fixture_deleted_after_place_call(
+    tmp_path: Path,
+) -> None:
+    """Deleting the fixture between place_call and event_stream MUST NOT prevent the
+    stream from delivering the events validated at place_call time."""
+    fixture_path = _write(
+        tmp_path / "deleted_later.json",
+        json.dumps({"events": [{"event_id": "e1", "type": "no_answer", "timestamp": _T}]}),
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    call_id = transport.place_call(_qi(), "deleted_later")
+    fixture_path.unlink()
+
+    events = list(transport.event_stream(call_id))
+    assert [e.event_id for e in events] == ["e1"]

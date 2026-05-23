@@ -16,6 +16,7 @@ import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from opencloser.core import ids
 from opencloser.models import EventType, MockCallEvent, QueueItem
@@ -39,8 +40,16 @@ class MalformedFixtureError(ValueError):
     """
 
 
-def validate_fixture(fixture_path: str | Path) -> None:
+def validate_fixture(fixture_path: str | Path) -> list[dict[str, Any]]:
     """FR-019/FR-020 structural pre-validation for a transport fixture.
+
+    Reads the fixture, validates its structure, and returns the validated ``events``
+    list so callers (notably :meth:`FixtureDrivenTransport.place_call`) can stash the
+    parsed events directly — eliminating the TOCTOU window between ``place_call`` and
+    ``event_stream`` that would otherwise let a fixture mutate on disk and reintroduce
+    the partial-state behavior this gate is meant to prevent.
+
+    Callers that only want pure validation can ignore the return value.
 
     Raises :class:`MalformedFixtureError` if any of the following holds:
 
@@ -81,6 +90,7 @@ def validate_fixture(fixture_path: str | Path) -> None:
                 f"(event_id={raw_event.get('event_id')!r}) is missing required field(s): "
                 f"{sorted(missing)}"
             )
+    return events
 
 
 class FixtureDrivenTransport:
@@ -88,18 +98,21 @@ class FixtureDrivenTransport:
 
     def __init__(self, fixtures_dir: str | Path) -> None:
         self._fixtures_dir = Path(fixtures_dir)
-        # Map mock_provider_call_id → fixture path; consumed (one-shot) by event_stream.
-        self._pending: dict[str, Path] = {}
+        # Map mock_provider_call_id → (fixture_name, validated_events). The events list
+        # is captured at place_call time so event_stream consumes an in-memory snapshot
+        # rather than re-reading the file (closes the TOCTOU window between place_call's
+        # validation and event_stream's iteration). Consumed (one-shot) by event_stream.
+        self._pending: dict[str, tuple[str, list[dict[str, Any]]]] = {}
 
     def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:
         """FR-007 + FR-019: assign a globally-unique mock_provider_call_id and stash
-        the fixture path, after structural pre-validation rejects malformed fixtures
-        before any call id is allocated."""
+        the validated event list, after structural pre-validation rejects malformed
+        fixtures before any call id is allocated."""
         del queue_item  # unused — the mock transport is queue-item-agnostic
         fixture_path = self._resolve_fixture_path(fixture_id)
-        validate_fixture(fixture_path)  # FR-019/FR-020: raises MalformedFixtureError
+        events = validate_fixture(fixture_path)  # FR-019/FR-020: raises MalformedFixtureError
         call_id = ids.new_mock_provider_call_id()
-        self._pending[call_id] = fixture_path
+        self._pending[call_id] = (fixture_path.name, events)
         return call_id
 
     def event_stream(self, mock_provider_call_id: str) -> Iterator[MockCallEvent]:
@@ -110,6 +123,11 @@ class FixtureDrivenTransport:
         second call with the same id (or an id that was never placed) raises
         ``ValueError``. Callers that need the events again must persist them — the
         orchestrator does, on insert.
+
+        Iteration uses the validated event list captured by :meth:`place_call`; the
+        fixture file is not re-read here, so a fixture mutating on disk between
+        ``place_call`` and ``event_stream`` cannot reintroduce the partial-state
+        behavior FR-019/FR-020 are meant to prevent.
 
         Duplicate events are yielded verbatim; FR-019 deduplication is the
         orchestrator's job, not the transport's.
@@ -123,20 +141,11 @@ class FixtureDrivenTransport:
         ``TransportEvent`` type out of ``MockCallEvent`` is a Slice 2 cleanup
         (see contracts/transport.md).
         """
-        fixture_path = self._pending.pop(mock_provider_call_id, None)
-        if fixture_path is None:
+        pending = self._pending.pop(mock_provider_call_id, None)
+        if pending is None:
             raise ValueError(f"No fixture pending for {mock_provider_call_id!r}")
-        data = json.loads(fixture_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or "events" not in data:
-            raise ValueError(
-                f"transport fixture {fixture_path.name!r} is not a JSON object with an 'events' array"
-            )
-        for raw_event in data["events"]:
-            if not (isinstance(raw_event, dict) and raw_event.keys() >= _REQUIRED_EVENT_KEYS):
-                raise ValueError(
-                    f"transport fixture {fixture_path.name!r}: malformed event — each event "
-                    f"needs 'type', 'event_id', and 'timestamp'"
-                )
+        fixture_name, events = pending
+        for raw_event in events:
             event_type_str = raw_event["type"]
             try:
                 event_type = EventType(event_type_str)
@@ -147,7 +156,7 @@ class FixtureDrivenTransport:
                 # itself is responsible for the log.
                 logger.warning(
                     "transport fixture %s: unknown event type %r (event_id=%s) — skipping",
-                    fixture_path.name,
+                    fixture_name,
                     event_type_str,
                     raw_event.get("event_id"),
                 )
