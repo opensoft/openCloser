@@ -207,6 +207,20 @@ def test_missing_dataverse_secrets_are_reported(monkeypatch: pytest.MonkeyPatch)
         config.load_dataverse_secrets()
 
 
+def test_empty_string_dataverse_secret_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret env var set to "" is just as bad as unset — both fail readiness.
+    (Sourcery suggestion — explicit coverage of the empty-string case.)"""
+    monkeypatch.setenv("DATAVERSE_TENANT_ID", "")  # explicitly empty
+    monkeypatch.setenv("DATAVERSE_CLIENT_ID", "client-x")
+    monkeypatch.setenv("DATAVERSE_CLIENT_SECRET", "secret-x")
+    monkeypatch.setenv("DATAVERSE_ENV_URL", "https://fake.crm.dynamics.com")
+    assert "DATAVERSE_TENANT_ID" in config.missing_dataverse_secret_env_vars()
+    with pytest.raises(config.Slice2ConfigError, match="DATAVERSE_TENANT_ID"):
+        config.load_dataverse_secrets()
+
+
 def test_load_dataverse_secrets_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAVERSE_TENANT_ID", "tenant-x")
     monkeypatch.setenv("DATAVERSE_CLIENT_ID", "client-x")

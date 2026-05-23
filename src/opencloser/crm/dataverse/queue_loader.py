@@ -167,8 +167,14 @@ class DataverseQueueLoader:
         )
 
     def _facility_name(self, row: dict) -> str:
-        """Resolve the facility name from the Account lookup; fall back to the raw id."""
-        account_field = self._t.field("queue.facility_account")
+        """Resolve the facility name from the Account lookup; fall back to the raw id
+        or empty string when the lookup is absent."""
+        try:
+            account_field = self._t.field("queue.facility_account")
+        except MappingError:
+            # A deployment without an Account lookup mapping is accepted — the
+            # facility_name simply defaults to empty rather than raising.
+            return ""
         account_id = row.get(account_field.logical_name)
         if not account_id:
             return ""

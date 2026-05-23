@@ -316,6 +316,23 @@ def test_load_next_ready_rejects_unsafe_campaign_token() -> None:
         loader.load(NextReady("bad') or (1 eq 1"))
 
 
+def test_load_missing_facility_mapping_returns_empty() -> None:
+    """A mapping that omits `queue.facility_account` is accepted; facility_name
+    defaults to "" rather than raising. (Sourcery suggestion — exercise the
+    `_facility_name` MappingError fallback path.)"""
+    mapping = _MAPPING.model_copy(deep=True)
+    del mapping.fields["queue.facility_account"]
+    fake = DataverseFake(
+        entities=_entities(mapping),
+        records={"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")]},
+        option_sets=_option_sets(mapping),
+    )
+    loader = DataverseQueueLoader(fake.client(_RETRY), MappingTranslator(mapping))
+    item = loader.load(ExplicitId(_QUEUE_GUID))
+    assert item is not None
+    assert item.facility_name == ""
+
+
 def test_load_missing_account_falls_back_to_id() -> None:
     loader = _loader(
         {"medx_callqueueitem": [_queue_record(next_at="2026-05-22T16:00:00.000Z")], "account": []}

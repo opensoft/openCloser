@@ -167,6 +167,34 @@ def test_client_retries_transport_error() -> None:
     assert sleeps == [1.0, 2.0]
 
 
+def test_client_delay_with_empty_backoff_uses_zero() -> None:
+    """`RetryConfig.backoff_seconds == []` -> retries happen immediately (delay 0).
+    (Sourcery suggestion — lock in the empty-backoff semantics.)"""
+    handler, _ = _status_handler([503, 200])
+    sleeps: list[float] = []
+    retry = RetryConfig(max_retries=1, backoff_seconds=[], retry_after_cap_seconds=30.0)
+    client = DataverseClient(
+        _SECRETS.env_url, _StubToken(), retry,
+        http=_mock_client(handler), sleep=sleeps.append,
+    )
+    client.get("accounts")
+    assert sleeps == [0.0]
+
+
+def test_client_delay_with_short_backoff_repeats_last_value() -> None:
+    """A backoff list shorter than `max_retries` reuses the last value for the
+    remaining retries. (Sourcery suggestion — lock in the short-backoff semantics.)"""
+    handler, _ = _status_handler([503, 503, 503, 200])
+    sleeps: list[float] = []
+    retry = RetryConfig(max_retries=3, backoff_seconds=[1.5], retry_after_cap_seconds=30.0)
+    client = DataverseClient(
+        _SECRETS.env_url, _StubToken(), retry,
+        http=_mock_client(handler), sleep=sleeps.append,
+    )
+    client.get("accounts")
+    assert sleeps == [1.5, 1.5, 1.5]
+
+
 def test_client_post_and_patch() -> None:
     seen: list[str] = []
 
