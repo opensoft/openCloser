@@ -3,6 +3,30 @@
 Writes deterministic, sorted-keys, 2-space-indented, UTF-8, LF-ended JSON. Atomic via
 ``tempfile + os.replace`` so duplicate-event redelivery (FR-019) can re-emit identical
 bytes without races.
+
+**Retention contract (FR-035, T041)**:
+
+- Local audit artifacts are retained for **at least 90 days** by default; deployments
+  MAY configure longer retention but MUST NOT configure shorter.
+- The application **MUST NOT auto-delete** any audit artifact. Pruning is a manual
+  operator action — neither this writer nor any other module schedules deletion of
+  session artifacts, run reports, or any file under ``<artifact_root>/<session_id>/``.
+- The one exception is the FR-030 summary-only transcript sweep
+  (``_TRANSCRIPT_FILENAME.unlink`` on line ~107): when redaction retention is set to
+  ``summary-only`` the writer removes any stale transcript file from an earlier run
+  for the SAME session so PII cannot persist after a policy change. This is not an
+  auto-deletion of audit data — it is a per-session privacy enforcement at write
+  time, and ``session-result.json`` clears its ``transcript_pointer`` to match.
+- Secrets MUST NOT be retained in any local audit artifact (FR-005, FR-035). This is
+  asserted by ``tests/contract/test_no_secrets_in_artifacts.py`` (T047), which runs
+  a write-enabled flow with distinctive secret env values and greps every produced
+  artifact for those values.
+- Boundary contract (SC-010 / T040): vendor-specific Dataverse field names MUST NOT
+  appear in this module. ``tests/contract/test_boundary_isolation.py`` enforces the
+  property across the orchestrator/eligibility/transport/persona boundary modules;
+  the writer is permitted to know about ``writeback.json`` / ``task.json`` filenames
+  because those carry the Slice 1 CONCEPTUAL contract payloads, not vendor logical
+  names.
 """
 
 from __future__ import annotations

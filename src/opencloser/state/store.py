@@ -2,6 +2,23 @@
 
 Stateless module: each public function takes an explicit ``sqlite3.Connection`` or a
 context manager that yields one. The orchestrator owns connection lifetime.
+
+**Slice 2 retention contract (FR-023, T041)**:
+
+- The Slice 2 ``crm_correlations`` and ``writeback_progress`` rows are retained for
+  **at least 90 days**, or until local audit-artifact retention (FR-035) expires —
+  whichever is longer — so a later CLI re-invocation can resume a partial write-back
+  within the documented window (FR-023, SC-014).
+- The application **MUST NOT auto-delete** any of those rows. There are no DELETE
+  statements against ``crm_correlations`` or ``writeback_progress`` anywhere in
+  this module; pruning is a manual operator action (FR-035).
+- A ``writeback_progress`` row in ``resume_needed`` state MUST be retained until
+  the session is resumed-completed or explicitly abandoned by the operator, even
+  if it predates the calendar floor.
+- ``writeback_progress.last_error`` MUST NOT contain secrets or full CRM record
+  contents (spec §Definitions §"Operator-visible"). The adapter's failure path
+  passes a sanitized summary string. ``tests/contract/test_no_secrets_in_artifacts.py``
+  greps the serialized row for known-secret env values to enforce this property.
 """
 
 from __future__ import annotations
