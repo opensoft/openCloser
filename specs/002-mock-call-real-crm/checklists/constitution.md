@@ -4,7 +4,7 @@
 constitution (CRM control plane, thin slice, boundaries, safety, auditability). Tests the
 spec's wording, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Constitution domain · **Audience**: PR reviewer / spec author
 

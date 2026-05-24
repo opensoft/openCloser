@@ -4,7 +4,7 @@
 transport scope, Slice 1 contract preservation, and persona/disposition determinism — for
 completeness, clarity, consistency, and coverage. Tests the spec, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Mock transport & contract domain · **Audience**: PR reviewer / spec author
 

@@ -4,7 +4,7 @@
 (primary, alternate, exception, recovery, non-functional), the listed edge cases, and
 phone-number data quality. Tests the spec, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Scenario & edge-case domain · **Audience**: PR reviewer / spec author
 
@@ -49,7 +49,11 @@ phone-number data quality. Tests the spec, not the implementation.
 - [x] CHK028 Is the deferral of hard E.164 enforcement to Slice 3 stated as an explicit, traceable assumption? [Traceability, Spec §Assumptions] — Resolved: §Assumptions §Non-E.164 phone numbers.
 - [x] CHK029 Are requirements defined for a missing (not just malformed) phone number on the CRM record? [Gap, Coverage, Spec §FR-034] — Resolved by FR-011 and FR-034.
 
+## Mid-Run CRM-State Conflict (T045/T046 — added 2026-05-24)
+
+- [x] CHK030 Is the "Dataverse queue item changed by a human between claim and write-back" edge case specified with measurable behavior — the re-read timing (before final queue-status / DNC / attempt write), the detection conditions (queue no longer in session-owned in-progress state, or a `preserve_if_present` value changed), and the conflict-stop semantics (only already-completed approved writes preserved, partial `writeback_progress` persisted, operator-visible conflict result)? [Coverage, Spec §Edge Cases, T045, T046] — Resolved: spec §Edge Cases prose + spec §Definitions §Permanent Dataverse error (mid-run conflict explicitly classified) + T045 task description + T046 integration test scenario.
+
 ## Notes
 
 - Requirements-quality audit only — checks that requirements *exist and are well-formed* for each scenario, not that scenarios pass.
-- **Re-verification result: 29/29 resolved.** The spec's expanded Edge Cases + FR-034 + the plan's transient-error/redaction design close every scenario- and edge-case item — no open defects in this domain.
+- **Re-verification result: 30/30 resolved.** The spec's expanded Edge Cases + FR-034 + the plan's transient-error/redaction design + T045/T046 conflict-detection scenario close every scenario- and edge-case item — no open defects in this domain.

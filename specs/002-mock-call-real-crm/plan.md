@@ -45,6 +45,9 @@ idempotent recovery from partial Dataverse write-back.
 **Performance/Scale**: One queue item per CLI invocation, one ALF campaign. Not
 latency-critical; the only timing constraint is the bounded write-back retry budget
 (initial + 3 retries, 1s/2s/4s backoff, `Retry-After` capped at 30s — FR-023).
+Conflict detection (T045) adds one extra Dataverse GET per write-enabled run, immediately
+before the final queue-status / DNC / attempt write; this GET is also performed by the
+resume coordinator (T032) to detect human changes made during the pause window.
 
 **Constraints**: No real telephony, no live audio, no real-time model. No batch, scheduler,
 multi-worker locking, or job queue. Dataverse is the only CRM target. CRM writes gated

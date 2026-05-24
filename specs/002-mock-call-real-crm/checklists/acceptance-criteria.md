@@ -4,7 +4,7 @@
 technology-agnostic, traceable, and complete. Tests how the *criteria are written*, not
 whether the implementation meets them.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Acceptance-criteria domain · **Audience**: PR reviewer / spec author
 

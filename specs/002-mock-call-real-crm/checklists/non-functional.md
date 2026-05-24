@@ -5,7 +5,7 @@ reliability, observability, security posture, compliance, data governance) are e
 specified measurably or explicitly and intentionally scoped out. Tests the spec, not the
 implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Non-functional domain · **Audience**: PR reviewer / spec author
 
@@ -48,7 +48,11 @@ implementation.
 - [x] CHK023 Are requirements defined for safe handling and cleanup of the demo CRM record? [Gap, Spec §Assumptions] — Resolved: §Assumptions §Demo posture + quickstart §8.
 - [x] CHK024 Is the absence of dedicated performance/compliance NFR sections an intentional, documented decision rather than an omission? [Clarity, Gap] — Resolved: performance remains intentionally scoped in plan §Technical Context, and §Assumptions §Compliance scope now documents the Slice 2 compliance boundary.
 
+## FR-023 Row Retention (added 2026-05-24)
+
+- [x] CHK025 Is the FR-023 retention floor for `crm_correlations` and `writeback_progress` rows specified (≥90 days, or the configured audit-artifact retention if longer) so a later CLI re-invocation can resume a partial write-back within the documented window, and is no-auto-delete the operative rule? [Coverage, Spec §FR-023, §FR-035, T041] — Resolved: FR-023 ("Persisted CRM correlation identifiers and write-back progress records MUST be retained for at least 90 days or until local audit-artifact retention expires, whichever is longer"); FR-035 explicit no-auto-delete; T041 enforces in `state/store.py`. A `resume_needed` row is retained past the floor until resumed-completed or abandoned.
+
 ## Notes
 
 - Requirements-quality audit only. Many items here are expected `[Gap]`s — the test is whether each gap is an *intentional, documented* scope decision or an unnoticed omission.
-- **Re-verification result: 24/24 resolved.** The plan's Technical Context, retry/transient model, operator-visible/observability surface, compliance-scope assumption, and audit-artifact retention requirement close every item.
+- **Re-verification result: 25/25 resolved.** The plan's Technical Context, retry/transient model, operator-visible/observability surface, compliance-scope assumption, audit-artifact retention requirement, and FR-023 row-retention floor close every item.

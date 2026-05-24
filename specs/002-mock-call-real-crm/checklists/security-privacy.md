@@ -4,7 +4,7 @@
 privacy posture, persona safety, and human-handoff Task ownership — for completeness,
 clarity, consistency, and coverage. Tests the spec, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Security & privacy domain · **Audience**: PR reviewer / spec author
 
@@ -53,6 +53,10 @@ clarity, consistency, and coverage. Tests the spec, not the implementation.
 - [x] CHK029 Are requirements defined for a configured owner/team that no longer exists in Dataverse? [Gap, Coverage] — Resolved: owner/team is verified metadata (Definitions §Lightweight live verification); a 404 is a Permanent error (FR-002).
 - [x] CHK030 Is the `preferred_callback_window` phrase required to be preserved as free-form text in the Task, with empty/unparseable handling defined? [Coverage, Spec §Edge Cases] — Resolved: §Edge Cases + §Assumptions (preserved verbatim as free-form text; no parsing, so an unparseable phrase is moot).
 - [x] CHK031 Can "exactly one callback/review Task assigned to the configured owner" be objectively verified? [Measurability, Spec §SC-003] — Resolved: SC-003.
+
+## No-Secrets-in-Artifacts Negative Assertion (T047 — added 2026-05-24)
+
+- [x] CHK032 Does FR-005's "no secrets in logs/artifacts" requirement extend to a verifiable negative-assertion test (T047) over every produced local audit artifact — run report, planned/actual write-back payloads, redacted transcript file, `crm_correlations` and `writeback_progress` rows — covering the four env-var secrets (`DATAVERSE_TENANT_ID` / `CLIENT_ID` / `CLIENT_SECRET` / `ENV_URL`) via literal-substring match? [Coverage, Spec §FR-005, §FR-035, T047] — Resolved: T047 task description enumerates inspection surface, secret set, and match style; FR-035's "secrets MUST NOT be retained" reinforces.
 
 ## Notes
 

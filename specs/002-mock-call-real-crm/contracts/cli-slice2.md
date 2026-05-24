@@ -60,6 +60,7 @@ re-invoking the same command triggers `slice2/resume.py`:
   keeping the orchestrator contract untouched and producing no duplicate records (FR-023,
   SC-014).
 - A re-invocation for an already-`completed` session is a clean no-op (FR-021).
+- A re-invocation for a `blocked`-by-conflict session (T045) does NOT auto-resume — the conflict re-read runs first; if the conflict is still present, the run exits `blocked` again with the same `block_reason`. The operator reconciles the Dataverse record manually (restoring the session-owned in-progress state if appropriate, or accepting the human change) before a fresh `run-crm` invocation can complete the missing writes. Abandonment is the absence of a follow-up run; the persisted `writeback_progress` row remains as audit evidence per FR-035.
 
 ---
 
@@ -68,7 +69,7 @@ re-invoking the same command triggers `slice2/resume.py`:
 | Status | Meaning |
 |---|---|
 | `completed` | loop finished; write-back done (or planned, in dry-run) |
-| `blocked` | eligibility/metadata block; no call placed (SC-008) |
+| `blocked` | eligibility/metadata block (SC-008) — no call placed — OR mid-run CRM-state conflict (T045) — partial `writeback_progress` persisted, already-completed approved writes preserved, human-changed values left unchanged. The run-report `block_reason` field disambiguates conflict from eligibility/metadata. |
 | `no-callable-item` | empty queue — clean no-op (FR-009) |
 | `resume_needed` | transient failure exhausted retry budget — re-invoke to resume |
 | `failed` | malformed fixture or permanent error — no attempt consumed (SC-006) |

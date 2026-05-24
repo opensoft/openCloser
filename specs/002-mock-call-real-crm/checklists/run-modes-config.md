@@ -4,7 +4,7 @@
 configuration, secrets loading, readiness validation, and demo evidence — for completeness,
 clarity, consistency, and coverage. Tests the spec, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Run modes & configuration domain · **Audience**: PR reviewer / spec author
 
@@ -50,6 +50,10 @@ clarity, consistency, and coverage. Tests the spec, not the implementation.
 - [x] CHK026 Is "repeatable demo path" defined with criteria that make repeatability checkable? [Measurability, Spec §FR-033] — Resolved: FR-033 + quickstart (discover → dry-run → write-enabled flow).
 - [x] CHK027 Does the spec require the demo outcome to be inspectable without a custom openCloser UI? [Completeness, Spec §FR-033] — Resolved: FR-033 + SC-012.
 - [x] CHK028 Is the documented manual cleanup/rollback for the demo CRM record specified? [Gap, Spec §Assumptions] — Resolved: §Assumptions §Demo posture + quickstart §8.
+
+## Mode-Aware Readiness (T027/T028 — added 2026-05-24)
+
+- [x] CHK029 Does FR-007's "for the selected run mode" wording distinguish dry-run readiness (non-secret mapping configuration + redaction-policy validity; Dataverse credentials and live `verify()` NOT required) from write-enabled readiness (additionally credentials + live metadata verification), per T028, with operator-visible failure messages that identify which gate failed? [Clarity, Spec §FR-007, T027, T028] — Resolved: FR-007 + spec §Edge Cases "Dry-run requested but write credentials are absent" + T028 enumerate both sides; §Definitions §Operator-visible requires identifying the failing rule/mapping.
 
 ## Notes
 

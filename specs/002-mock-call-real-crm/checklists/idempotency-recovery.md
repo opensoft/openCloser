@@ -4,7 +4,7 @@
 bounded retry, and resume-after-failure — for completeness, clarity, consistency, and
 coverage. Tests the spec, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: Idempotency & recovery domain · **Audience**: PR reviewer / spec author
 
@@ -54,7 +54,11 @@ coverage. Tests the spec, not the implementation.
 - [x] CHK030 Are the idempotency requirements consistent with the Slice 1 idempotency keys reused unchanged? [Consistency, Spec §Key Entities] — Resolved: Key Entities §Preserved Slice 1 Entities + data-model §4.
 - [x] CHK031 Is the local correlation store's role (audit/correlation only, not queue lifecycle) consistent with the source-of-truth assumption? [Consistency, Spec §Assumptions] — Resolved: §Assumptions §Source of truth + data-model §1.
 
+## Mid-Run CRM-State Conflict (T045 — added 2026-05-24)
+
+- [x] CHK032 Are mid-run CRM-state conflict-detection requirements (T045) defined as the FR-003/FR-021 interplay — re-read mapped queue fields + `preserve_if_present` set immediately before the final write, stop on detected human change, preserve already-completed writes, persist partial `writeback_progress`, surface an operator-visible conflict? [Coverage, Spec §Edge Cases, T045] — Resolved: spec §Edge Cases "Dataverse queue item changed by a human between claim and write-back" + T045 task description; FR-003 (preserve high-confidence values) + FR-021 (no duplicate records on re-invocation) compose the conflict-stop contract. The resume coordinator (T032) re-performs the same conflict re-read on resume.
+
 ## Notes
 
 - Requirements-quality audit only.
-- **Re-verification result: 31/31 resolved.** The plan's retry/resume design, `crm_correlations` + `writeback_progress` tables, adapter pre-query, and explicit 90-day minimum retention close every item.
+- **Re-verification result: 32/32 resolved.** The plan's retry/resume design, `crm_correlations` + `writeback_progress` tables, adapter pre-query, 90-day minimum retention, and T045 conflict-stop contract close every item.

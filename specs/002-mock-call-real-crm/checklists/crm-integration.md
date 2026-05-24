@@ -4,7 +4,7 @@
 queue intake, the write-back adapter, and boundary isolation — for completeness, clarity,
 consistency, measurability, and coverage. Tests the spec, not the implementation.
 **Created**: 2026-05-22
-**Re-verified**: 2026-05-22 against `plan.md`, `research.md`, `data-model.md`, `contracts/`
+**Re-verified**: 2026-05-24 against `plan.md`, `research.md`, `data-model.md`, `contracts/` (post-`45a2356` audit pass; see `reverification.md`)
 **Feature**: [spec.md](../spec.md)
 **Depth**: Maximum (release-gate) · **Breadth**: CRM integration domain · **Audience**: PR reviewer / spec author
 
@@ -64,7 +64,11 @@ consistency, measurability, and coverage. Tests the spec, not the implementation
 - [x] CHK037 Can "0 Dataverse-specific field names or vendor payload shapes outside the adapter" be objectively verified by inspection or a boundary test? [Measurability, Spec §SC-010] — Resolved: SC-010 + plan §Verification (boundary test).
 - [x] CHK038 Is the "write-back assembly" contract specified independently of the Dataverse vendor payload format? [Clarity, Spec §FR-015] — Resolved: contracts/dataverse-adapter.md (`build_writeback` assembles the conceptual `WriteBack` aggregate).
 
+## Adapter Unit-Test Surface (T048 — added 2026-05-24)
+
+- [x] CHK039 Does the adapter unit-test surface (T048) cover the four behaviors that the contract test (T017) and integration test (T023) don't surface granularly — approved owner-override decision branches, idempotency-key field selection from the mapping artifact, dry-run capture (no POST/PATCH issued), and `preserve_if_present` filtering? [Coverage, T048] — Resolved: T048 enumerates all four; §Definitions §Approved owner override + FR-003 + FR-024 + FR-031 + data-model §2 supply the spec basis.
+
 ## Notes
 
 - Requirements-quality audit only. `[Gap]` = missing requirement; `[Ambiguity]` = undefined term; `[Conflict]` = internal contradiction.
-- **Re-verification result: 38/38 resolved.** The plan's metadata model, mapping-artifact schema, adapter contract, and configured-campaign-not-found rule close every item.
+- **Re-verification result: 39/39 resolved.** The plan's metadata model, mapping-artifact schema, adapter contract, configured-campaign-not-found rule, and T048 adapter unit-test surface close every item.
