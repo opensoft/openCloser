@@ -600,23 +600,23 @@ def test_us4_resume_rejects_non_resumable_states(
 
 
 def _install_conflict_mutator(fake, *, mutation: dict[str, object]):
-    """Monkey-patch `fake._handle_query` so the FIRST conflict-check GET also
-    mutates the queue row before returning. Returns a list whose membership
-    tells the caller whether the hook fired (useful for sanity-asserting the
-    test exercised the intended code path)."""
-    original = fake._handle_query
-    fired: list[bool] = []
+    """Install a one-shot mutation on the FIRST conflict-check GET via the
+    fake's public ``register_query_observer`` hook (Pass 2C — was a private
+    monkey-patch). Returns a ``QueryObserver`` whose ``.fired`` attribute is
+    True once the conflict-check GET has triggered the mutation."""
 
-    def patched(request, entity):
+    def predicate(request, logical: str) -> bool:
         sel = request.url.params.get("$select", "")
-        is_conflict_check = "medx_callstatus" in sel and "medx_notes" in sel
-        if is_conflict_check and not fired:
-            fake._records["medx_callqueueitem"][0].update(mutation)
-            fired.append(True)
-        return original(request, entity)
+        return (
+            logical == "medx_callqueueitem"
+            and "medx_callstatus" in sel
+            and "medx_notes" in sel
+        )
 
-    fake._handle_query = patched
-    return fired
+    def callback(fake_) -> None:
+        fake_._records["medx_callqueueitem"][0].update(mutation)
+
+    return fake.register_query_observer(predicate, callback)
 
 
 def test_t045_initial_run_conflict_on_preserve_field_blocks(
@@ -630,11 +630,11 @@ def test_t045_initial_run_conflict_on_preserve_field_blocks(
     is `BLOCKED`."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
-    fired = _install_conflict_mutator(fake, mutation={"medx_notes": "human-edited"})
+    observer = _install_conflict_mutator(fake, mutation={"medx_notes": "human-edited"})
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
 
-    assert fired, "conflict-check GET hook did not fire — the test did not exercise T045"
+    assert observer.fired, "conflict-check GET hook did not fire — the test did not exercise T045"
     assert report.exit_status == "blocked"
     assert report.block_reason == "conflict_detected"
     assert report.message is not None
@@ -668,11 +668,11 @@ def test_t045_initial_run_conflict_on_status_field_blocks(
     fake = fake_for_mapping(mapping, _seed())
     # 2 = `queue_status.completed` per dataverse_mapping.json — pretend a
     # human marked the row complete mid-run.
-    fired = _install_conflict_mutator(fake, mutation={"medx_callstatus": 2})
+    observer = _install_conflict_mutator(fake, mutation={"medx_callstatus": 2})
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
 
-    assert fired
+    assert observer.fired
     assert report.exit_status == "blocked"
     assert "conflict_detected" in (report.message or "")
     assert "medx_callstatus" in (report.message or "")
@@ -714,7 +714,7 @@ def test_t045_resume_detects_conflict_during_pause_window(
     )
 
     # Install the mutation hook for the resume window.
-    fired = _install_conflict_mutator(fake, mutation={"medx_notes": "edited-mid-resume"})
+    observer = _install_conflict_mutator(fake, mutation={"medx_notes": "edited-mid-resume"})
 
     result = _invoke_resume(
         session_id=report.session_id,
@@ -724,7 +724,7 @@ def test_t045_resume_detects_conflict_during_pause_window(
         mapping=mapping,
     )
 
-    assert fired, "resume-time conflict-check hook did not fire"
+    assert observer.fired, "resume-time conflict-check hook did not fire"
     assert result.exit_status == "blocked"
     assert result.message is not None
     assert "conflict" in result.message.lower()
@@ -762,11 +762,11 @@ def test_t045_conflict_on_human_adding_preserve_field_value(
 
     # Make sure medx_priority starts unset (None on the seeded row).
     assert "medx_priority" not in fake._records["medx_callqueueitem"][0]
-    fired = _install_conflict_mutator(fake, mutation={"medx_priority": "urgent-by-human"})
+    observer = _install_conflict_mutator(fake, mutation={"medx_priority": "urgent-by-human"})
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
 
-    assert fired, "conflict-check hook did not fire — test did not exercise T045"
+    assert observer.fired, "conflict-check hook did not fire — test did not exercise T045"
     assert report.exit_status == "blocked"
     assert "conflict_detected" in (report.message or "")
     assert "medx_priority" in (report.message or "")
@@ -788,13 +788,13 @@ def test_t045_conflict_on_last_session_id_change(
     PATCH is detected as a conflict (concurrent-session clobber)."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
-    fired = _install_conflict_mutator(
+    observer = _install_conflict_mutator(
         fake, mutation={"medx_lastsessionid": "ses_other_session_grabbed_it"}
     )
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
 
-    assert fired
+    assert observer.fired
     assert report.exit_status == "blocked"
     assert "conflict_detected" in (report.message or "")
     assert "medx_lastsessionid" in (report.message or "")
@@ -815,25 +815,25 @@ def test_t045_deleted_row_yields_conflict_not_failed(
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
 
-    # Install a hook that, on the conflict-check GET, deletes the row before
-    # returning. The conflict-check fresh GET will see no rows; the deleted-
-    # row branch should raise CrmConflictError.
-    original = fake._handle_query
-    fired: list[bool] = []
-
-    def patched(request, entity):
+    # Install a one-shot observer that, on the conflict-check GET, deletes
+    # the row BEFORE the query materializes its rows list. The conflict-check
+    # GET sees no rows; the deleted-row branch raises CrmConflictError.
+    def predicate(request, logical: str) -> bool:
         sel = request.url.params.get("$select", "")
-        is_conflict_check = "medx_callstatus" in sel and "medx_notes" in sel
-        if is_conflict_check and not fired:
-            fake._records["medx_callqueueitem"].clear()
-            fired.append(True)
-        return original(request, entity)
+        return (
+            logical == "medx_callqueueitem"
+            and "medx_callstatus" in sel
+            and "medx_notes" in sel
+        )
 
-    fake._handle_query = patched
+    def callback(fake_) -> None:
+        fake_._records["medx_callqueueitem"].clear()
+
+    observer = fake.register_query_observer(predicate, callback)
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
 
-    assert fired, "delete-the-row hook did not fire"
+    assert observer.fired, "delete-the-row hook did not fire"
     assert report.exit_status == "blocked"
     assert "conflict_detected" in (report.message or "")
     assert "__row_deleted__" in (report.message or "")

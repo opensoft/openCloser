@@ -50,6 +50,14 @@ _MODULES_UNDER_TEST: tuple[Path, ...] = (
     _SRC / "persona" / "extraction.py",
     _SRC / "persona" / "disposition_rules.py",
     _SRC / "persona" / "escalation.py",
+    # Pass 2C (2026-05-24 audit-remediation): boundary-package __init__.py
+    # files — a forbidden cross-boundary import or vendor-name leak must not
+    # be able to hide in a package root. test_imports.py walks these for
+    # the same reason; this test does the parallel text-grep check.
+    _SRC / "core" / "__init__.py",
+    _SRC / "eligibility" / "__init__.py",
+    _SRC / "transport" / "__init__.py",
+    _SRC / "persona" / "__init__.py",
 )
 
 
@@ -57,20 +65,38 @@ _MODULES_UNDER_TEST: tuple[Path, ...] = (
 # the boundary modules MUST NOT contain.
 _FORBIDDEN_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     # OData v4 query-string syntax — used only by the Dataverse Web API client.
-    (re.compile(r'"\$filter"'), "odata-$filter", "OData query keyword"),
-    (re.compile(r'"\$select"'), "odata-$select", "OData query keyword"),
-    (re.compile(r'"\$top"'), "odata-$top", "OData query keyword"),
-    (re.compile(r'"\$orderby"'), "odata-$orderby", "OData query keyword"),
-    # Dataverse Web API response header — appears only in the create-record
-    # POST flow inside the adapter.
+    # Match both double- and single-quoted literals (Pass 2C — prior single-
+    # quote-only patterns let a style-drift bypass the check).
+    (re.compile(r"""["']\$filter["']"""), "odata-$filter", "OData query keyword"),
+    (re.compile(r"""["']\$select["']"""), "odata-$select", "OData query keyword"),
+    (re.compile(r"""["']\$top["']"""), "odata-$top", "OData query keyword"),
+    (re.compile(r"""["']\$orderby["']"""), "odata-$orderby", "OData query keyword"),
+    # Dataverse Web API response/request header — appears only in the
+    # create-record POST flow inside the adapter.
     (re.compile(r"OData-EntityId"), "odata-entityid-header", "Dataverse Web API header"),
+    # Pass 2C: OData binding/identity annotations. `@odata.bind` is used for
+    # lookup writes (e.g. `ownerid@odata.bind`); `@odata.id` is the
+    # navigation-target reference. Both belong inside the adapter.
+    (re.compile(r"@odata\.bind"), "odata-bind", "OData @odata.bind navigation reference"),
+    (re.compile(r"@odata\.id"), "odata-id", "OData @odata.id navigation reference"),
+    # Pass 2C: Dataverse Web API URL prefix. A boundary module that built
+    # `/api/data/v9.2/...` URLs would be doing Dataverse work directly.
+    (re.compile(r"/api/data/v9"), "dataverse-api-prefix", "Dataverse Web API URL prefix"),
     # Dataverse activity / system entity-set names as string literals.
     # The Slice 1 contract uses CLASS names (`PhoneCallActivityPayload`) —
     # those are fine. The LOWERCASE strings below are Dataverse entity-set
     # names that should only appear inside the adapter / queue loader.
-    (re.compile(r'"phonecalls?"'), "phonecall-entity-set", "Dataverse entity-set name"),
-    (re.compile(r'"systemusers?"'), "systemuser-entity-set", "Dataverse entity-set name"),
-    (re.compile(r'"\bteams?\b"'), "team-entity-set", "Dataverse entity-set name"),
+    (re.compile(r"""["']phonecalls?["']"""), "phonecall-entity-set", "Dataverse entity-set name"),
+    (re.compile(r"""["']systemusers?["']"""), "systemuser-entity-set", "Dataverse entity-set name"),
+    (re.compile(r"""["']\bteams?\b["']"""), "team-entity-set", "Dataverse entity-set name"),
+    # Pass 2C: well-known unprefixed Dataverse logical names that often
+    # appear in lookup/system fields. Real deployments use a variety of
+    # publisher prefixes (medx_, msdyn_, ...); these unprefixed names are
+    # built-in Dataverse system attributes that should also only appear
+    # inside the adapter / queue loader.
+    (re.compile(r"\bregardingobjectid\b"), "regardingobjectid", "Dataverse built-in lookup"),
+    (re.compile(r"\bactivitypointer\b"), "activitypointer", "Dataverse built-in entity"),
+    (re.compile(r"\bdirectioncode\b"), "directioncode", "Dataverse phonecall built-in field"),
     # Vendor logical-name prefix from the fixture mapping. Real deployments
     # may use other prefixes (medx_, msdyn_, etc.); the test fixture uses
     # `medx_` so it acts as a reliable canary for "Dataverse field name

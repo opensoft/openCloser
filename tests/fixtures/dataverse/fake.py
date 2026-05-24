@@ -35,6 +35,30 @@ _ENTITY_DEF_RE = re.compile(r"^EntityDefinitions\(LogicalName='([^']+)'\)(/Attri
 _DATAVERSE_SYSTEM_ATTRS: frozenset[str] = frozenset(
     {"createdon", "modifiedon", "versionnumber", "ownerid"}
 )
+
+
+class QueryObserver:
+    """Pass 2C (2026-05-24 audit-remediation) — public hook for tests that
+    need to mutate the fake's state on a SPECIFIC query (e.g. T046's mid-run
+    conflict-check GET). Replaces the previous `monkey-patch _handle_query`
+    pattern that coupled three tests to the fake's internals.
+
+    Registered via :meth:`DataverseFake.register_query_observer`. Fires
+    exactly once when its ``predicate(request, logical)`` returns True, then
+    sets ``fired = True`` and stops being considered. Tests assert
+    ``observer.fired`` to confirm they exercised the intended code path.
+    """
+
+    __slots__ = ("callback", "fired", "predicate")
+
+    def __init__(
+        self,
+        predicate: Any,  # Callable[[httpx.Request, str], bool]
+        callback: Any,   # Callable[["DataverseFake"], None]
+    ) -> None:
+        self.predicate = predicate
+        self.callback = callback
+        self.fired = False
 # Match Picklist OR Status metadata casts — Dataverse exposes option-set columns
 # under several derived types and the loader/verifier tries them in order.
 _OPTION_SET_META_RE = re.compile(
@@ -110,6 +134,10 @@ class DataverseFake:
         # `If-Match` PATCHes with HTTP 412 Precondition Failed. The fake
         # emits a monotonic per-record version and bumps it on every PATCH.
         self._row_versions: dict[tuple[str, str], int] = {}
+        # Public query observers (Pass 2C). Tests register a one-shot
+        # predicate+callback pair to mutate state on a specific GET — see
+        # `QueryObserver` and `register_query_observer`.
+        self._query_observers: list[QueryObserver] = []
         self.request_count = 0
 
     def _resolve_collection(self, url_name: str) -> str | None:
@@ -228,10 +256,32 @@ class DataverseFake:
             )
         return httpx.Response(404, request=request)
 
+    def register_query_observer(
+        self,
+        predicate: Any,  # Callable[[httpx.Request, str], bool]
+        callback: Any,   # Callable[["DataverseFake"], None]
+    ) -> QueryObserver:
+        """Register a one-shot observer that fires the first time
+        ``predicate(request, logical_name)`` returns True on a GET. Useful for
+        T046-style "mutate the row on the conflict-check GET" patterns
+        without monkey-patching private methods. The returned ``QueryObserver``
+        tracks ``fired`` so tests can assert they exercised the intended code
+        path."""
+        obs = QueryObserver(predicate, callback)
+        self._query_observers.append(obs)
+        return obs
+
     def _handle_query(self, request: httpx.Request, entity: str) -> httpx.Response:
         logical = self._resolve_collection(entity)
         if logical is None:
             return httpx.Response(404, request=request)
+        # Pass 2C — let registered observers (one-shot) mutate state BEFORE
+        # we materialize the row list. Each observer fires at most once.
+        for obs in self._query_observers:
+            if not obs.fired and obs.predicate(request, logical):
+                obs.callback(self)
+                obs.fired = True
+                break
         rows = list(self._records.get(logical, []))
         params = request.url.params
         valid_fields = self._entities[logical]
