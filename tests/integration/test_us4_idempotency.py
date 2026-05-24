@@ -680,6 +680,51 @@ def test_us4_t045_no_conflict_when_status_unchanged(
     adapter.emit_queue_status_update(payload)
 
 
+def test_us4_t045_malformed_queue_item_id_rejected_via_safe_token(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """SECURITY (Copilot PR #11): both `_fetch_queue_last_session` and
+    `_detect_queue_conflict` now wrap `queue_item_id` in `_safe_odata_token`
+    before interpolating it into the `$filter` predicate. This locks in
+    that a malformed id (path separators / OData metacharacters) is
+    rejected as `DataverseWriteBackError` and caught by the surrounding
+    failure handler, rather than silently producing an injected filter."""
+    from opencloser.crm.dataverse.adapter import DataverseWriteBackError
+    from opencloser.models import CallableStatus, QueueStatusUpdatePayload
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Drive a successful first run to populate the fake + provide a valid
+    # queue row for the FK-bound session insert below.
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+
+    snapshot = QueueItem(
+        queue_item_id=_QID,
+        facility_name="Sunage ALF",
+        callable_status=CallableStatus.READY,
+        phone_number="+15305551234",
+        attempt_count=0,
+    )
+    adapter = _build_adapter_with_snapshot(
+        conn=tmp_state_db, fake=fake, mapping=mapping, snapshot=snapshot
+    )
+    # Payload's queue_item_id is the malformed value — that's what gets
+    # interpolated into the OData $filter, exercising the safe-token guard.
+    payload = QueueStatusUpdatePayload(
+        session_id=f"{report.session_id}-malformed-id",
+        queue_item_id="malicious'+OR+1=1",  # OData injection attempt
+        previous_status=CallableStatus.READY,
+        new_status=CallableStatus.COMPLETED,
+        transition_reason="malformed-id-test",
+        transition_at=_CLOCK.now_utc_ms(),
+    )
+    _seed_stub_session(tmp_state_db, payload.session_id)
+    with pytest.raises(DataverseWriteBackError, match="unsafe OData filter value"):
+        adapter.emit_queue_status_update(payload)
+
+
 def test_us4_t045_runner_maps_queue_conflict_to_blocked(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:

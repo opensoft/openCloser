@@ -171,13 +171,14 @@ class DataverseWriteBackAdapter:
         self._now_utc_ms = now_utc_ms or _default_now_utc_ms
         # T045 mid-run conflict detection: when set, `emit_queue_status_update`
         # re-reads the queue row before the final PATCH and compares the
-        # mapped `queue.status` + any `preserve_if_present` field values
-        # against this snapshot. A divergence ⇒ `QueueConflictError`
-        # (spec §Edge Cases "Dataverse queue item changed by a human between
-        # claim and write-back"). The dry-run path and call sites that
-        # construct the adapter without a snapshot (e.g. the resume
-        # coordinator — the original load happened in a prior run) skip the
-        # check entirely.
+        # mapped `queue.status` value against this snapshot. A divergence ⇒
+        # `QueueConflictError` (spec §Edge Cases "Dataverse queue item
+        # changed by a human between claim and write-back"). The dry-run
+        # path and call sites that construct the adapter without a
+        # snapshot (e.g. the resume coordinator — the original load
+        # happened in a prior run) skip the check entirely.
+        # `preserve_if_present` field diffing is documented as deferred in
+        # `QueueConflictError`'s class docstring + `_detect_queue_conflict`.
         self._queue_snapshot = queue_snapshot
         # FR-031 dry-run: when True, every emit_* translates the payload via the
         # same mapping helpers as the write-enabled path, captures the planned
@@ -285,16 +286,37 @@ class DataverseWriteBackAdapter:
             # T045 mid-run conflict detection — only when the runner threaded a
             # queue_snapshot through (the resume coordinator does NOT, because
             # the original load happened in a prior run). Compares the
-            # current queue row against the snapshot captured at load time;
-            # raises QueueConflictError if `queue.status` or any
-            # `preserve_if_present` field has changed.
+            # current queue row's `queue.status` against the snapshot
+            # captured at load time; raises QueueConflictError on divergence
+            # or row-deletion. `preserve_if_present` field diffing is
+            # deferred (see `_detect_queue_conflict` docstring).
+            #
+            # KNOWN LIMITATION (Codex PR #11 round-2 P1): there is a small
+            # TOCTOU window between this GET and the PATCH below where a
+            # human update could land and still get overwritten. A complete
+            # fix would use ETag / If-Match conditional PATCH semantics,
+            # which Dataverse supports but the current DataverseClient
+            # does not surface. Tracked as a follow-up; status drift in
+            # the (typically minutes-long) persona-run window is the
+            # dominant real-world case and IS caught by the pre-write GET.
             if self._queue_snapshot is not None:
                 self._detect_queue_conflict(payload.queue_item_id)
 
             body = self._queue_status_body(payload)
             path = f"{entity_set}({payload.queue_item_id})"
             self._client.patch(path, json=body)
-        except (DataverseError, MappingError) as exc:
+        # Order matters: QueueConflictError IS-A DataverseWriteBackError, so
+        # the conflict-specific handler must come BEFORE the broader catch
+        # — otherwise the broader except would swallow QueueConflictError
+        # and the runner wouldn't see it (it's the runner's branch on
+        # `isinstance(exc, QueueConflictError)` that maps the failure to
+        # `exit_status="blocked"`).
+        except QueueConflictError as exc:
+            # Conflict is a permanent-state issue — record the failed
+            # correlation + BLOCKED progress so the operator surface sees the
+            # `blocked` exit status. Re-raise so the runner can stop before
+            # subsequent emit_* calls (no Task should be created for a
+            # session whose queue state diverged).
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.QUEUE_STATUS,
@@ -303,12 +325,12 @@ class DataverseWriteBackAdapter:
                 dataverse_record_id=payload.queue_item_id,
             )
             raise
-        except QueueConflictError as exc:
-            # Conflict is a permanent-state issue — record the failed
-            # correlation + BLOCKED progress so the operator surface sees the
-            # `blocked` exit status. Re-raise so the runner can stop before
-            # subsequent emit_* calls (no Task should be created for a
-            # session whose queue state diverged).
+        except (DataverseError, DataverseWriteBackError, MappingError) as exc:
+            # `DataverseWriteBackError` covers `_safe_odata_token`'s rejection
+            # of a malformed queue_item_id — without it, a bad token would
+            # bypass `_record_failure()` and leave no failure correlation
+            # for the runner to flush (Copilot PR #11 round-2 real bug:
+            # the original except only caught DataverseError/MappingError).
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.QUEUE_STATUS,
@@ -635,9 +657,15 @@ class DataverseWriteBackAdapter:
         when a human change is detected:
 
         - ``queue.status`` field changed (the row is no longer in the
-          callable-status state the runner loaded it in), OR
-        - any ``preserve_if_present`` mapped field's value diverged from
-          the snapshot (the row's audit-protected columns were edited).
+          callable-status state the runner loaded it in — including the
+          case where the status field has been cleared to null), OR
+        - the queue row no longer exists (deleted between claim and write).
+
+        ``preserve_if_present`` field diffing is documented as deferred in
+        the `QueueConflictError` class docstring; the v1 implementation
+        only $selects the status field + primary id. A richer diff would
+        require the runner to pass raw Dataverse field values in
+        ``queue_snapshot`` as a side-channel dict.
 
         Caller (``emit_queue_status_update``) handles the raised exception
         by recording a failed correlation + BLOCKED progress; the runner
