@@ -71,6 +71,14 @@ _GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
+# Session IDs are minted by `opencloser.core.ids.new_session_id`:
+# `ses_` + uuid4().hex (32 lowercase hex chars). The CLI validates
+# `--resume <session-id>` against this shape BEFORE building any
+# filesystem path (`<artifact_root>/<session_id>/writeback.json`) — that
+# closes a path-traversal vector for operator-supplied input (e.g.
+# `--resume "../../etc/passwd"`) per Copilot PR #9 round-3 SECURITY review.
+_SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{32}$")
+
 
 @app.command(name="init-state")
 def init_state(
@@ -546,6 +554,23 @@ def _run_crm_resume(
     no-resume-needed → 0 (FR-021), blocked → 1, failed → 2.
     """
     from opencloser.models import RunStatus
+
+    # SECURITY (Copilot PR #9 round-3): validate the operator-supplied
+    # session_id against the strict `ses_<32-hex>` shape BEFORE any
+    # filesystem path is built from it. A crafted value containing path
+    # separators (e.g. `--resume "../../etc/passwd"`) could otherwise
+    # cause `<artifact_root>/<session_id>/writeback.json` to read outside
+    # the artifact root.
+    # `fullmatch` (not `match`) — `re.match` with `$` would tolerate a
+    # trailing newline, defeating the path-traversal check.
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        typer.echo(
+            f"error:       --resume {session_id!r} is not a valid session id "
+            "(expected `ses_` followed by 32 lowercase hex characters, "
+            "e.g. ses_c94f353fc89d4eaca7c161c331ded65c)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     slice1_config, slice2_config = _load_run_crm_configs(config_path, slice2_config_path)
 

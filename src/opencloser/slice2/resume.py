@@ -89,9 +89,24 @@ class ResumeReport:
 
 
 class ResumeError(RuntimeError):
-    """Pre-flight resume failure (writeback.json missing, progress row absent,
-    session not in resume_needed state). Distinct from a Dataverse write
-    failure during replay, which produces a ``failed`` ResumeReport."""
+    """Pre-flight resume failure that CANNOT produce a structured
+    ``ResumeReport`` — there's no session to attach the report to or the
+    persisted state is unreadable. Currently raised only for:
+
+      * ``session_id`` has no ``writeback_progress`` row (the session is
+        unknown to this state DB), or
+      * the persisted ``writeback.json`` is missing or unreadable/malformed
+        (the resume coordinator cannot replay payloads it can't load).
+
+    Distinct from non-RESUME_NEEDED states (COMPLETED / BLOCKED /
+    IN_PROGRESS) which produce a structured ``ResumeReport`` rather than
+    raising — Copilot PR #9 round-3 caught the docstring claiming
+    otherwise.
+
+    Distinct from a Dataverse write failure during the replay itself,
+    which also produces a structured ``ResumeReport`` (with exit_status
+    ``resume_needed`` or ``blocked`` depending on the failure mode).
+    """
 
 
 def resume_session(
