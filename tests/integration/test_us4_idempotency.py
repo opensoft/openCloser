@@ -739,3 +739,203 @@ def test_t045_resume_detects_conflict_during_pause_window(
     progress = store.get_writeback_progress(tmp_state_db, report.session_id)
     assert progress is not None
     assert progress.run_status is RunStatus.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Pass 1B (2026-05-24 audit-remediation) — extended conflict-detection coverage
+# ---------------------------------------------------------------------------
+
+
+def test_t045_conflict_on_human_adding_preserve_field_value(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Pass 1B — the documented None → non-None preserve-field path. Baseline
+    captures `medx_priority=None` (the seed leaves it unset). The mid-run
+    mutator sets it to a non-None string before the final PATCH. Asserts the
+    conflict is detected (None != "edited"), the field name is in the message,
+    and no PATCH is issued."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Make sure medx_priority starts unset (None on the seeded row).
+    assert "medx_priority" not in fake._records["medx_callqueueitem"][0]
+    fired = _install_conflict_mutator(fake, mutation={"medx_priority": "urgent-by-human"})
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+
+    assert fired, "conflict-check hook did not fire — test did not exercise T045"
+    assert report.exit_status == "blocked"
+    assert "conflict_detected" in (report.message or "")
+    assert "medx_priority" in (report.message or "")
+
+    queue_patches = [
+        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
+    ]
+    assert queue_patches == [], (
+        f"queue PATCH must NOT issue when a None→value conflict is detected; "
+        f"got {queue_patches}"
+    )
+
+
+def test_t045_conflict_on_last_session_id_change(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Pass 1B — `last_session_id` is now part of the baseline. A different
+    session (or a human) writing to that column between our load and our
+    PATCH is detected as a conflict (concurrent-session clobber)."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+    fired = _install_conflict_mutator(
+        fake, mutation={"medx_lastsessionid": "ses_other_session_grabbed_it"}
+    )
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+
+    assert fired
+    assert report.exit_status == "blocked"
+    assert "conflict_detected" in (report.message or "")
+    assert "medx_lastsessionid" in (report.message or "")
+    queue_patches = [
+        c for e, _id, c in fake.patched if e == "medx_callqueueitem"
+    ]
+    assert queue_patches == []
+
+
+def test_t045_deleted_row_yields_conflict_not_failed(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Pass 1B — when the queue row is deleted between load and the conflict-
+    check GET, `_check_conflict` now raises `CrmConflictError(["__row_deleted__"])`
+    rather than silently returning and letting the subsequent PATCH 404 into
+    a generic `failed` exit. Per spec §Edge Cases, a human deletion mid-run
+    is a conflict, not a generic Dataverse failure."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Install a hook that, on the conflict-check GET, deletes the row before
+    # returning. The conflict-check fresh GET will see no rows; the deleted-
+    # row branch should raise CrmConflictError.
+    original = fake._handle_query
+    fired: list[bool] = []
+
+    def patched(request, entity):
+        sel = request.url.params.get("$select", "")
+        is_conflict_check = "medx_callstatus" in sel and "medx_notes" in sel
+        if is_conflict_check and not fired:
+            fake._records["medx_callqueueitem"].clear()
+            fired.append(True)
+        return original(request, entity)
+
+    fake._handle_query = patched
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+
+    assert fired, "delete-the-row hook did not fire"
+    assert report.exit_status == "blocked"
+    assert "conflict_detected" in (report.message or "")
+    assert "__row_deleted__" in (report.message or "")
+
+
+def test_t045_if_match_412_raises_conflict_error(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Pass 1B — closes the TOCTOU race between conflict-check GET and PATCH.
+    The adapter sends `If-Match: <etag>` on the PATCH; the fake returns 412
+    when a mid-test mutation bumps the row version after baseline was captured.
+    Asserts the 412 is mapped to `CrmConflictError(["@odata.etag"])` and the
+    PATCH is NOT applied to the row."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Install a hook that bumps the row version AFTER the conflict-check GET
+    # but BEFORE the PATCH, so the conflict-check sees the same data we
+    # baselined (no field mismatch) but the PATCH carries a stale If-Match
+    # etag and Dataverse returns 412.
+    original_query = fake._handle_query
+    bump_after_check: list[bool] = []
+
+    def patched_query(request, entity):
+        response = original_query(request, entity)
+        sel = request.url.params.get("$select", "")
+        is_conflict_check = "medx_callstatus" in sel and "medx_notes" in sel
+        if is_conflict_check and not bump_after_check:
+            # Bump the row version manually to simulate a concurrent edit
+            # that landed between our conflict-check GET and our PATCH.
+            key = ("medx_callqueueitem", _QID)
+            fake._row_versions[key] = fake._row_versions.get(key, 1) + 1
+            bump_after_check.append(True)
+        return response
+
+    fake._handle_query = patched_query
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+
+    assert bump_after_check, "etag-bump hook did not fire"
+    assert report.exit_status == "blocked"
+    assert "conflict_detected" in (report.message or "")
+    assert "@odata.etag" in (report.message or "")
+
+
+def test_resume_snapshot_failure_re_raises_to_blocked(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Pass 1B — `_snapshot_resume_baseline` no longer silently swallows
+    MappingError / DataverseError. A 500 on the snapshot GET (forced via
+    `fake.fail_next`) must propagate so the outer resume handler maps it to
+    `RESUME_NEEDED` (transient) or `BLOCKED` (permanent), rather than
+    proceeding with no baseline and PATCHing through without conflict
+    detection."""
+    from opencloser.models import RetryConfig
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Drive a successful first run to produce writeback.json + crm_correlations.
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+    assert report.session_id is not None
+
+    # Synthesize resume_needed for the queue-status replay.
+    fake._records["medx_callqueueitem"][0]["medx_lastsessionid"] = None
+    fake._records["medx_callqueueitem"][0]["medx_callstatus"] = 0
+    _stamp_progress(
+        tmp_state_db,
+        report.session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        queue_status_update_done=False,
+        last_error="simulated transient exhaust",
+    )
+
+    # Force a permanent 401 on the very next request (the resume's snapshot GET).
+    # max_retries=0 so the failure surfaces immediately as a PermanentDataverseError.
+    fake.fail_next(1, status=401)
+    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
+    cfg = cfg.model_copy(
+        update={
+            "retry": RetryConfig(
+                max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0
+            )
+        }
+    )
+
+    result = _invoke_resume(
+        session_id=report.session_id,
+        conn=tmp_state_db,
+        artifact_root=tmp_artifact_dir,
+        fake=fake,
+        mapping=mapping,
+        cfg=cfg,
+    )
+
+    # The snapshot failure must propagate; permanent 401 → blocked.
+    assert result.exit_status == "blocked", (
+        f"snapshot 401 must surface as blocked, not silently bypass conflict-stop; "
+        f"got: {result}"
+    )
+    # And the resume's PATCH must NOT have been issued (snapshot failure
+    # short-circuits before the replay).
+    queue_patches = [
+        c for e, _id, c in fake.patched if e == "medx_callqueueitem"
+    ]
+    # Only the initial successful run's PATCH should be present.
+    assert len(queue_patches) == 1

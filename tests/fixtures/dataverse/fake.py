@@ -92,6 +92,11 @@ class DataverseFake:
         self._fail_status = 503
         self.created: list[tuple[str, dict[str, Any]]] = []  # (entity, record) — POST log
         self.patched: list[tuple[str, str, dict[str, Any]]] = []  # (entity, id, changes)
+        # ETag versioning per record (Pass 1B audit-remediation). Real
+        # Dataverse returns `@odata.etag` on every GET and rejects mismatched
+        # `If-Match` PATCHes with HTTP 412 Precondition Failed. The fake
+        # emits a monotonic per-record version and bumps it on every PATCH.
+        self._row_versions: dict[tuple[str, str], int] = {}
         self.request_count = 0
 
     def _resolve_collection(self, url_name: str) -> str | None:
@@ -235,8 +240,32 @@ class DataverseFake:
                     400, json={"error": {"message": f"unknown field(s): {unknown}"}},
                     request=request,
                 )
-            rows = [{k: r.get(k) for k in keys} for r in rows]
-        return httpx.Response(200, json={"value": rows}, request=request)
+            projected = [{k: r.get(k) for k in keys} for r in rows]
+            rows = projected
+        # Pass 1B audit-remediation: inject `@odata.etag` per row so callers
+        # (specifically `QueueLoader._baseline_from_row`) can capture the
+        # optimistic-concurrency token. Real Dataverse emits this annotation
+        # when `Prefer: odata.include-annotations=*` is set; the fake emits
+        # it unconditionally so tests can opt into ETag-aware flows.
+        annotated: list[dict[str, Any]] = []
+        primary_id_field = f"{logical}id"
+        for row in rows:
+            # Find a usable record id — if $select stripped it, fall back to
+            # whatever the unprojected record stored. (Activities can carry
+            # `activityid` instead of `<logical>id`.)
+            rid = row.get(primary_id_field) or row.get("activityid")
+            if rid is None:
+                # Unprojected fields lookup — find the source row.
+                for source in self._records.get(logical, []):
+                    if all(source.get(k) == v for k, v in row.items() if v is not None):
+                        rid = source.get(primary_id_field) or source.get("activityid")
+                        break
+            annotated_row = dict(row)
+            if rid is not None:
+                version = self._row_versions.setdefault((logical, str(rid)), 1)
+                annotated_row["@odata.etag"] = f'W/"{version}"'
+            annotated.append(annotated_row)
+        return httpx.Response(200, json={"value": annotated}, request=request)
 
     def _handle_create(self, request: httpx.Request, entity: str) -> httpx.Response:
         logical = self._resolve_collection(entity)
@@ -262,7 +291,21 @@ class DataverseFake:
             if row.get(f"{logical}id") == rid or (
                 logical in _ACTIVITY_LOGICAL_NAMES and row.get("activityid") == rid
             ):
+                # Pass 1B audit-remediation: honor `If-Match: <etag>` for
+                # optimistic-concurrency PATCHes. Real Dataverse returns
+                # HTTP 412 Precondition Failed when the supplied etag
+                # doesn't match the current row version.
+                if_match = request.headers.get("If-Match")
+                if if_match is not None:
+                    current_version = self._row_versions.setdefault((logical, rid), 1)
+                    if if_match != f'W/"{current_version}"':
+                        return httpx.Response(412, request=request)
                 row.update(changes)
+                # Bump the row version so a subsequent PATCH with the old
+                # etag would 412.
+                self._row_versions[(logical, rid)] = (
+                    self._row_versions.get((logical, rid), 1) + 1
+                )
                 self.patched.append((logical, rid, dict(changes)))
                 return httpx.Response(204, request=request)
         return httpx.Response(404, request=request)

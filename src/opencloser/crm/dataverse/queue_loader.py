@@ -294,16 +294,31 @@ class DataverseQueueLoader:
     def _baseline_from_row(
         self, row: dict, queue_item_id: str, captured_at: str
     ) -> QueueBaseline:
-        """Extract the T045 conflict-detection baseline from a Dataverse row:
-        the current ``queue.status`` option-set integer plus the current value
-        of every ``preserve_if_present`` logical name. Missing fields surface
-        as ``None`` so the adapter's ``_check_conflict`` can detect a
-        human-added value (None → non-None) the same way it detects edits."""
+        """Extract the T045 conflict-detection baseline from a Dataverse row.
+
+        Captured fields (Pass 1B, 2026-05-24 audit-remediation):
+          * ``queue.status`` — raw value (no `int(... or 0)` coercion; the
+            comparison in ``_check_conflict`` must be symmetric, and `None`
+            on the baseline side means "this field was empty at load").
+          * ``queue.last_session_id`` — captures concurrent-session clobbers
+            (different session sets `last_session_id` mid-run).
+          * ``@odata.etag`` — Dataverse optimistic-concurrency token; sent
+            back as ``If-Match`` on the final PATCH to close the TOCTOU
+            window between conflict-check GET and PATCH.
+          * every ``preserve_if_present`` logical name — missing fields
+            map to ``None`` so the adapter's ``_check_conflict`` detects a
+            human-added value (None → non-None) the same way it detects
+            value-changes.
+        """
         status_field = self._t.logical_name(_QUEUE_STATUS_FIELD)
+        last_session_field = self._t.logical_name("queue.last_session_id")
+        last_session = row.get(last_session_field)
         return QueueBaseline(
             queue_item_id=queue_item_id,
             captured_at=captured_at,
-            status_value=int(row.get(status_field, 0) or 0),
+            status_value=row.get(status_field),
+            last_session_id=None if last_session is None else str(last_session),
+            etag=row.get("@odata.etag"),
             preserve_values={
                 logical: row.get(logical)
                 for logical in self._t.preserve_if_present()

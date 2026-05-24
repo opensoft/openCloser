@@ -606,8 +606,27 @@ class QueueBaseline(BaseModel):
 
     queue_item_id: str
     captured_at: UtcMs
-    status_value: int
-    preserve_values: dict[str, object] = Field(default_factory=dict)
+    # `int | None` (post-2026-05-24 audit): the prior `int`-with-coercion broke
+    # symmetry — a missing status at load round-tripped to `0` while a later
+    # GET surfaced `None`, producing spurious conflicts (None != 0) AND
+    # missed conflicts (human sets None → 0 → no detection). The nullable
+    # type lets `_check_conflict` compare raw values without coercion.
+    status_value: int | None
+    # Slice 2 mid-run conflict detection (Pass 1B): the queue's
+    # `last_session_id` field at load time. `_check_conflict` flags a mismatch
+    # as a concurrent-session clobber (a different session — or a human —
+    # set the field between our load and our final PATCH). Captures `None`
+    # when the field was empty at load (the typical "ready" state).
+    last_session_id: str | None = None
+    # Dataverse `@odata.etag` annotation for the queue row at load time.
+    # `emit_queue_status_update` sends `If-Match: <etag>` on the final PATCH;
+    # Dataverse returns 412 Precondition Failed when the row was mutated in
+    # the gap between conflict-check GET and PATCH (closes the TOCTOU race
+    # the bare _check_conflict left open). `None` means the GET did not
+    # return an etag annotation — common in tests; PATCH proceeds without
+    # the header.
+    etag: str | None = None
+    preserve_values: dict[str, Any] = Field(default_factory=dict)
 
 
 class MetadataVerificationReport(BaseModel):

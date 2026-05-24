@@ -52,7 +52,6 @@ from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
 from opencloser.crm.dataverse.queue_loader import (
     DataverseQueueLoader,
     ExplicitId,
-    QueueLoadError,
 )
 from opencloser.models import (
     RunStatus,
@@ -315,21 +314,35 @@ def _snapshot_resume_baseline(
 ) -> None:
     """T045 / CHK061 — snapshot the queue row at resume start and register it
     on the adapter so the conflict-check in ``emit_queue_status_update`` fires
-    on the resume path too. Failure to snapshot (queue gone, transient GET
-    failure) is swallowed silently here — the subsequent ``emit_queue_status_update``
-    will surface the same underlying failure via the broader except (and a
-    snapshot 404 means the conflict check would no-op anyway).
+    on the resume path too.
+
+    Failure-handling (Pass 1B, 2026-05-24 audit-remediation): the prior bare
+    ``except (MappingError, QueueLoadError, DataverseError): return`` silently
+    bypassed the conflict-stop on resume — a transient/mapping failure during
+    the snapshot left ``_baseline = None`` and the subsequent
+    ``emit_queue_status_update`` PATCHed without conflict detection,
+    overwriting any human change during the pause window. Now:
+
+      * ``MappingError`` re-raises → permanent error; the outer
+        ``resume_session`` except routes to ``RunStatus.BLOCKED``.
+      * ``DataverseError`` re-raises → ``TransientDataverseError`` routes to
+        ``RESUME_NEEDED`` (operator can re-invoke), ``PermanentDataverseError``
+        routes to ``BLOCKED``.
+      * Only the genuine "row not found" case (``loaded is None``) is a
+        silent skip — the subsequent PATCH will 404 and surface a real
+        failure there, which is the right place for a deleted-row signal
+        (see also `adapter._check_conflict`'s deleted-row → CrmConflictError
+        handling on the initial-run path).
 
     ``callable_status`` is set to a literal because ``ExplicitId`` selectors
     don't reference it; only ``NextReady`` selectors do.
     """
     loader = DataverseQueueLoader(client, translator, callable_status="ready")
-    try:
-        loaded = loader.load_with_baseline(
-            ExplicitId(queue_item_id), now_utc_ms=clk.now_utc_ms()
-        )
-    except (MappingError, QueueLoadError, DataverseError):
-        return
+    # Note: errors propagate. Only the `loaded is None` (row not found) case
+    # is treated as a benign skip — see docstring.
+    loaded = loader.load_with_baseline(
+        ExplicitId(queue_item_id), now_utc_ms=clk.now_utc_ms()
+    )
     if loaded is None:
         return
     _, baseline = loaded

@@ -117,8 +117,17 @@ class DataverseClient:
     def post(self, path: str, *, json: Any) -> httpx.Response:
         return self.request("POST", path, json=json)
 
-    def patch(self, path: str, *, json: Any) -> httpx.Response:
-        return self.request("PATCH", path, json=json)
+    def patch(
+        self,
+        path: str,
+        *,
+        json: Any,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        # `headers` lets callers pass `If-Match: <etag>` for optimistic-
+        # concurrency PATCHes (Pass 1B audit-remediation). Merged with the
+        # standard auth/accept headers in `_headers`.
+        return self.request("PATCH", path, json=json, headers=headers)
 
     def close(self) -> None:
         """Close the owned httpx client (no-op when an external client was injected)."""

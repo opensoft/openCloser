@@ -276,7 +276,27 @@ class DataverseWriteBackAdapter:
 
             body = self._queue_status_body(payload)
             path = f"{entity_set}({payload.queue_item_id})"
-            self._client.patch(path, json=body)
+            # Pass 1B (2026-05-24 audit-remediation): close the TOCTOU window
+            # between `_check_conflict`'s GET and this PATCH using Dataverse's
+            # optimistic-concurrency `If-Match` header. The baseline captures
+            # the row's `@odata.etag` at load time; a human edit landing
+            # between conflict-check and PATCH bumps the etag and Dataverse
+            # returns 412 Precondition Failed. We map 412 → `CrmConflictError`
+            # so the runner surfaces `exit_status="blocked"` consistently
+            # with the conflict-check path. When `etag` is None (the loader
+            # didn't capture one — typical in tests that don't seed it),
+            # PATCH proceeds unconditionally.
+            headers: dict[str, str] = {}
+            if self._baseline is not None and self._baseline.etag is not None:
+                headers["If-Match"] = self._baseline.etag
+            try:
+                self._client.patch(path, json=body, headers=headers or None)
+            except PermanentDataverseError as exc:
+                if exc.status_code == 412:
+                    raise CrmConflictError(
+                        payload.queue_item_id, ["@odata.etag"]
+                    ) from exc
+                raise
         except (DataverseError, DataverseWriteBackError, MappingError) as exc:
             # `DataverseWriteBackError` here is the T045 `CrmConflictError`
             # path — record the failed correlation + stamp the progress row
@@ -608,28 +628,38 @@ class DataverseWriteBackAdapter:
         """T045 — fresh GET of the queue row immediately before the final PATCH;
         raise ``CrmConflictError`` if any baseline value has changed.
 
-        Compared fields:
-          * ``queue.status`` — the queue's option-set status. A change here
-            means a different session moved it, OR a human moved it out of the
-            "callable" state we loaded it in.
+        Compared fields (Pass 1B, 2026-05-24 audit-remediation):
+          * ``queue.status`` — option-set value at load. Raw comparison
+            (no coercion) so a `None`-at-load round-trips correctly.
+          * ``queue.last_session_id`` — captures concurrent-session clobbers
+            (a different session — or a human — wrote this field between
+            our load and our PATCH). Critical for ExplicitId selectors,
+            which the FR-009 callable-status filter doesn't protect.
           * ``preserve_if_present`` mapped logical names — any value change
             means a human edited a high-confidence field during our run.
+
+        Row-deletion semantics: when the fresh GET returns no rows, the row
+        was deleted between load and final write. Per spec §Edge Cases
+        ("Dataverse queue item changed by a human between claim and
+        write-back"), this IS a human change, not a generic Dataverse
+        failure — raise ``CrmConflictError(["__row_deleted__"])`` so the
+        runner surfaces ``exit_status="blocked", block_reason="conflict_detected"``.
 
         A ``None`` baseline (no ``record_baseline`` call by the runner) skips
         the check — preserves backward compatibility for callers that don't
         opt in (the existing US1/US4 happy-path tests construct the adapter
-        directly without a baseline). The check also no-ops when the row
-        cannot be found (a deleted queue is its own permanent error surfaced
-        elsewhere) or when the baseline is for a different queue item id
-        (defensive — never compare across queue items).
+        directly without a baseline). The check also no-ops when the
+        baseline is for a different queue item id (defensive — never compare
+        across queue items).
         """
         baseline = self._baseline
         if baseline is None or baseline.queue_item_id != queue_item_id:
             return
 
         status_field = self._t.logical_name(_QUEUE_STATUS_FIELD)
+        last_session_field = self._t.logical_name("queue.last_session_id")
         preserve_fields = self._t.preserve_if_present()
-        select_fields = sorted({status_field, *preserve_fields})
+        select_fields = sorted({status_field, last_session_field, *preserve_fields})
 
         entity_set = self._entity_set("queue_item")
         primary_id = self._primary_id("queue_item")
@@ -646,23 +676,28 @@ class DataverseWriteBackAdapter:
             .get("value", [])
         )
         if not rows:
-            # Row deleted between load and final write — the queue lookup at
-            # the final PATCH will 404 anyway; let that path own the failure
-            # rather than synthesizing one here.
-            return
+            # Row deleted between load and final PATCH. Spec §Edge Cases
+            # classifies any human-change-mid-run as a conflict; raise rather
+            # than letting the subsequent PATCH 404 into a generic `failed`.
+            raise CrmConflictError(queue_item_id, ["__row_deleted__"])
 
         current = rows[0]
         conflicting: list[str] = []
-        # Status change → conflict. Compare raw option-set integers; the
-        # baseline holds what we saw at load (typically `callable_status`
-        # integer), the row holds whatever it is now.
-        current_status = current.get(status_field)
-        if current_status != baseline.status_value:
+        # Status change → conflict. Raw comparison (no coercion).
+        if current.get(status_field) != baseline.status_value:
             conflicting.append(status_field)
-        # Preserve_if_present change → conflict. Missing-on-current is
-        # treated as `None`; baseline holds `None` for fields that weren't
-        # set at load, so an explicit add-by-human (None → non-None) is
-        # caught the same as a value-change.
+        # last_session_id change → concurrent-session clobber. Normalize to
+        # string-or-None on both sides so a stringified GUID compares cleanly.
+        current_last_session = current.get(last_session_field)
+        current_last_session = (
+            None if current_last_session is None else str(current_last_session)
+        )
+        if current_last_session != baseline.last_session_id:
+            conflicting.append(last_session_field)
+        # Preserve_if_present change → human edit during our run. Missing-on-
+        # current is treated as `None`; baseline holds `None` for fields that
+        # weren't set at load, so an explicit add-by-human (None → non-None)
+        # is caught the same as a value-change.
         for field in preserve_fields:
             if current.get(field) != baseline.preserve_values.get(field):
                 conflicting.append(field)
