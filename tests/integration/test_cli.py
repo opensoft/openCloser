@@ -341,3 +341,42 @@ def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
     # `_EXIT_CODE` in cli.py). The exact code is less important than the fact
     # that we're past secret loading and into the dry-run flow.
     assert run.exit_code != 0
+
+
+@pytest.mark.parametrize(
+    "bad_session_id",
+    [
+        "../../etc/passwd",  # path traversal
+        "ses_../../../etc/passwd",  # path traversal masquerading as a session id
+        "/absolute/path",  # absolute path
+        "ses_SHORT",  # too short
+        "ses_GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",  # non-hex
+        "session_c94f353fc89d4eaca7c161c331ded65c",  # wrong prefix
+        "",  # empty
+        "ses_c94f353fc89d4eaca7c161c331ded65c\n",  # trailing newline
+    ],
+)
+def test_cli_run_crm_resume_rejects_malformed_session_id(
+    tmp_path: Path, bad_session_id: str
+) -> None:
+    """SECURITY (Copilot PR #9 round-3): `--resume <session-id>` MUST validate
+    the operator-supplied id against the strict `ses_<32-hex>` shape BEFORE
+    building any filesystem path from it. Without this validation, a crafted
+    value containing path separators could cause the resume coordinator to
+    read `<artifact_root>/<session_id>/writeback.json` outside the artifact
+    root."""
+    config_path = _write_config(tmp_path)
+    run = _runner.invoke(
+        app,
+        [
+            "run-crm",
+            "--write",
+            "--resume",
+            bad_session_id,
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "not a valid session id" in out.lower()

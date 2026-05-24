@@ -350,6 +350,19 @@ class DataverseWriteBackAdapter:
 
     # ----- public observability --------------------------------------------
 
+    def pending_failure_session_ids(self) -> list[str]:
+        """Session IDs in the in-memory pending-failure queue. Used by the
+        runner to surface a `session_id` on `RESUME_NEEDED` reports — the
+        orchestrator's caught exception doesn't carry it, but the adapter
+        staged it in `_record_failure` before the orchestrator's transaction
+        rolled back (Copilot PR #9 round-2 P1: operators need this id to
+        invoke `run-crm --resume <session-id>`)."""
+        seen: list[str] = []
+        for failure in self._pending_failures:
+            if failure.session_id not in seen:
+                seen.append(failure.session_id)
+        return seen
+
     def warnings(self) -> list[DataQualityWarning]:
         """Operator-visible warnings accumulated during this adapter's session
         (e.g. an owner-override fallback per FR-025)."""
@@ -576,13 +589,25 @@ class DataverseWriteBackAdapter:
             )
         )
 
-    def flush_pending_failures(self) -> None:
+    def flush_pending_failures(
+        self, *, failure_run_status: RunStatus = RunStatus.BLOCKED
+    ) -> None:
         """Persist every staged failure to `crm_correlations` + `writeback_progress`.
 
         The runner calls this after catching the emit_* exception — at that
         point the orchestrator's `with store.transaction(conn)` has rolled back
         and released the SQLite write lock, so a normal write on the shared
         connection succeeds and the failure markers persist.
+
+        ``failure_run_status`` controls the terminal state stamped on
+        ``writeback_progress`` for this batch (default ``BLOCKED`` —
+        the conservative permanent-error case). The runner passes
+        ``RESUME_NEEDED`` when the underlying failure is a
+        ``TransientDataverseError`` (retry budget exhausted), so the resume
+        coordinator can later replay the missing emits (FR-023 + Copilot
+        PR #9 review: previously ``RESUME_NEEDED`` was never set anywhere,
+        so the resume coordinator could not be triggered by real failed
+        runs).
 
         Each upsert preserves:
         - A prior `CONFIRMED` correlation rather than downgrading it (a later
@@ -591,15 +616,18 @@ class DataverseWriteBackAdapter:
         - A prior `*_done=True` flag (regressing it would mislead the resume
           coordinator into replaying a write that already succeeded).
         - A terminal `COMPLETED` run_status (a later transient failure on an
-          already-completed session must not regress the ledger to BLOCKED).
+          already-completed session must not regress the ledger to BLOCKED
+          or RESUME_NEEDED).
         """
         if not self._pending_failures:
             return
         for failure in self._pending_failures:
-            self._persist_failure(failure)
+            self._persist_failure(failure, failure_run_status=failure_run_status)
         self._pending_failures.clear()
 
-    def _persist_failure(self, failure: _PendingFailure) -> None:
+    def _persist_failure(
+        self, failure: _PendingFailure, *, failure_run_status: RunStatus
+    ) -> None:
         now = self._now_utc_ms()
         existing = store.get_crm_correlation(
             self._conn, failure.session_id, failure.record_kind
@@ -627,7 +655,7 @@ class DataverseWriteBackAdapter:
         next_run_status = (
             RunStatus.COMPLETED
             if progress is not None and progress.run_status is RunStatus.COMPLETED
-            else RunStatus.BLOCKED
+            else failure_run_status
         )
         store.upsert_crm_correlation(self._conn, correlation)
         progress_update = {} if already_done else {failure.progress_key: False}

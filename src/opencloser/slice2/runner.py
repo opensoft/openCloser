@@ -253,16 +253,37 @@ def run_one_crm_item(
             warnings=adapter.warnings(),
         )
     except (DataverseError, DataverseWriteBackError, MappingError) as exc:
-        # A permanent Dataverse write failure mid-run, or a missing/invalid
-        # mapping entry surfaced by the adapter (e.g. `primary_id` not set),
-        # is operator-visible-failed. The orchestrator's
-        # `with store.transaction(conn)` around the failing emit_* has
-        # already rolled back; the SQLite write lock is free again, so we can
-        # now safely persist the failure markers the adapter staged. The
-        # resume coordinator (US4) reads from these rows.
-        adapter.flush_pending_failures()
+        # A Dataverse write failure mid-run, or a missing/invalid mapping entry
+        # surfaced by the adapter (e.g. `primary_id` not set), is
+        # operator-visible-failed. The orchestrator's `with
+        # store.transaction(conn)` around the failing emit_* has already
+        # rolled back; the SQLite write lock is free again, so we can now
+        # safely persist the failure markers the adapter staged.
+        #
+        # Distinguish TRANSIENT (retry-budget-exhausted) from PERMANENT for
+        # the resume ledger (Copilot PR #9 review: previously every failure
+        # got `BLOCKED`, so the resume coordinator could never be triggered
+        # by a real failed run). The client's `_request` retries on transient
+        # errors until budget exhausted then re-raises, so seeing a
+        # TransientDataverseError here means retry-exhaust; that's exactly
+        # the FR-023 resume-needed case.
+        failure_run_status = (
+            RunStatus.RESUME_NEEDED
+            if isinstance(exc, TransientDataverseError)
+            else RunStatus.BLOCKED
+        )
+        # Capture session ids BEFORE flush clears the pending queue (Copilot
+        # PR #9 round-2 P1: operators need the session id to invoke
+        # `run-crm --resume <session-id>` — the orchestrator's caught
+        # exception doesn't carry it, but the adapter staged it in
+        # `_record_failure`).
+        failure_session_ids = adapter.pending_failure_session_ids()
+        adapter.flush_pending_failures(failure_run_status=failure_run_status)
         return CrmRunReport(
-            exit_status="failed",
+            exit_status="resume_needed"
+            if failure_run_status is RunStatus.RESUME_NEEDED
+            else "failed",
+            session_id=failure_session_ids[0] if failure_session_ids else None,
             message=f"dataverse write failed: {exc}",
             warnings=adapter.warnings(),
         )
