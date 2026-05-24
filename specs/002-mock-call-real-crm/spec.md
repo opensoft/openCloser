@@ -216,7 +216,7 @@ When the system writes a transcript artifact, the transcript text first passes t
 #### Transcript redaction
 
 - **FR-028**: Transcript text MUST pass through a configurable redaction layer before any transcript artifact is written to disk. The default Slice 2 policy MUST replace configured sensitive patterns with `[REDACTED]`.
-- **FR-029**: The redaction layer MUST preserve the normalized summary and the transcript-pointer artifact contract from Slice 1, including support for a no-op policy.
+- **FR-029**: The redaction layer MUST preserve the normalized summary and the transcript-pointer artifact contract from Slice 1, including support for a no-op policy (see `data-model.md` §3 — `[redaction] policy = "noop"` — and `contracts/redaction-layer.md` for the policy definitions).
 - **FR-030**: When the deployment configures summary-only transcript retention, the system MUST write no full transcript file, and the session-result artifact MUST still include the normalized summary and the retention mode.
 
 #### Run modes, CLI, and demo evidence
@@ -284,7 +284,7 @@ When the system writes a transcript artifact, the transcript text first passes t
 - **FR-025–FR-027** (task ownership / review owner / DNC-no-task) are covered by **User Story 1 scenarios 1–4**, SC-003, and SC-004.
 - **FR-028–FR-030** are covered by **User Story 6** and SC-009.
 - **FR-031–FR-033** are covered by **User Story 1** (write-enabled CLI), **User Story 2** (dry-run default), SC-002, SC-012, and SC-013.
-- **FR-035** (local audit retention, no secrets in artifacts) is covered by the Phase 9 polish task and by demo-artifact inspection per SC-012.
+- **FR-035** (local audit retention, no secrets in artifacts) is covered by the Phase 9 polish tasks (T041 retention enforcement + T047 no-secrets-in-artifacts negative-assertion test) and by demo-artifact inspection per SC-012.
 
 Audit-data inventory (§Constitution Alignment §Auditability) and the **Write-Back Progress Ledger** key entity are not numbered FRs but carry implicit requirements; their formal documentation lives in tasks T049 (run-report schema in `contracts/cli-slice2.md`) and T050 (state-machine specification in `data-model.md` §1 and `contracts/cli-slice2.md` exit-status mapping).
 

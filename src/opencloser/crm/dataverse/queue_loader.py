@@ -97,6 +97,43 @@ class QueueLoadError(RuntimeError):
     """Raised when a Dataverse queue row cannot be mapped to the `QueueItem` contract."""
 
 
+class CampaignNotFoundError(QueueLoadError):
+    """T051 — raised when a ``NextReady`` selector's configured campaign has ZERO
+    queue items in Dataverse (callable OR not). Distinguishes the spec §Edge Cases
+    "Configured campaign not found" path from FR-009's "Empty queue" clean no-op:
+
+      * **Empty queue (FR-009)**: at least one queue row exists for the campaign,
+        but none are in the configured callable status — clean ``no-callable-item``
+        no-op.
+      * **Campaign not found (this exception)**: zero queue rows exist for the
+        campaign at all, meaning the configured campaign selector likely doesn't
+        resolve in Dataverse (typo, deleted campaign, wrong environment) — fails
+        as a permanent configuration/readiness error per spec §Edge Cases.
+
+    The runner converts this to ``CrmRunReport(exit_status="failed", message=
+    "configured_campaign_not_found: ...")`` per spec §Edge Cases ("fails as a
+    permanent configuration/readiness error before session creation, queue claim,
+    mock call placement, attempt increment, or CRM write").
+
+    Note: a campaign that genuinely has zero queue items (e.g. a brand-new
+    campaign before any items are queued) is indistinguishable here from a
+    typo'd campaign GUID — both have zero rows. The trade-off favors the
+    typo case because (a) it's the dominant operator-error scenario and (b)
+    a campaign with literal zero items has no work to do regardless of
+    exit-status label.
+    """
+
+    def __init__(self, campaign: str) -> None:
+        self.campaign = campaign
+        super().__init__(
+            f"configured_campaign_not_found: campaign {campaign!r} has zero queue items in "
+            "Dataverse (typo'd selector, deleted campaign, or wrong environment); spec §Edge "
+            "Cases requires this to fail as a permanent configuration/readiness error, "
+            "distinct from FR-009 empty-queue no-op (which requires at least one queue "
+            "item to exist for the campaign)."
+        )
+
+
 @dataclass(frozen=True)
 class ExplicitId:
     """Selector — load one specific Dataverse queue item by its primary id."""
@@ -231,6 +268,27 @@ class DataverseQueueLoader:
                 ),
                 top=1,
             )
+            if not rows:
+                # T051 — disambiguate FR-009 empty-queue from spec §Edge Cases
+                # "Configured campaign not found". The status+campaign filter
+                # returned 0 rows; re-query with ONLY the campaign filter (drop
+                # the status). If still 0 → the campaign has no queue items at
+                # all (typo'd selector, deleted campaign, or wrong environment)
+                # — raise `CampaignNotFoundError` so the runner can surface a
+                # permanent configuration/readiness error per spec §Edge Cases.
+                # If ≥1 → at least one queue item exists for the campaign but
+                # none are callable → real FR-009 empty-queue no-op; fall
+                # through to `return None`.
+                campaign_only_rows = self._query(
+                    entity_set,
+                    flt=(
+                        f"{_lookup_value_name(campaign_field_ref)} eq "
+                        f"{_odata_value(campaign_field_ref.type, selector.campaign)}"
+                    ),
+                    top=1,
+                )
+                if not campaign_only_rows:
+                    raise CampaignNotFoundError(selector.campaign)
         return rows[0] if rows else None
 
     def _baseline_from_row(

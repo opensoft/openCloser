@@ -313,11 +313,45 @@ def test_load_next_ready_uses_configured_callable_status() -> None:
     assert item.queue_item_id == "q-inprog"  # the configured callable status wins
 
 
-def test_load_empty_queue_returns_none() -> None:
+def test_load_explicit_id_not_found_returns_none() -> None:
+    """ExplicitId always returns None for an unknown row; T051 disambiguation
+    only applies to NextReady (which has a campaign selector to validate)."""
     loader = _loader_with_campaign(
         {"medx_callqueueitem": [], "account": [_ACCOUNT]}
     )
     assert loader.load(ExplicitId("does-not-exist")) is None
+
+
+def test_load_next_ready_zero_campaign_rows_raises_campaign_not_found() -> None:
+    """T051 — a NextReady selector whose campaign has ZERO queue items (callable
+    or not) raises CampaignNotFoundError so the runner can surface a permanent
+    configuration/readiness error per spec §Edge Cases "Configured campaign not
+    found", distinct from FR-009's empty-queue no-op."""
+    from opencloser.crm.dataverse.queue_loader import CampaignNotFoundError
+
+    loader = _loader_with_campaign(
+        {"medx_callqueueitem": [], "account": [_ACCOUNT]}
+    )
+    with pytest.raises(CampaignNotFoundError) as exc_info:
+        loader.load(NextReady("alf-q2-davis"))
+    assert exc_info.value.campaign == "alf-q2-davis"
+
+
+def test_load_next_ready_campaign_with_no_callable_items_returns_none() -> None:
+    """FR-009 empty-queue: when at least one queue item exists for the campaign
+    but none are in the callable status, the loader returns None (clean no-op),
+    NOT CampaignNotFoundError. This is the FR-009/T051 disambiguation."""
+    # `_mapping_with_campaign` uses a STRING-typed `medx_campaign` field
+    # (not a lookup), so the campaign value is stored under `medx_campaign`
+    # — not `_medx_campaignid_value`.
+    non_callable = _queue_record(
+        qid="q-not-callable", status=2, next_at="2026-05-22T16:00:00.000Z"
+    )
+    non_callable["medx_campaign"] = "alf-q2-davis"
+    loader = _loader_with_campaign(
+        {"medx_callqueueitem": [non_callable], "account": [_ACCOUNT]}
+    )
+    # FR-009 path — campaign exists, no callable items → clean None (no-op).
     assert loader.load(NextReady("alf-q2-davis")) is None
 
 

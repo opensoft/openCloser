@@ -46,6 +46,7 @@ from opencloser.crm.dataverse.errors import (
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator, load_mapping
 from opencloser.crm.dataverse.metadata import MetadataError, verify
 from opencloser.crm.dataverse.queue_loader import (
+    CampaignNotFoundError,
     DataverseQueueLoader,
     QueueLoadError,
     QueueSelector,
@@ -565,6 +566,19 @@ def _load_dataverse_queue_item(
     )
     try:
         loaded = loader.load_with_baseline(selector, now_utc_ms=clk.now_utc_ms())
+    except CampaignNotFoundError as exc:
+        # T051 — spec §Edge Cases "Configured campaign not found" is a permanent
+        # configuration/readiness error, distinct from FR-009's clean empty-queue
+        # no-op. Surface as `failed` exit (per spec §Edge Cases "fails as a
+        # permanent configuration/readiness error before session creation, queue
+        # claim, mock call placement, attempt increment, or CRM write") with a
+        # `configured_campaign_not_found:` prefix so operators can grep the
+        # cause without parsing the full message.
+        return CrmRunReport(
+            exit_status="failed",
+            metadata_report=metadata_report,
+            message=str(exc),
+        )
     except (MappingError, QueueLoadError, DataverseError, ValidationError) as exc:
         return CrmRunReport(exit_status="failed", message=f"queue loader error: {exc}")
     if loaded is None:

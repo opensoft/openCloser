@@ -355,23 +355,20 @@ def test_us3_blocks_when_redaction_policy_has_invalid_regex(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 4 — Configured-campaign-not-found (documented gap)
+# Scenario 4 — Configured-campaign-not-found (T051 — spec §Edge Cases)
 # ---------------------------------------------------------------------------
 
 
-def test_us3_campaign_not_found_currently_yields_no_callable_item(
+def test_us3_campaign_not_found_yields_failed_with_distinct_message(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:
-    """Documented gap: when the configured campaign filter matches zero rows
-    (whether because the campaign doesn't exist or because no queue items
-    are tagged with it), the queue loader returns ``no-callable-item``.
-    Distinguishing the two requires querying the campaign lookup target,
-    which depends on the campaign field's mapping type (string vs lookup);
-    that distinction is deferred to a follow-up task.
-
-    This test locks in the current behavior so a future regression doesn't
-    silently change it: NextReady with a non-existent campaign returns the
-    clean no-op, NOT a session creation or attempt increment."""
+    """T051 / spec §Edge Cases "Configured campaign not found" — NextReady with
+    a campaign GUID that has ZERO queue items in Dataverse (typo'd selector,
+    deleted campaign, wrong environment) fails as a permanent configuration/
+    readiness error. Surface: ``exit_status="failed"`` with a
+    ``configured_campaign_not_found:`` message prefix that operators can grep.
+    Distinct from FR-009 empty-queue no-op (which requires ≥1 queue item to
+    exist for the campaign — see test below)."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
 
@@ -388,10 +385,47 @@ def test_us3_campaign_not_found_currently_yields_no_callable_item(
         run_mode=RunMode.WRITE_ENABLED,
     )
 
-    # Documented gap: this is currently `no-callable-item`, not `blocked` per
-    # spec §Edge Cases "Configured campaign not found". Tracked as a known
-    # limitation; the test asserts the CURRENT behavior so the eventual
-    # follow-up can update both this test and the runner together.
+    assert report.exit_status == "failed", f"expected failed, got {report.exit_status}"
+    assert "configured_campaign_not_found" in (report.message or "")
+    assert "nonexistent-campaign-xyz" in (report.message or "")
+    # No CRM writes — permanent readiness failure before session creation /
+    # claim / attempt increment per spec §Edge Cases.
+    assert fake.created == []
+    assert fake.patched == []
+
+
+def test_us3_empty_queue_with_existing_campaign_still_yields_no_callable_item(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """FR-009 empty-queue no-op (T051 disambiguation): when the configured
+    campaign HAS at least one queue item but NONE are in the configured
+    callable status, the queue loader still returns ``no-callable-item``.
+    Only the "zero queue items at all for this campaign" case becomes the
+    T051 ``configured_campaign_not_found`` failure.
+
+    Seeds a queue item tagged with the campaign GUID but in `completed`
+    status (callstatus=2, not the configured `ready`=0), so the
+    status+campaign query returns 0 rows but the campaign-only fallback
+    finds the row — FR-009 path."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    # Seed a row tagged with the campaign 'alf-q2-davis' but in status 2 (completed).
+    fake = fake_for_mapping(mapping, _seed(status=2))
+    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
+
+    report = run_one_crm_item(
+        selector=NextReady(campaign="alf-q2-davis"),
+        transport_fixture=_TRANSPORT_FIXTURES / "connected.json",
+        conversation_fixture=_CONVERSATIONS / "interested_callback_requested.json",
+        slice1_config=_slice1_config(tmp_artifact_dir, Path(":memory:")),
+        slice2_config=cfg,
+        client=fake.client(cfg.retry),
+        conn=tmp_state_db,
+        clock=_CLOCK,
+        run_mode=RunMode.WRITE_ENABLED,
+    )
+
+    # The campaign exists (the seeded row is tagged with it) but has no
+    # callable items → FR-009 clean no-op, NOT T051 campaign-not-found.
     assert report.exit_status == "no-callable-item"
     assert fake.created == []
     assert fake.patched == []

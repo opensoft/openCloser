@@ -41,6 +41,9 @@ idempotent recovery from partial Dataverse write-back.
 | Run modes | **dry-run (default)** vs. **write-enabled (explicit `--write`)** | spec FR-031 |
 
 **Project Type**: Single-project Python CLI (extends the Slice 1 `src/opencloser` package).
+Note: the constitution lists FastAPI in §Architecture Constraints as part of the default
+stack for future HTTP-surface slices; Slice 2 is CLI-only (Typer + httpx) so FastAPI is
+intentionally not in scope here — a deliberate slice-scope decision, not a deviation.
 
 **Performance/Scale**: One queue item per CLI invocation, one ALF campaign. Not
 latency-critical; the only timing constraint is the bounded write-back retry budget
@@ -199,7 +202,7 @@ contract are **reused unchanged** — Slice 2 adds concrete implementations behi
 to the user-story-organized phases that actually appear in `tasks.md`):
 
 1. **Bootstrap** — add `httpx` dependency; `config/slice2.toml`; `tests/fixtures/dataverse/`. → tasks.md Phase 1 (Setup, T001–T004).
-2. **State store** — `crm_correlations` + `writeback_progress` schema + DAO. → tasks.md Phase 2 (T005–T007).
+2. **State store + Slice 2 models** — Pydantic models (T005); `crm_correlations` + `writeback_progress` schema (T006) + DAO (T007). → tasks.md Phase 2 (T005–T007).
 3. **Dataverse client** — `auth.py` (client-credentials), `client.py` (Web API + transient retry), `errors.py`. → tasks.md Phase 2 (T008–T011).
 4. **Metadata** — discovery + lightweight verification; mapping-artifact load/write. → tasks.md Phase 2 (T012, T013) for the modules; tasks.md Phase 3 (T020 `discover-crm` command) wires them.
 5. **Queue loader** — Dataverse row → `QueueItem`; selector semantics; empty-queue no-op. → tasks.md Phase 2 (T014).
