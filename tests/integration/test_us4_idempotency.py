@@ -32,6 +32,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 
 from opencloser.core.clock import FrozenClock
@@ -876,6 +877,85 @@ def test_t045_if_match_412_raises_conflict_error(
     assert report.exit_status == "blocked"
     assert "conflict_detected" in (report.message or "")
     assert "@odata.etag" in (report.message or "")
+
+
+def test_us4_natural_transient_exhaust_yields_resume_needed(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Pass 1D — pins the runner's `TransientDataverseError → RESUME_NEEDED`
+    branch via an end-to-end natural-failure path (the existing
+    test_us4_adapter_flush_pending_failures_supports_resume_needed synthesizes
+    the state by reaching into private adapter methods, leaving the runner
+    branch verified by inspection only — code-review HIGH finding from
+    test-pyramid). Drives an emit_* through retry-budget exhaustion using
+    in-fake fail injection.
+
+    Documents the KNOWN LIMITATION in `slice2/resume.py:26-38`: the Slice 1
+    orchestrator only writes `writeback.json` AFTER all emit_* succeed, so a
+    natural transient-exhaust failure leaves NO writeback.json on disk and
+    the subsequent `resume_session` call raises `ResumeError("writeback.json
+    missing")`. The test asserts both legs so a future architectural fix
+    (early writeback.json sidecar — tracked as T052) will require updating
+    this test alongside it."""
+    from opencloser.models import RetryConfig
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Install a URL-pattern gate: succeed for everything EXCEPT POSTs to the
+    # `tasks` collection — the orchestrator's emit_task call (the last
+    # write-back op) hits that endpoint. With max_retries=3 the four 503s
+    # exhaust the bounded retry budget and the runner catches
+    # TransientDataverseError, routing to RESUME_NEEDED.
+    original_handle = fake._handle
+
+    def gated_handle(request):
+        if request.method == "POST" and "/tasks" in request.url.path:
+            return httpx.Response(503, request=request)
+        return original_handle(request)
+
+    fake._handle = gated_handle
+
+    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
+    cfg = cfg.model_copy(
+        update={
+            "retry": RetryConfig(
+                max_retries=3, backoff_seconds=[1.0, 2.0, 4.0], retry_after_cap_seconds=30.0
+            )
+        }
+    )
+
+    report = _run_write_enabled(
+        conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir, cfg=cfg
+    )
+
+    # Runner branch under test: TransientDataverseError → RESUME_NEEDED.
+    assert report.exit_status == "resume_needed", (
+        f"natural transient-exhaust must surface as resume_needed; got {report}"
+    )
+    assert report.session_id is not None
+    # writeback_progress reflects the RESUME_NEEDED terminal state.
+    progress = store.get_writeback_progress(tmp_state_db, report.session_id)
+    assert progress is not None
+    assert progress.run_status is RunStatus.RESUME_NEEDED
+
+    # KNOWN LIMITATION: writeback.json is NOT persisted (orchestrator writes
+    # it only after all emit_* succeed). The subsequent resume_session call
+    # must raise the documented ResumeError. Removing the gate so the resume
+    # path itself doesn't fail at a different point.
+    fake._handle = original_handle
+
+    from opencloser.slice2.resume import ResumeError, resume_session
+    with pytest.raises(ResumeError, match=r"writeback\.json missing"):
+        resume_session(
+            session_id=report.session_id,
+            conn=tmp_state_db,
+            artifact_root=tmp_artifact_dir,
+            client=fake.client(cfg.retry),
+            translator=MappingTranslator(mapping),
+            task_owners=cfg.task_owners,
+            clock=_CLOCK,
+        )
 
 
 def test_resume_snapshot_failure_re_raises_to_blocked(

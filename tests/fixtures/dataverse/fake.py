@@ -26,6 +26,15 @@ from opencloser.models import RetryConfig
 
 _API_PREFIX = "/api/data/v9.2/"
 _ENTITY_DEF_RE = re.compile(r"^EntityDefinitions\(LogicalName='([^']+)'\)(/Attributes)?$")
+
+# Dataverse system fields that are present on every table regardless of the
+# mapping artifact. Pass 1D (2026-05-24 audit-remediation) made `$filter` and
+# `$orderby` strict on unknown fields — but every real Dataverse query is
+# allowed to reference these system attributes (e.g. `createdon` is the
+# NextReady tiebreaker per FR-008). Merge into each entity's declared attrs.
+_DATAVERSE_SYSTEM_ATTRS: frozenset[str] = frozenset(
+    {"createdon", "modifiedon", "versionnumber", "ownerid"}
+)
 # Match Picklist OR Status metadata casts — Dataverse exposes option-set columns
 # under several derived types and the loader/verifier tries them in order.
 _OPTION_SET_META_RE = re.compile(
@@ -63,7 +72,11 @@ class DataverseFake:
         env_url: str = "https://fake.crm.dynamics.com",
     ) -> None:
         self.env_url = env_url
-        self._entities = {name: set(attrs) for name, attrs in entities.items()}
+        # Merge in Dataverse system fields so `$filter` / `$orderby` strict
+        # validation doesn't reject queries that reference `createdon` &c.
+        self._entities = {
+            name: set(attrs) | _DATAVERSE_SYSTEM_ATTRS for name, attrs in entities.items()
+        }
         self._records = {name: [dict(r) for r in recs] for name, recs in (records or {}).items()}
         # (entity_logical, attribute_logical) -> set of valid option-set integer values,
         # keyed by metadata cast ('Picklist' or 'Status'). The loader/verifier tries
@@ -221,20 +234,42 @@ class DataverseFake:
             return httpx.Response(404, request=request)
         rows = list(self._records.get(logical, []))
         params = request.url.params
+        valid_fields = self._entities[logical]
 
+        # Pass 1D (2026-05-24 audit-remediation): make `$filter` and `$orderby`
+        # strict on unknown field names, mirroring the existing `$select`
+        # behavior. Without this, a typo in a `$filter` clause silently
+        # returns empty rows (= "no row matches"), exactly like the
+        # preserve_if_present registration gap that T046 nearly tripped
+        # over. With it, the typo surfaces as a 400 → PermanentDataverseError
+        # → fast operator feedback.
         flt = params.get("$filter")
         if flt:
-            rows = [r for r in rows if _matches_filter(r, flt)]
+            try:
+                rows = [r for r in rows if _matches_filter(r, flt, valid_fields)]
+            except _UnknownODataField as exc:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": f"unknown $filter field: {exc.field!r}"}},
+                    request=request,
+                )
         orderby = params.get("$orderby")
         if orderby:
-            rows = _apply_orderby(rows, orderby)
+            try:
+                rows = _apply_orderby(rows, orderby, valid_fields)
+            except _UnknownODataField as exc:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": f"unknown $orderby field: {exc.field!r}"}},
+                    request=request,
+                )
         top = params.get("$top")
         if top:
             rows = rows[: int(top)]
         select = params.get("$select")
         if select:
             keys = [k.strip() for k in select.split(",")]
-            unknown = [k for k in keys if k not in self._entities[logical]]
+            unknown = [k for k in keys if k not in valid_fields]
             if unknown:  # a $select of an unmapped field is a Dataverse 400
                 return httpx.Response(
                     400, json={"error": {"message": f"unknown field(s): {unknown}"}},
@@ -311,9 +346,23 @@ class DataverseFake:
         return httpx.Response(404, request=request)
 
 
-def _matches_filter(row: dict[str, Any], flt: str) -> bool:
+class _UnknownODataField(Exception):
+    """Sentinel — raised by `_matches_filter` / `_apply_orderby` when a query
+    references a field the entity doesn't declare (Pass 1D strictness fix).
+    Caught by `_handle_query` and surfaced as HTTP 400."""
+
+    def __init__(self, field: str) -> None:
+        self.field = field
+        super().__init__(field)
+
+
+def _matches_filter(row: dict[str, Any], flt: str, valid_fields: set[str]) -> bool:
     """Support the minimal OData `$filter` Slice 2 uses: `field eq value` (string,
     int, or guid), optionally joined by ` and `.
+
+    Raises `_UnknownODataField` when a clause names a field that isn't in
+    ``valid_fields`` (Pass 1D — match `$select` strictness so typos surface
+    as 400 instead of silently returning empty results).
 
     Implemented with plain string splitting (no regex) — Sonar flagged a previous
     regex variant for polynomial-backtracking ReDoS risk (rule python:S5852).
@@ -325,6 +374,8 @@ def _matches_filter(row: dict[str, Any], flt: str) -> bool:
         field, raw = (part.strip() for part in clause.split(" eq ", 1))
         if not field or not field.replace("_", "").isalnum():
             return False
+        if field not in valid_fields:
+            raise _UnknownODataField(field)
         if raw.startswith("'") and raw.endswith("'"):
             # OData string literals escape `'` as `''` — unescape on the way out
             # so the comparison value matches what the seeded row stores.
@@ -338,12 +389,19 @@ def _matches_filter(row: dict[str, Any], flt: str) -> bool:
     return True
 
 
-def _apply_orderby(rows: list[dict[str, Any]], orderby: str) -> list[dict[str, Any]]:
-    """Deterministic multi-key `$orderby` (`field [asc|desc], ...`)."""
+def _apply_orderby(
+    rows: list[dict[str, Any]], orderby: str, valid_fields: set[str]
+) -> list[dict[str, Any]]:
+    """Deterministic multi-key `$orderby` (`field [asc|desc], ...`).
+
+    Raises `_UnknownODataField` when a term names a field that isn't in
+    ``valid_fields`` (Pass 1D — same strictness as `_matches_filter`)."""
     ordered = list(rows)
     for term in reversed([t.strip() for t in orderby.split(",")]):
         parts = term.split()
         field = parts[0]
+        if field not in valid_fields:
+            raise _UnknownODataField(field)
         descending = len(parts) > 1 and parts[1].lower() == "desc"
         ordered.sort(key=lambda r, f=field: (r.get(f) is None, r.get(f)), reverse=descending)
     return ordered
