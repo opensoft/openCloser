@@ -267,9 +267,13 @@ def test_us4_resume_completes_partial_writeback(
     NO duplicate is created). Dataverse holds exactly one record of each
     kind, satisfying SC-014.
 
-    The full transient-exhaust → RESUME_NEEDED flow is exercised
-    end-to-end by `test_us4_runner_sets_resume_needed_on_transient_exhaust`
-    below."""
+    The adapter-level wiring for RESUME_NEEDED is exercised by
+    `test_us4_adapter_flush_pending_failures_supports_resume_needed`
+    below; the runner-side `TransientDataverseError → RESUME_NEEDED`
+    branch is verified by inspection (a natural transient-exhaust path
+    cannot currently produce a working resume because the orchestrator
+    only writes `writeback.json` after successful completion — see the
+    "KNOWN LIMITATION" block in `src/opencloser/slice2/resume.py`)."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
 
@@ -366,7 +370,9 @@ def test_us4_resume_finalized_session_is_noop(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 4b — runner sets RESUME_NEEDED on transient exhaust (Copilot PR #9)
+# Scenario 4b — adapter.flush_pending_failures supports RESUME_NEEDED target
+# (the adapter-level contract; the runner integration is verified by inspection
+# per the documented "writeback.json on transient" limitation in resume.py)
 # ---------------------------------------------------------------------------
 
 

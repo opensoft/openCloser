@@ -1,29 +1,41 @@
 """Slice 2 resume coordinator (FR-023, FR-014).
 
 When a write-enabled run exhausts its retry budget mid-write-back the runner
-exits with ``run_status = resume_needed`` and persists three things:
+exits with ``run_status = resume_needed`` and persists:
 
 1. ``writeback_progress(session_id, phone_call_activity_done,
    queue_status_update_done, task_done, run_status)`` — which of the three
    write-back ops succeeded.
-2. ``writeback.json`` (under ``<artifact_root>/<session_id>/``) — the
-   conceptual payloads the run intended to emit; written atomically per the
-   Slice 1 artifact contract.
-3. ``crm_correlations`` rows — the confirmed CRM record IDs and any
+2. ``crm_correlations`` rows — the confirmed CRM record IDs and any
    ``failed`` rows from the partial run, so a later resume's pre-query
    short-circuits cleanly even if a record was created but the local
    correlation row was rolled back by a transient error.
 
-``resume_session`` rebuilds an adapter, loads (1) + (2), and replays ONLY the
-``emit_*`` operations the progress row reports as not-done. The adapter's
-existing ``_idempotent_create`` pre-query (FR-024) provides belt-and-suspenders:
-if a record WAS created in the partial run but ``_record_correlation`` never
+``resume_session`` rebuilds an adapter, loads (1) + the persisted
+``writeback.json`` artifact, and replays ONLY the ``emit_*`` operations the
+progress row reports as not-done. The adapter's existing
+``_idempotent_create`` pre-query (FR-024) provides belt-and-suspenders: if a
+record WAS created in the partial run but ``_record_correlation`` never
 committed, the pre-query still finds it by idempotency key and the resume
 reuses the existing CRM record ID — no duplicate Phone Call activity or Task
 gets created (SC-005, SC-014).
 
 The Slice 1 orchestrator is intentionally NOT re-invoked (FR-014 — resume
 completes only the missing CRM writes, not the eligibility/persona loop).
+
+KNOWN LIMITATION (Copilot PR #9 round-2 P1):
+   The Slice 1 orchestrator writes ``writeback.json`` only AFTER all
+   ``emit_*`` operations succeed. So a write-enabled run that exits
+   ``resume_needed`` due to a transient mid-emit failure has NO
+   ``writeback.json`` to replay from, and ``resume_session`` will raise
+   ``ResumeError("writeback.json missing …")``. The current resume path
+   therefore works for synthesized resume_needed states (tests +
+   operator-staged scenarios) but cannot recover natural transient-exhaust
+   failures end-to-end without an orchestrator-side change to persist the
+   planned WriteBack incrementally (e.g. an early "planned-writeback.json"
+   sidecar before emit_* attempts). Tracked as a follow-up; the resume
+   coordinator's design is correct and the architectural fix is
+   independent of US4 scope.
 """
 
 from __future__ import annotations
@@ -49,12 +61,27 @@ _WRITEBACK_FILENAME = "writeback.json"
 
 @dataclass
 class ResumeReport:
-    """The resume coordinator's outcome — superset of CrmRunReport.
+    """The resume coordinator's outcome — surfaced directly to the CLI by
+    ``_run_crm_resume`` (Copilot PR #9 round-2: the slice2 runner is NOT
+    in the resume path; an earlier draft of this docstring incorrectly
+    described a "converted to CrmRunReport" step that does not exist).
 
-    The slice2 runner converts this to a CrmRunReport when called from the CLI.
+    ``exit_status`` is one of (also mapped to CLI exit codes in
+    ``cli._run_crm_resume``):
+
+      * ``"completed"`` — every missing emit_* replayed successfully (exit 0)
+      * ``"no-resume-needed"`` — the session was already in COMPLETED state;
+        this is the FR-021 idempotent re-invocation (exit 0)
+      * ``"resume_needed"`` — the replay itself re-exhausted the retry
+        budget; the session is still resumable on another invocation (exit 2)
+      * ``"blocked"`` — the session is in BLOCKED state (permanent error
+        from a prior run), or the replay failed with a permanent error
+        and was escalated to BLOCKED (exit 1)
+      * ``"failed"`` — the session is in IN_PROGRESS (refuse to race) or
+        another resume pre-condition failed (exit 2)
     """
 
-    exit_status: str  # "completed" | "failed" | "blocked" | "no-resume-needed"
+    exit_status: str
     session_id: str
     message: str | None = None
     artifact_dir: Path | None = None

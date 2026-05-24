@@ -380,7 +380,15 @@ def run_crm(
                 err=True,
             )
             raise typer.Exit(code=2)
-        if queue_item_id or next_ready or transport_fixture is not None:
+        # Explicit `is not None` checks (Copilot PR #9 round-2 review):
+        # truthiness alone would let `--queue-item-id ""` slip through as
+        # falsy, silently ignored rather than flagged as an incompatible
+        # combination.
+        if (
+            queue_item_id is not None
+            or next_ready
+            or transport_fixture is not None
+        ):
             typer.echo(
                 "error:       --resume is incompatible with --queue-item-id / --next-ready / "
                 "--transport-fixture (resume operates on persisted write-back payloads only)",
@@ -598,23 +606,30 @@ def _run_crm_resume(
         raise typer.Exit(code=2) from None
 
     # Load + validate the mapping artifact — resume requires the same approved
-    # mapping the original run used. Schema/approval errors are operator-
-    # visible-blocked (mirrors `_verify_readiness`'s first two gates).
+    # mapping the original run used. Schema/approval errors are surfaced as
+    # structured `blocked` reports (Copilot PR #9 round-2 review: match the
+    # exit-status/reporting shape of the normal write-enabled path, where
+    # mapping failures route through `_verify_readiness` and produce
+    # `CrmRunReport(exit_status="blocked", ...)` — `run-crm --resume` was
+    # inconsistently exiting 2/`failed` with a plain `error:` line).
     try:
         mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
     except MappingError as exc:
         conn.close()
-        typer.echo(f"error:       mapping artifact error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+        typer.echo("exit_status:           blocked")
+        typer.echo(f"session_id:            {session_id}")
+        typer.echo(f"message:               mapping artifact error: {exc}")
+        raise typer.Exit(code=1) from None
     if not mapping.meta.approved:
         conn.close()
+        typer.echo("exit_status:           blocked")
+        typer.echo(f"session_id:            {session_id}")
         typer.echo(
-            "error:       mapping artifact "
+            "message:               mapping artifact "
             f"{slice2_config.dataverse.mapping_artifact!r} is not approved; "
-            "re-run `discover-crm` and have a reviewer flip _meta.approved to true",
-            err=True,
+            "re-run `discover-crm` and have a reviewer flip _meta.approved to true"
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=1)
     translator = MappingTranslator(mapping)
 
     clock = SystemClock()

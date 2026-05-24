@@ -272,11 +272,18 @@ def run_one_crm_item(
             if isinstance(exc, TransientDataverseError)
             else RunStatus.BLOCKED
         )
+        # Capture session ids BEFORE flush clears the pending queue (Copilot
+        # PR #9 round-2 P1: operators need the session id to invoke
+        # `run-crm --resume <session-id>` — the orchestrator's caught
+        # exception doesn't carry it, but the adapter staged it in
+        # `_record_failure`).
+        failure_session_ids = adapter.pending_failure_session_ids()
         adapter.flush_pending_failures(failure_run_status=failure_run_status)
         return CrmRunReport(
             exit_status="resume_needed"
             if failure_run_status is RunStatus.RESUME_NEEDED
             else "failed",
+            session_id=failure_session_ids[0] if failure_session_ids else None,
             message=f"dataverse write failed: {exc}",
             warnings=adapter.warnings(),
         )

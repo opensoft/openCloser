@@ -350,6 +350,19 @@ class DataverseWriteBackAdapter:
 
     # ----- public observability --------------------------------------------
 
+    def pending_failure_session_ids(self) -> list[str]:
+        """Session IDs in the in-memory pending-failure queue. Used by the
+        runner to surface a `session_id` on `RESUME_NEEDED` reports — the
+        orchestrator's caught exception doesn't carry it, but the adapter
+        staged it in `_record_failure` before the orchestrator's transaction
+        rolled back (Copilot PR #9 round-2 P1: operators need this id to
+        invoke `run-crm --resume <session-id>`)."""
+        seen: list[str] = []
+        for failure in self._pending_failures:
+            if failure.session_id not in seen:
+                seen.append(failure.session_id)
+        return seen
+
     def warnings(self) -> list[DataQualityWarning]:
         """Operator-visible warnings accumulated during this adapter's session
         (e.g. an owner-override fallback per FR-025)."""
