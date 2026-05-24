@@ -90,6 +90,12 @@ class ResumeReport:
     message: str | None = None
     artifact_dir: Path | None = None
     operations_replayed: list[str] | None = None
+    # Pass 1C (2026-05-24 audit-remediation) — same structured discriminator
+    # as CrmRunReport.block_reason. Populated for `exit_status="blocked"`
+    # exits so the CLI / future run-report.json writer can branch on a typed
+    # field. Values: "eligibility" | "metadata" | "conflict_detected" |
+    # "permanent_other". None for non-blocked exits.
+    block_reason: str | None = None
 
 
 class ResumeError(RuntimeError):
@@ -153,6 +159,10 @@ def resume_session(
         return ResumeReport(
             exit_status="blocked",
             session_id=session_id,
+            # Pre-existing-blocked surfaces under `permanent_other` since
+            # the original block_reason isn't persisted on writeback_progress
+            # yet. Future enhancement: add a block_reason column to the table.
+            block_reason="permanent_other",
             message=(
                 f"session {session_id!r} is in 'blocked' — a permanent error "
                 "stopped the original run. Resume cannot recover; inspect the "
@@ -280,12 +290,21 @@ def resume_session(
             exit_status = "blocked"
         else:  # pragma: no cover — failure_run_status is currently always one of the above
             exit_status = "failed"
+        # Distinguish T045 conflict-on-resume from other permanent errors so
+        # the operator-visible discriminator matches the initial-run path.
+        block_reason: str | None = None
+        if exit_status == "blocked":
+            from opencloser.crm.dataverse.adapter import CrmConflictError as _CCE
+            block_reason = (
+                "conflict_detected" if isinstance(exc, _CCE) else "permanent_other"
+            )
         return ResumeReport(
             exit_status=exit_status,
             session_id=session_id,
             message=f"resume replay failed: {exc}",
             artifact_dir=session_dir,
             operations_replayed=replayed,
+            block_reason=block_reason,
         )
 
     # Every replay succeeded. Stamp the terminal progress row so a third

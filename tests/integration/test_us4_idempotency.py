@@ -624,8 +624,9 @@ def test_t045_initial_run_conflict_on_preserve_field_blocks(
     """T045 — a human change to a `preserve_if_present` field between the
     runner's claim-time baseline and the final queue-status PATCH stops the
     write-back. Result: `exit_status="blocked"`, `message` names the
-    conflicting field, the final queue PATCH is NOT issued, and the
-    `writeback_progress.run_status` is `BLOCKED`."""
+    conflicting field, `block_reason="conflict_detected"` (Pass 1C), the
+    final queue PATCH is NOT issued, and the `writeback_progress.run_status`
+    is `BLOCKED`."""
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
     fired = _install_conflict_mutator(fake, mutation={"medx_notes": "human-edited"})
@@ -634,6 +635,7 @@ def test_t045_initial_run_conflict_on_preserve_field_blocks(
 
     assert fired, "conflict-check GET hook did not fire — the test did not exercise T045"
     assert report.exit_status == "blocked"
+    assert report.block_reason == "conflict_detected"
     assert report.message is not None
     assert "conflict_detected" in report.message
     assert "medx_notes" in report.message

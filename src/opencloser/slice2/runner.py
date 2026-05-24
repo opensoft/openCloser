@@ -78,6 +78,29 @@ ExitStatus = Literal[
     "failed",
 ]
 
+# Pass 1C (2026-05-24 audit-remediation) — structured discriminator for the
+# `blocked` exit. Distinguishes the four causes a `blocked` run-report can
+# carry so downstream tooling can branch on a typed field instead of grepping
+# the message string. Documented in `contracts/cli-slice2.md` §"Run Report".
+#
+#   * "eligibility": orchestrator returned `final_disposition=BLOCKED` from
+#     the Slice 1 eligibility evaluator (DNC, missing phone, attempt cap,
+#     out-of-window, etc.).
+#   * "metadata": readiness/verify() failed (mapping artifact gap, idempotency-
+#     key field unverifiable, Dataverse unreachable for write-enabled mode).
+#   * "conflict_detected": T045 mid-run CRM-state conflict (human edit
+#     between claim and final PATCH, or 412 Precondition Failed on If-Match,
+#     or row deleted between load and PATCH).
+#   * "permanent_other": catch-all for `PermanentDataverseError` /
+#     `DataverseWriteBackError` / `MappingError` that aren't one of the above
+#     (e.g. unverifiable owner-team writeback per FR-025).
+BlockReason = Literal[
+    "eligibility",
+    "metadata",
+    "conflict_detected",
+    "permanent_other",
+]
+
 # Anchored E.164: leading `+`, then a non-zero leading digit, then 1-14 more
 # digits (so 2-15 digits total). The minimum-two requirement comes from the
 # mandatory `[1-9]` prefix; in practice every real-world E.164 number has at
@@ -110,6 +133,10 @@ class CrmRunReport:
     metadata_report: MetadataVerificationReport | None = None
     warnings: list[DataQualityWarning] = field(default_factory=list)
     message: str | None = None
+    # Pass 1C (2026-05-24 audit-remediation). Populated for `exit_status="blocked"`
+    # exits to distinguish the four blocked-cause classes. `None` for non-blocked
+    # exits OR a legacy code path that hasn't been migrated yet. See `BlockReason`.
+    block_reason: BlockReason | None = None
 
 
 @dataclass(frozen=True)
@@ -301,6 +328,7 @@ def run_one_crm_item(
                 f"{', '.join(exc.conflicting_fields)}. Manual reconciliation "
                 "required per contracts/cli-slice2.md 'Behavior — resume'."
             ),
+            block_reason="conflict_detected",
         )
     except (DataverseError, DataverseWriteBackError, MappingError) as exc:
         # A Dataverse write failure mid-run, or a missing/invalid mapping entry
@@ -338,6 +366,9 @@ def run_one_crm_item(
             warnings=adapter.warnings(),
         )
 
+    # Normal-completion path below; set block_reason="eligibility" when the
+    # orchestrator returned BLOCKED (Slice 1 evaluator gate).
+
     # 6) Stamp terminal progress for the resume ledger. In dry-run this is a
     # no-op inside the adapter (no Dataverse write happened, no
     # `writeback_progress` row to record).
@@ -373,8 +404,12 @@ def run_one_crm_item(
     exit_status: ExitStatus = (
         "blocked" if orchestrator_report.final_disposition is Disposition.BLOCKED else "completed"
     )
+    block_reason: BlockReason | None = (
+        "eligibility" if exit_status == "blocked" else None
+    )
     return CrmRunReport(
         exit_status=exit_status,
+        block_reason=block_reason,
         session_id=orchestrator_report.session_id,
         final_disposition=orchestrator_report.final_disposition,
         artifact_dir=orchestrator_report.artifact_dir,
@@ -396,6 +431,7 @@ def _persona_version_mismatch_report(
         return None
     return CrmRunReport(
         exit_status="blocked",
+        block_reason="metadata",
         message=(
             f"persona version mismatch: slice1.toml requires "
             f"{slice1_config.persona.version!r} but the running persona is "
@@ -448,10 +484,15 @@ def _verify_readiness(
     try:
         mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
     except MappingError as exc:
-        return CrmRunReport(exit_status="blocked", message=f"mapping artifact error: {exc}")
+        return CrmRunReport(
+            exit_status="blocked",
+            block_reason="metadata",
+            message=f"mapping artifact error: {exc}",
+        )
     if not mapping.meta.approved:
         return CrmRunReport(
             exit_status="blocked",
+            block_reason="metadata",
             message=(
                 f"mapping artifact {slice2_config.dataverse.mapping_artifact!r} is not approved; "
                 "re-run `discover-crm` and have a reviewer flip _meta.approved to true"
@@ -469,6 +510,7 @@ def _verify_readiness(
     except (ValueError, re_error) as exc:
         return CrmRunReport(
             exit_status="blocked",
+            block_reason="metadata",
             message=f"redaction policy invalid: {exc}",
         )
 
@@ -486,6 +528,7 @@ def _verify_readiness(
     if missing_keys:
         return CrmRunReport(
             exit_status="blocked",
+            block_reason="metadata",
             message=(
                 "idempotency-key field(s) not mapped: "
                 f"{', '.join(missing_keys)} — SC-015 requires every "
@@ -526,6 +569,7 @@ def _verify_readiness(
         # `blocked` exit code.
         return CrmRunReport(
             exit_status="blocked",
+            block_reason="metadata",
             message=f"metadata verification failed: {exc}",
         )
     if not report.ok:
@@ -534,6 +578,7 @@ def _verify_readiness(
         # "still runs `verify` and surfaces gaps").
         return CrmRunReport(
             exit_status="blocked",
+            block_reason="metadata",
             message="metadata verification failed: " + "; ".join(report.missing),
             metadata_report=report,
         )
