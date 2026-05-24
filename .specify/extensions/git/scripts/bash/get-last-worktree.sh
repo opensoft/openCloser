@@ -7,6 +7,9 @@ if [ "${1:-}" = "--json" ]; then
     JSON_MODE=true
 fi
 
+SCRIPT_DIR="$(CDPATH="" cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_REPO_ROOT="$(CDPATH="" cd "$SCRIPT_DIR/../../../../.." && pwd)"
+
 trim() {
     local value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
@@ -35,27 +38,115 @@ resolve_config_value() {
     fi
 }
 
-resolve_worktree_root() {
+resolve_path_from_root() {
     local repo_root="$1"
-    local default_root="../$(basename "$repo_root")-worktrees"
-    local raw_root
-    raw_root=$(resolve_config_value "$repo_root" "worktree_root" "$default_root")
+    local raw_path="$2"
+    local combined
 
-    if [[ "$raw_root" = /* ]]; then
-        printf '%s\n' "$raw_root"
+    if [[ "$raw_path" = /* ]]; then
+        combined="$raw_path"
     else
-        local combined="$repo_root/$raw_root"
-        local parent_dir
-        parent_dir=$(dirname "$combined")
-        local leaf_name
-        leaf_name=$(basename "$combined")
-        if [ -d "$parent_dir" ]; then
-            printf '%s/%s\n' "$(cd "$parent_dir" && pwd -P)" "$leaf_name"
-        else
-            printf '%s\n' "$combined"
-        fi
+        combined="$repo_root/$raw_path"
+    fi
+
+    local parent_dir
+    parent_dir=$(dirname "$combined")
+    local leaf_name
+    leaf_name=$(basename "$combined")
+    if [ -d "$parent_dir" ]; then
+        printf '%s/%s\n' "$(cd "$parent_dir" && pwd -P)" "$leaf_name"
+    else
+        printf '%s\n' "$combined"
     fi
 }
+
+resolve_main_repo_root() {
+    local repo_root="$1"
+
+    local inferred_root
+    case "$repo_root" in
+        */.worktrees/*)
+            inferred_root="${repo_root%%/.worktrees/*}"
+            if [ -d "$inferred_root/.specify" ]; then
+                (cd "$inferred_root" && pwd -P)
+                return 0
+            fi
+            ;;
+        */worktrees/*)
+            inferred_root="${repo_root%%/worktrees/*}"
+            if [ -d "$inferred_root/.specify" ]; then
+                (cd "$inferred_root" && pwd -P)
+                return 0
+            fi
+            ;;
+    esac
+
+    local worktree_parent
+    worktree_parent=$(dirname "$repo_root")
+    local worktree_parent_name
+    worktree_parent_name=$(basename "$worktree_parent")
+    if [[ "$worktree_parent_name" == *-worktrees ]]; then
+        inferred_root="$(dirname "$worktree_parent")/${worktree_parent_name%-worktrees}"
+        if [ -d "$inferred_root/.specify" ]; then
+            (cd "$inferred_root" && pwd -P)
+            return 0
+        fi
+    fi
+
+    local common_dir
+    common_dir=$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null || true)
+
+    if [ -z "$common_dir" ]; then
+        printf '%s\n' "$repo_root"
+        return 0
+    fi
+
+    if [[ "$common_dir" != /* ]]; then
+        common_dir="$repo_root/$common_dir"
+    fi
+
+    if [ "$(basename "$common_dir")" = ".git" ]; then
+        local main_root
+        main_root=$(dirname "$common_dir")
+        if [ -d "$main_root" ]; then
+            (cd "$main_root" && pwd -P)
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "$repo_root"
+}
+
+
+worktree_root_has_entries() {
+    local candidate="$1"
+    local first
+
+    [ -d "$candidate" ] || return 1
+    first=$(find "$candidate" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null || true)
+    [ -n "$first" ]
+}
+
+resolve_worktree_root() {
+    local repo_root="$1"
+    local main_root
+    main_root=$(resolve_main_repo_root "$repo_root")
+
+    local candidate
+    for candidate in "$(resolve_path_from_root "$main_root" "worktrees")" "$(resolve_path_from_root "$main_root" ".worktrees")"; do
+        if worktree_root_has_entries "$candidate"; then
+            (cd "$candidate" && pwd -P)
+            return 0
+        fi
+    done
+
+    local default_root="../$(basename "$main_root")-worktrees"
+    local raw_root
+    raw_root=$(resolve_config_value "$main_root" "worktree_root" "$default_root")
+    candidate=$(resolve_path_from_root "$main_root" "$raw_root")
+    printf '%s\n' "$candidate"
+}
+
 
 canonicalize_if_dir() {
     local candidate="$1"
@@ -106,14 +197,17 @@ PY
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [ -z "$REPO_ROOT" ]; then
-    echo "Error: not inside a Git repository." >&2
+    REPO_ROOT="$SCRIPT_REPO_ROOT"
+fi
+if [ -z "$REPO_ROOT" ] || [ ! -d "$REPO_ROOT/.specify" ]; then
+    echo "Error: not inside a Git repository or Speckit checkout." >&2
     exit 1
 fi
 
 COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || true)
 if [ -z "$COMMON_DIR" ]; then
-    echo "Error: could not resolve Git common dir." >&2
-    exit 1
+    MAIN_REPO_ROOT=$(resolve_main_repo_root "$REPO_ROOT")
+    COMMON_DIR="$MAIN_REPO_ROOT/.git"
 fi
 if [[ "$COMMON_DIR" != /* ]]; then
     COMMON_DIR="$REPO_ROOT/$COMMON_DIR"
