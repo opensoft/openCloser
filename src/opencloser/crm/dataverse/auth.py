@@ -23,6 +23,14 @@ from opencloser.models import DataverseSecrets
 
 _TOKEN_ENDPOINT = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 
+# Operator-visible label for the token endpoint that NEVER includes the tenant id.
+# `DATAVERSE_TENANT_ID` is a secret per spec §FR-005 + the T047 inspection-surface
+# contract (`tests/contract/test_no_secrets_in_artifacts.py`); the formatted real
+# endpoint (`_TOKEN_ENDPOINT.format(tenant=...)`) is used ONLY for the actual POST
+# and MUST NOT be interpolated into any exception message, `last_error` column,
+# CrmRunReport.message, or stdout. Use this constant in error formatters instead.
+_REDACTED_TOKEN_ENDPOINT = "https://login.microsoftonline.com/<redacted-tenant>/oauth2/v2.0/token"
+
 # Refresh slightly before the true expiry so a request never races token expiry.
 _EXPIRY_SKEW_SECONDS = 60.0
 
@@ -61,9 +69,11 @@ class DataverseTokenProvider:
         try:
             response = self._http.post(endpoint, data=form)
         except httpx.HTTPError as exc:
-            raise _wrap_auth_transport_error(exc, endpoint) from exc
+            # `endpoint` is NOT passed to the error wrapper — it contains the tenant id
+            # (a secret per FR-005) and MUST NOT land in operator-visible error messages.
+            raise _wrap_auth_transport_error(exc) from exc
         if not response.is_success:
-            raise _auth_status_error(response, endpoint)
+            raise _auth_status_error(response)
         try:
             body = response.json()
             access_token = body["access_token"]
@@ -128,19 +138,29 @@ class DataverseTokenProvider:
 # transient; misconfiguration-class transport errors (UnsupportedProtocol,
 # ProtocolError, ProxyError) are permanent so the retry budget is not burned on
 # impossible requests (Copilot follow-up review on PR #3).
-def _wrap_auth_transport_error(exc: httpx.HTTPError, endpoint: str) -> DataverseError:
+#
+# **Secret-redaction contract (post-2026-05-24 audit)**: the real endpoint URL
+# carries the tenant id (`DATAVERSE_TENANT_ID`, a T047 secret). Use the redacted
+# constant `_REDACTED_TOKEN_ENDPOINT` in operator-visible error messages. The
+# underlying exception is preserved via the `from exc` chain so debug inspection
+# can still see the original URL — but it never serializes into `str(error)`.
+def _wrap_auth_transport_error(exc: httpx.HTTPError) -> DataverseError:
     if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
         return TransientDataverseError(
-            f"Entra ID token endpoint unreachable ({endpoint}): {exc!r}"
+            f"Entra ID token endpoint unreachable ({_REDACTED_TOKEN_ENDPOINT}): "
+            f"{type(exc).__name__}"
         )
     return PermanentDataverseError(
-        f"Entra ID token endpoint error ({endpoint}): {exc!r}"
+        f"Entra ID token endpoint error ({_REDACTED_TOKEN_ENDPOINT}): "
+        f"{type(exc).__name__}"
     )
 
 
-def _auth_status_error(response: httpx.Response, endpoint: str) -> DataverseError:
+def _auth_status_error(response: httpx.Response) -> DataverseError:
     status = response.status_code
-    detail = f"Entra ID token endpoint returned HTTP {status} ({endpoint})"
+    detail = (
+        f"Entra ID token endpoint returned HTTP {status} ({_REDACTED_TOKEN_ENDPOINT})"
+    )
     if is_transient_status(status):
         return TransientDataverseError(
             detail,

@@ -92,13 +92,18 @@ def raise_for_dataverse_response(response: httpx.Response) -> None:
     if response.is_success:
         return
     status = response.status_code
-    # Strip the query string from the URL: Dataverse `$filter` predicates often
-    # carry session IDs, campaign GUIDs, or record GUIDs that we do not want to
-    # echo into operator logs / persisted error messages (Copilot review on PR #3).
-    safe_url = response.request.url.copy_with(query=None)
+    # Strip BOTH the host AND the query string from the URL. Per spec §FR-005 +
+    # the T047 secret-redaction contract, `DATAVERSE_ENV_URL` is a secret value
+    # that MUST NOT land in `last_error` / CrmRunReport.message / stdout. The
+    # query string also routinely carries session IDs, campaign GUIDs, or record
+    # GUIDs that we do not want to echo into operator logs (Copilot review on
+    # PR #3). The URL PATH alone is diagnostic enough — the operator knows which
+    # environment they configured. The `<env>` placeholder makes the redaction
+    # visible at a glance.
+    safe_path = response.request.url.path
     detail = (
         f"Dataverse returned HTTP {status} for "
-        f"{response.request.method} {safe_url}"
+        f"{response.request.method} <env>{safe_path}"
     )
     if is_transient_status(status):
         raise TransientDataverseError(
