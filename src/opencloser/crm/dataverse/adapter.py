@@ -26,6 +26,7 @@ from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import (
     DataverseError,
     PermanentDataverseError,
+    odata_guid_literal,
     odata_string_literal,
 )
 from opencloser.crm.dataverse.mapping import (
@@ -611,7 +612,7 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_FILTER: f"{primary_id} eq {odata_guid_literal(queue_item_id)}",
                     _ODATA_SELECT: last_session_field,
                     _ODATA_TOP: "1",
                 },
@@ -667,7 +668,7 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_FILTER: f"{primary_id} eq {odata_guid_literal(queue_item_id)}",
                     _ODATA_SELECT: ",".join(select_fields),
                     _ODATA_TOP: "1",
                 },
@@ -899,7 +900,7 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_FILTER: f"{primary_id} eq {odata_guid_literal(queue_item_id)}",
                     _ODATA_SELECT: override_field,
                     _ODATA_TOP: "1",
                 },
@@ -938,7 +939,7 @@ class DataverseWriteBackAdapter:
                     self._client.get(
                         entity_set,
                         params={
-                            _ODATA_FILTER: f"{primary_id} eq {owner_id}{extra_filter}",
+                            _ODATA_FILTER: f"{primary_id} eq {odata_guid_literal(owner_id)}{extra_filter}",
                             _ODATA_SELECT: primary_id,
                             _ODATA_TOP: "1",
                         },

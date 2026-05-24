@@ -8,6 +8,8 @@ httpx transport exceptions follows the spec's Definitions section exactly.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
 
@@ -23,6 +25,34 @@ def odata_string_literal(value: str) -> str:
     Returns the value wrapped in single quotes with embedded `'` doubled.
     """
     return "'" + value.replace("'", "''") + "'"
+
+
+# OData `Edm.Guid` literal pattern: unquoted in `$filter` (Dataverse) and
+# expected to match a strict alphanumeric-with-dashes shape. Pass 2A
+# (2026-05-24 audit-remediation) — adapter call sites that interpolate
+# primary-id / owner-id values raw into $filter clauses route through this
+# helper for defense-in-depth, mirroring `queue_loader._odata_token`.
+_GUID_LITERAL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def odata_guid_literal(value: object) -> str:
+    """Return ``value`` as an unquoted OData GUID literal after validating it
+    matches a safe alphanumeric-with-dashes/underscores shape. Raises
+    ``ValueError`` for anything else — including the OData reserved
+    characters (`'`, ` `, `,`, `)`, ...) that could corrupt a `$filter` or
+    open an injection vector.
+
+    The validator is intentionally permissive enough to accept real
+    Dataverse GUIDs (`00000000-0000-0000-0000-000000000000`) and the test
+    fixture's shorthand IDs (`q-contract-0001`) while still rejecting
+    anything that could break the surrounding `$filter` syntax.
+    """
+    text = str(value)
+    if not _GUID_LITERAL_RE.fullmatch(text):
+        raise ValueError(
+            f"unsafe OData GUID literal {value!r} — must match [A-Za-z0-9_-]+"
+        )
+    return text
 
 
 # HTTP status codes treated as transient (spec §Definitions §"Transient Dataverse error":

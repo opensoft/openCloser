@@ -144,44 +144,51 @@ def resume_session(
         raise ResumeError(
             f"session {session_id!r} has no writeback_progress row; nothing to resume"
         )
-    # Codex/Copilot PR #9 review: distinguish per-state outcomes instead of
-    # collapsing every non-`resume_needed` state into `no-resume-needed`. A
-    # `blocked` session is permanently non-resumable; an `in_progress` session
-    # is being processed elsewhere; only `completed` is a true no-op (the
-    # idempotent re-invocation of a finalized session per FR-021).
-    if progress.run_status is RunStatus.COMPLETED:
-        return ResumeReport(
-            exit_status="no-resume-needed",
-            session_id=session_id,
-            message="session is already completed; no replay performed (FR-021)",
-        )
-    if progress.run_status is RunStatus.BLOCKED:
-        return ResumeReport(
-            exit_status="blocked",
-            session_id=session_id,
-            # Pre-existing-blocked surfaces under `permanent_other` since
-            # the original block_reason isn't persisted on writeback_progress
-            # yet. Future enhancement: add a block_reason column to the table.
-            block_reason="permanent_other",
-            message=(
-                f"session {session_id!r} is in 'blocked' — a permanent error "
-                "stopped the original run. Resume cannot recover; inspect the "
-                "writeback_progress.last_error and re-discover the mapping or "
-                "manually reconcile before re-running."
-            ),
-        )
-    if progress.run_status is RunStatus.IN_PROGRESS:
-        return ResumeReport(
-            exit_status="failed",
-            session_id=session_id,
-            message=(
-                f"session {session_id!r} is in 'in_progress' — another run "
-                "may still be working on it (or the previous run crashed "
-                "mid-write). Refuse to replay rather than racing; investigate "
-                "the writeback_progress.updated_at timestamp."
-            ),
-        )
-    # RESUME_NEEDED → continue with the replay below.
+    # Pass 2A (2026-05-24 audit-remediation) — exhaustive `match` over every
+    # `RunStatus` value so a future addition fails noisily instead of silently
+    # falling through to the replay path. Each non-RESUME_NEEDED state has a
+    # distinct operator-visible outcome per the cli-slice2.md state-machine
+    # contract.
+    match progress.run_status:
+        case RunStatus.COMPLETED:
+            return ResumeReport(
+                exit_status="no-resume-needed",
+                session_id=session_id,
+                message="session is already completed; no replay performed (FR-021)",
+            )
+        case RunStatus.BLOCKED:
+            return ResumeReport(
+                exit_status="blocked",
+                session_id=session_id,
+                # Pre-existing-blocked surfaces under `permanent_other` since
+                # the original block_reason isn't persisted on writeback_progress
+                # yet. Future enhancement: add a block_reason column to the table.
+                block_reason="permanent_other",
+                message=(
+                    f"session {session_id!r} is in 'blocked' — a permanent error "
+                    "stopped the original run. Resume cannot recover; inspect the "
+                    "writeback_progress.last_error and re-discover the mapping or "
+                    "manually reconcile before re-running."
+                ),
+            )
+        case RunStatus.IN_PROGRESS:
+            return ResumeReport(
+                exit_status="failed",
+                session_id=session_id,
+                message=(
+                    f"session {session_id!r} is in 'in_progress' — another run "
+                    "may still be working on it (or the previous run crashed "
+                    "mid-write). Refuse to replay rather than racing; investigate "
+                    "the writeback_progress.updated_at timestamp."
+                ),
+            )
+        case RunStatus.RESUME_NEEDED:
+            pass  # Continue with the replay below.
+        case _:  # pragma: no cover — exhaustiveness gate against future RunStatus additions
+            raise ResumeError(
+                f"unsupported run_status {progress.run_status!r} for session "
+                f"{session_id!r}; resume coordinator must be updated for the new state"
+            )
 
     # Load the persisted WriteBack payloads. The Slice 1 artifact writer
     # always emits writeback.json atomically; its presence is part of the
