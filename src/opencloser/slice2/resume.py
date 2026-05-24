@@ -45,13 +45,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opencloser.core.clock import Clock, SystemClock
-from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
+from opencloser.crm.dataverse.adapter import (
+    CrmConflictError,
+    DataverseWriteBackAdapter,
+    DataverseWriteBackError,
+)
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import DataverseError, TransientDataverseError
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
 from opencloser.crm.dataverse.queue_loader import (
     DataverseQueueLoader,
     ExplicitId,
+    QueueLoadError,
 )
 from opencloser.models import (
     RunStatus,
@@ -270,7 +275,9 @@ def resume_session(
         if not progress.task_done and writeback.task is not None:
             adapter.emit_task(writeback.task)
             replayed.append("task")
-    except (DataverseError, DataverseWriteBackError, MappingError) as exc:
+    except (
+        DataverseError, DataverseWriteBackError, MappingError, QueueLoadError
+    ) as exc:
         # The replay itself failed. Distinguish transient (retry budget
         # exhausted again — leave the session resumable so a third
         # invocation can pick it up later) from permanent (mapping invalid,
@@ -278,6 +285,11 @@ def resume_session(
         # intervene). Codex PR #9 P1: previously this path always called
         # flush_pending_failures() with the default BLOCKED, which made
         # resumed sessions permanently non-resumable on any transient.
+        # QueueLoadError added (Codex PR #3 P2 post-swarm): after Pass 1B
+        # made `_snapshot_resume_baseline` re-raise mapping/queue-load
+        # failures, the prior catch tuple let `QueueLoadError` escape
+        # uncaught — now routed to BLOCKED (it's a permanent mapping /
+        # data-drift failure, not a transient blip).
         failure_run_status = (
             RunStatus.RESUME_NEEDED
             if isinstance(exc, TransientDataverseError)
@@ -301,9 +313,10 @@ def resume_session(
         # the operator-visible discriminator matches the initial-run path.
         block_reason: str | None = None
         if exit_status == "blocked":
-            from opencloser.crm.dataverse.adapter import CrmConflictError as _CCE
             block_reason = (
-                "conflict_detected" if isinstance(exc, _CCE) else "permanent_other"
+                "conflict_detected"
+                if isinstance(exc, CrmConflictError)
+                else "permanent_other"
             )
         return ResumeReport(
             exit_status=exit_status,
@@ -342,35 +355,39 @@ def _snapshot_resume_baseline(
     on the adapter so the conflict-check in ``emit_queue_status_update`` fires
     on the resume path too.
 
-    Failure-handling (Pass 1B, 2026-05-24 audit-remediation): the prior bare
-    ``except (MappingError, QueueLoadError, DataverseError): return`` silently
-    bypassed the conflict-stop on resume — a transient/mapping failure during
-    the snapshot left ``_baseline = None`` and the subsequent
-    ``emit_queue_status_update`` PATCHed without conflict detection,
-    overwriting any human change during the pause window. Now:
+    Failure-handling (Pass 1B + Codex PR #3 P2 post-swarm, 2026-05-24): the
+    prior bare ``except (MappingError, QueueLoadError, DataverseError):
+    return`` silently bypassed the conflict-stop on resume — a transient /
+    mapping failure during the snapshot left ``_baseline = None`` and the
+    subsequent ``emit_queue_status_update`` PATCHed without conflict
+    detection, overwriting any human change during the pause window. Now:
 
-      * ``MappingError`` re-raises → permanent error; the outer
-        ``resume_session`` except routes to ``RunStatus.BLOCKED``.
+      * ``MappingError`` / ``QueueLoadError`` re-raise → permanent error;
+        the outer ``resume_session`` except routes to ``RunStatus.BLOCKED``
+        (``block_reason="permanent_other"``).
       * ``DataverseError`` re-raises → ``TransientDataverseError`` routes to
         ``RESUME_NEEDED`` (operator can re-invoke), ``PermanentDataverseError``
         routes to ``BLOCKED``.
-      * Only the genuine "row not found" case (``loaded is None``) is a
-        silent skip — the subsequent PATCH will 404 and surface a real
-        failure there, which is the right place for a deleted-row signal
-        (see also `adapter._check_conflict`'s deleted-row → CrmConflictError
-        handling on the initial-run path).
+      * The "row not found" case (``loaded is None``) — i.e. the queue
+        record was deleted during the pause window — raises
+        ``CrmConflictError(["__row_deleted__"])`` so the resume path
+        symmetrically produces ``blocked / conflict_detected`` (same shape
+        as the initial-run path: see ``adapter._check_conflict``).
+        Previously this was a silent skip that deferred the signal to a
+        downstream 404 → ``permanent_other``, masking the conflict variant.
 
     ``callable_status`` is set to a literal because ``ExplicitId`` selectors
     don't reference it; only ``NextReady`` selectors do.
     """
     loader = DataverseQueueLoader(client, translator, callable_status="ready")
-    # Note: errors propagate. Only the `loaded is None` (row not found) case
-    # is treated as a benign skip — see docstring.
+    # Note: errors propagate. The `loaded is None` (row not found) case is
+    # mapped to a CrmConflictError so the operator-visible discriminator
+    # matches the initial-run conflict path — see docstring.
     loaded = loader.load_with_baseline(
         ExplicitId(queue_item_id), now_utc_ms=clk.now_utc_ms()
     )
     if loaded is None:
-        return
+        raise CrmConflictError(queue_item_id, ["__row_deleted__"])
     _, baseline = loaded
     adapter.record_baseline(baseline)
 

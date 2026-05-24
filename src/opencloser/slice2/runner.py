@@ -523,8 +523,12 @@ def _verify_readiness(
     # Phone Call activity or Task cannot be verified"). Without this ordering,
     # a dry-run with missing creds AND a missing key-field mapping would
     # silently pass.
+    _EXPECTED_IDEMPOTENCY_ENTITY = {
+        "phone_call.idempotency_key": "phone_call_activity",
+        "task.idempotency_key": "task",
+    }
     missing_keys = [
-        key for key in ("phone_call.idempotency_key", "task.idempotency_key")
+        key for key in _EXPECTED_IDEMPOTENCY_ENTITY
         if key not in mapping.fields
     ]
     if missing_keys:
@@ -536,6 +540,30 @@ def _verify_readiness(
                 f"{', '.join(missing_keys)} — SC-015 requires every "
                 "write-enabled run to verify these key fields as real "
                 "Dataverse fields. Add them to "
+                f"{slice2_config.dataverse.mapping_artifact!r} and re-run "
+                "`discover-crm`."
+            ),
+        )
+    # Codex PR #3 P1: also verify each idempotency-key mapping points at the
+    # right entity. Without this, a key accidentally bound to a different
+    # table (e.g. `phone_call.idempotency_key` → entity `task`) would still
+    # reference a real Dataverse column and pass `verify()`, but the
+    # idempotency pre-query in the adapter would hit the wrong table and
+    # never detect duplicates — silent split-brain.
+    misbound = [
+        f"{key} → entity {mapping.fields[key].entity!r} (expected {expected!r})"
+        for key, expected in _EXPECTED_IDEMPOTENCY_ENTITY.items()
+        if mapping.fields[key].entity != expected
+    ]
+    if misbound:
+        return CrmRunReport(
+            exit_status="blocked",
+            block_reason="metadata",
+            message=(
+                "idempotency-key field(s) bound to the wrong entity: "
+                f"{'; '.join(misbound)} — SC-015 requires the phone-call "
+                "and task idempotency keys to live on their respective "
+                "tables. Correct the mapping in "
                 f"{slice2_config.dataverse.mapping_artifact!r} and re-run "
                 "`discover-crm`."
             ),

@@ -1021,3 +1021,117 @@ def test_resume_snapshot_failure_re_raises_to_blocked(
     ]
     # Only the initial successful run's PATCH should be present.
     assert len(queue_patches) == 1
+
+
+def test_resume_snapshot_queue_load_error_routes_to_blocked(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Codex PR #3 P2 post-swarm — `QueueLoadError` raised during
+    `_snapshot_resume_baseline` (e.g. mapping drift or row-validation failure
+    on the reload) must be caught by the resume replay handler and routed to
+    `blocked / permanent_other`, not escape as an uncaught exception. Before
+    this fix the resume replay catch tuple was
+    `(DataverseError, DataverseWriteBackError, MappingError)` and a
+    `QueueLoadError` would surface as a bare traceback to the operator."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Drive a successful first run to produce writeback.json + crm_correlations.
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+    assert report.session_id is not None
+
+    # Synthesize the resume_needed precondition for the queue-status replay.
+    fake._records["medx_callqueueitem"][0]["medx_lastsessionid"] = None
+    fake._records["medx_callqueueitem"][0]["medx_callstatus"] = 0
+    _stamp_progress(
+        tmp_state_db,
+        report.session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        queue_status_update_done=False,
+        last_error="simulated transient exhaust",
+    )
+
+    # Force `_snapshot_resume_baseline`'s `load_with_baseline` to raise
+    # QueueLoadError. We do this by monkeypatching the loader class — the
+    # cleanest way to exercise the catch-tuple without depending on internal
+    # row-validation specifics that may shift over time.
+    from opencloser.crm.dataverse import queue_loader as ql_mod
+
+    def _boom(self, selector, *, now_utc_ms):
+        raise ql_mod.QueueLoadError(
+            "synthetic row-validation failure during resume baseline reload"
+        )
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(
+        ql_mod.DataverseQueueLoader, "load_with_baseline", _boom
+    ):
+        result = _invoke_resume(
+            session_id=report.session_id,
+            conn=tmp_state_db,
+            artifact_root=tmp_artifact_dir,
+            fake=fake,
+            mapping=mapping,
+        )
+
+    # The QueueLoadError must be caught and routed to blocked (permanent).
+    assert result.exit_status == "blocked"
+    assert result.block_reason == "permanent_other", (
+        f"QueueLoadError is not a CrmConflictError, so block_reason must be "
+        f"'permanent_other'; got: {result}"
+    )
+    assert "synthetic row-validation failure" in (result.message or "")
+
+
+def test_resume_snapshot_row_deleted_yields_conflict_detected(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Codex PR #3 P2 post-swarm — when the queue row is deleted by a human
+    between the original run's exit and the resume invocation,
+    `_snapshot_resume_baseline.load_with_baseline` returns None. Before this
+    fix the function silently returned and the downstream PATCH would 404
+    into `permanent_other`. Now it raises `CrmConflictError(["__row_deleted__"])`
+    so the resume path symmetrically produces `blocked / conflict_detected`
+    — matching the initial-run path in `adapter._check_conflict`."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Drive a successful first run to produce writeback.json + crm_correlations.
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+    assert report.session_id is not None
+
+    # Synthesize the resume_needed precondition; THEN delete the row (the
+    # human-deletion-during-pause scenario).
+    _stamp_progress(
+        tmp_state_db,
+        report.session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        queue_status_update_done=False,
+        last_error="simulated transient exhaust",
+    )
+    fake._records["medx_callqueueitem"].clear()
+
+    result = _invoke_resume(
+        session_id=report.session_id,
+        conn=tmp_state_db,
+        artifact_root=tmp_artifact_dir,
+        fake=fake,
+        mapping=mapping,
+    )
+
+    assert result.exit_status == "blocked"
+    assert result.block_reason == "conflict_detected", (
+        f"row-deleted-at-resume must surface as conflict_detected (matching the "
+        f"initial-run path), not permanent_other; got: {result}"
+    )
+    assert "__row_deleted__" in (result.message or "")
+
+    # No PATCH on the (now-absent) queue row.
+    queue_patches = [
+        c for e, _id, c in fake.patched if e == "medx_callqueueitem"
+    ]
+    # Only the initial successful run's PATCH should be present.
+    assert len(queue_patches) == 1

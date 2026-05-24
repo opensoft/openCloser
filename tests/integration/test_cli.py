@@ -302,7 +302,9 @@ def test_cli_run_crm_rejects_non_guid_queue_item_id(tmp_path: Path) -> None:
     assert "not a valid Dataverse GUID" in out
 
 
-def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
+def test_cli_run_crm_without_write_defaults_to_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`run-crm` without `--write` enters the FR-031 dry-run path (the previous
     "dry-run not implemented" placeholder was removed in US2; the
     missing-credentials gate was softened in round-2 review per Codex feedback).
@@ -311,12 +313,29 @@ def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
     now:
       1. Emits a `warning:` instead of `error:` for the missing secrets,
       2. Proceeds into the dry-run path with placeholder credentials,
-      3. Fails AT the queue-load step (the placeholder creds can't authenticate
-         against the placeholder env_url) — exit_status="failed", which the
-         `_EXIT_CODE` table maps to CLI exit code 2.
+      3. Fails AT the first network step (the placeholder creds can't
+         authenticate against the placeholder env_url) — exit_status="failed",
+         which the `_EXIT_CODE` table maps to CLI exit code 2.
 
-    The test asserts the new gate-softening behavior (warning + non-zero exit)
-    rather than the specific exit code or queue-load failure detail."""
+    Codex PR #3 follow-up (post-swarm): the previous version of this test
+    relied on the placeholder credentials failing at REAL outbound Entra +
+    Dataverse calls, which made the suite non-hermetic — flaky in CI without
+    DNS/egress and a slow no-network failure. We now monkeypatch
+    `DataverseTokenProvider.token` to raise immediately, so the same observable
+    behavior (warning + non-zero exit) is asserted with zero network I/O."""
+    from opencloser.crm.dataverse.auth import DataverseTokenProvider
+    from opencloser.crm.dataverse.errors import PermanentDataverseError
+
+    def _fail_token(self, *, now: float | None = None) -> str:
+        # 401 from Entra is the natural failure shape for placeholder creds.
+        # Wrapped redacted to mirror the production error formatter (FR-005).
+        raise PermanentDataverseError(
+            "OAuth token acquisition failed (placeholder credentials)",
+            status_code=401,
+        )
+
+    monkeypatch.setattr(DataverseTokenProvider, "token", _fail_token)
+
     config_path = _write_config(tmp_path)
     run = _runner.invoke(
         app,
@@ -336,10 +355,10 @@ def test_cli_run_crm_without_write_defaults_to_dry_run(tmp_path: Path) -> None:
     # The missing-secrets gate is now a WARNING (not a fatal error) in dry-run,
     # per Codex PR #7 review + spec §Edge Cases.
     assert "warning" in out.lower() and "missing required dataverse secret" in out.lower()
-    # Run reaches the dry-run path; the placeholder credentials fail later on
-    # the queue load, which produces exit_status="failed" (CLI exit code 2 per
-    # `_EXIT_CODE` in cli.py). The exact code is less important than the fact
-    # that we're past secret loading and into the dry-run flow.
+    # Run reaches the dry-run path; the placeholder credentials fail at the
+    # first network step (now stubbed), producing exit_status="failed" (CLI
+    # exit code 2 per `_EXIT_CODE` in cli.py). The exact code is less important
+    # than the fact that we're past secret loading and into the dry-run flow.
     assert run.exit_code != 0
 
 

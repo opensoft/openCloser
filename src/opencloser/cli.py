@@ -680,6 +680,9 @@ def _run_crm_resume(
         token_provider.close()
 
     typer.echo(f"exit_status:           {result.exit_status}")
+    block_reason = getattr(result, "block_reason", None)
+    if block_reason:
+        typer.echo(f"block_reason:          {block_reason}")
     typer.echo(f"session_id:            {result.session_id}")
     if result.artifact_dir is not None:
         typer.echo(f"artifact_dir:          {result.artifact_dir}")
@@ -702,6 +705,13 @@ def _run_crm_resume(
 
 def _print_crm_report(report) -> None:
     typer.echo(f"exit_status:           {report.exit_status}")
+    # Surface the typed `block_reason` discriminator alongside `exit_status`
+    # so operators don't have to parse the free-text message to recover the
+    # cause (Codex PR #3 P2 post-swarm). One of:
+    # `eligibility | metadata | conflict_detected | permanent_other`.
+    block_reason = getattr(report, "block_reason", None)
+    if block_reason:
+        typer.echo(f"block_reason:          {block_reason}")
     if report.session_id:
         typer.echo(f"session_id:            {report.session_id}")
     if report.final_disposition:

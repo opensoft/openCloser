@@ -82,6 +82,7 @@ def _write_mapping_variant(
     *,
     add_unmapped_option_set: bool = False,
     drop_idempotency_key: str | None = None,
+    misbind_idempotency_key: str | None = None,
     approved: bool = True,
 ) -> Path:
     """Copy the fixture mapping with surgical mutations to exercise FR-002 gates.
@@ -105,6 +106,17 @@ def _write_mapping_variant(
         key = f"{drop_idempotency_key}.idempotency_key"
         if key in raw["fields"]:
             del raw["fields"][key]
+    if misbind_idempotency_key is not None:
+        # Re-bind one of the idempotency-key entries to the wrong entity to
+        # exercise the SC-015 entity-validation gate (Codex PR #3 P1).
+        key = f"{misbind_idempotency_key}.idempotency_key"
+        wrong_entity = (
+            "task" if misbind_idempotency_key == "phone_call" else "phone_call_activity"
+        )
+        raw["fields"][key] = {
+            **raw["fields"][key],
+            "entity": wrong_entity,
+        }
     if add_unmapped_option_set:
         raw["option_sets"]["queue_status.invalid"] = {
             "field": "queue.status",
@@ -309,6 +321,41 @@ def test_us3_blocks_when_idempotency_key_field_unmapped(
     assert report.message is not None
     assert f"{drop_kind}.idempotency_key" in report.message
     assert "SC-015" in report.message
+    assert fake.created == []
+    assert fake.patched == []
+
+
+@pytest.mark.parametrize("misbind_kind", ["phone_call", "task"])
+def test_us3_blocks_when_idempotency_key_bound_to_wrong_entity(
+    tmp_state_db: sqlite3.Connection,
+    tmp_artifact_dir: Path,
+    tmp_path: Path,
+    misbind_kind: str,
+) -> None:
+    """SC-015 / Codex PR #3 P1: readiness MUST block when an idempotency-key
+    field is mapped to the wrong entity. Without this check, the field would
+    still pass `verify()` (it points at a real Dataverse column) but the
+    adapter's idempotency pre-query would hit the wrong table and never
+    detect duplicates — a silent split-brain that violates FR-024."""
+    mapping_variant = _write_mapping_variant(
+        tmp_path, misbind_idempotency_key=misbind_kind
+    )
+    mapping = load_mapping(mapping_variant)
+    fake = fake_for_mapping(mapping, _seed())
+    cfg = _slice2_config_shared(mapping_path=mapping_variant)
+
+    report = _run_write_enabled(
+        conn=tmp_state_db,
+        client=fake.client(cfg.retry),
+        artifact_dir=tmp_artifact_dir,
+        slice2_config=cfg,
+    )
+
+    assert report.exit_status == "blocked"
+    assert report.block_reason == "metadata"
+    assert report.message is not None
+    assert f"{misbind_kind}.idempotency_key" in report.message
+    assert "wrong entity" in report.message
     assert fake.created == []
     assert fake.patched == []
 
