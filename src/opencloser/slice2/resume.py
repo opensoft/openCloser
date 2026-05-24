@@ -229,10 +229,21 @@ def resume_session(
             else RunStatus.BLOCKED
         )
         adapter.flush_pending_failures(failure_run_status=failure_run_status)
+        # Map the persisted progress state to the ResumeReport exit_status so
+        # the CLI exit-code mapping (resume_needed→2, blocked→1, failed→2)
+        # matches what landed in writeback_progress. Copilot PR #9 round-3
+        # caught the BLOCKED → "failed" mismatch — `flush_pending_failures`
+        # stamped run_status=BLOCKED but we previously returned
+        # exit_status="failed", which is exit 2 instead of the documented
+        # blocked→exit 1.
+        if failure_run_status is RunStatus.RESUME_NEEDED:
+            exit_status = "resume_needed"
+        elif failure_run_status is RunStatus.BLOCKED:
+            exit_status = "blocked"
+        else:  # pragma: no cover — failure_run_status is currently always one of the above
+            exit_status = "failed"
         return ResumeReport(
-            exit_status="resume_needed"
-            if failure_run_status is RunStatus.RESUME_NEEDED
-            else "failed",
+            exit_status=exit_status,
             session_id=session_id,
             message=f"resume replay failed: {exc}",
             artifact_dir=session_dir,
