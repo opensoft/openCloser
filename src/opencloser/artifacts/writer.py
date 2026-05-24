@@ -12,11 +12,16 @@ bytes without races.
   operator action — neither this writer nor any other module schedules deletion of
   session artifacts, run reports, or any file under ``<artifact_root>/<session_id>/``.
 - The one exception is the FR-030 summary-only transcript sweep
-  (``_TRANSCRIPT_FILENAME.unlink`` on line ~107): when redaction retention is set to
-  ``summary-only`` the writer removes any stale transcript file from an earlier run
-  for the SAME session so PII cannot persist after a policy change. This is not an
-  auto-deletion of audit data — it is a per-session privacy enforcement at write
-  time, and ``session-result.json`` clears its ``transcript_pointer`` to match.
+  (``(session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)``): when redaction
+  retention is set to ``summary-only`` the writer removes any stale transcript file
+  from an earlier run for the SAME session so PII cannot persist after a policy
+  change. This is not an auto-deletion of audit data — it is a per-session privacy
+  enforcement at write time, and ``session-result.json`` clears its
+  ``transcript_pointer`` to match. Note: the unlink-then-write order is intentional
+  and privacy-safe — if ``_write_json_atomic(session_result_path, ...)`` fails after
+  the unlink, the worst case is a session-result.json from a prior run advertising
+  a now-deleted transcript file (a dangling pointer the operator can spot); the
+  next successful run resyncs the pointer.
 - Secrets MUST NOT be retained in any local audit artifact (FR-005, FR-035). This is
   asserted by ``tests/contract/test_no_secrets_in_artifacts.py`` (T047), which runs
   a write-enabled flow with distinctive secret env values and greps every produced

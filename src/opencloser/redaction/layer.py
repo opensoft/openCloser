@@ -24,7 +24,15 @@ class Policy(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class NoOpPolicy:
-    """Returns transcript text unchanged (FR-029)."""
+    """Returns transcript text byte-identical at the layer level (FR-029).
+
+    Note: ``artifacts/writer._write_text_atomic`` may append a trailing LF to
+    the text when the input lacks one (writer-level normalization). The
+    no-op policy itself does not modify bytes; the on-disk transcript may
+    therefore differ by at most one trailing newline. The Slice 1 unredacted
+    contract was always written through the same writer, so this matches
+    pre-Slice-2 behavior.
+    """
 
     def redact(self, transcript_text: str) -> str:
         return transcript_text

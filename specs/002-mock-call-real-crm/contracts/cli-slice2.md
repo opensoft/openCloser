@@ -62,6 +62,17 @@ re-invoking the same command triggers `slice2/resume.py`:
 - A re-invocation for an already-`completed` session is a clean no-op (FR-021).
 - A re-invocation for a `blocked`-by-conflict session (T045) does NOT auto-resume — the conflict re-read runs first; if the conflict is still present, the run exits `blocked` again with the same `block_reason`. The operator reconciles the Dataverse record manually (restoring the session-owned in-progress state if appropriate, or accepting the human change) before a fresh `run-crm` invocation can complete the missing writes. Abandonment is the absence of a follow-up run; the persisted `writeback_progress` row remains as audit evidence per FR-035.
 
+> **Known limitation (tracked as T052)**: the Slice 1 orchestrator persists
+> `writeback.json` only AFTER every `emit_*` succeeds. A natural
+> `TransientDataverseError` retry-exhaust mid-write-back therefore leaves
+> NO `writeback.json` on disk and `resume_session` raises
+> `ResumeError("writeback.json missing")`. The runner-side
+> `TransientDataverseError → RESUME_NEEDED` branch is correct and verified
+> by `test_us4_natural_transient_exhaust_yields_resume_needed`; the
+> orchestrator-side fix (persist a `planned-writeback.json` sidecar before
+> emit_* attempts) is **deferred** as T052 — out-of-scope for the Slice 2
+> audit-remediation cycle.
+
 ---
 
 ## Exit-status contract

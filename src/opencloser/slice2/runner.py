@@ -24,7 +24,6 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from re import error as re_error
 from typing import Literal
 
 from pydantic import ValidationError
@@ -507,7 +506,10 @@ def _verify_readiness(
     # patterns/retention are actually applied during artifact export.
     try:
         redaction_layer = RedactionLayer.from_config(slice2_config.redaction)
-    except (ValueError, re_error) as exc:
+    except ValueError as exc:
+        # `RegexRedactionPolicy.from_patterns` already wraps `re.error` as
+        # `ValueError`, so we don't need a separate `re.error` catch here
+        # (Pass 3 — dead `re_error` removed per code-review LOW finding).
         return CrmRunReport(
             exit_status="blocked",
             block_reason="metadata",

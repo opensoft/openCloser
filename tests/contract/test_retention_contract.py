@@ -69,21 +69,34 @@ def test_writer_has_no_audit_artifact_deletion_beyond_documented_exceptions() ->
          (``(session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)``).
       2. The failed-atomic-write tempfile cleanup
          (``os.unlink(tmp_name)`` after a partial tempfile write).
+
+    Pass 3 (2026-05-24 audit-remediation): walks the AST instead of grepping
+    text so docstring examples that mention `.unlink(` don't trip the test.
     """
-    text = (_SRC / "artifacts" / "writer.py").read_text(encoding="utf-8")
-    # Find every unlink/remove/rmtree call.
-    deletion_calls = re.findall(
-        r"(?:\.unlink|os\.unlink|os\.remove|shutil\.rmtree)\s*\(",
-        text,
-    )
+    import ast
+
+    tree = ast.parse((_SRC / "artifacts" / "writer.py").read_text(encoding="utf-8"))
+    deletion_call_names: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # Match `<expr>.unlink(...)`, `os.unlink(...)`, `os.remove(...)`,
+        # `shutil.rmtree(...)` — every shape of filesystem deletion call.
+        if isinstance(func, ast.Attribute) and func.attr in {
+            "unlink", "remove", "rmtree"
+        }:
+            deletion_call_names.append(func.attr)
+
     # Both documented exceptions are non-vendor — they're privacy + cleanup.
     # The total count is 2 today; if a future change adds a new deletion, this
     # test fails and the author must justify (and document) the addition.
-    assert len(deletion_calls) == 2, (
-        f"artifacts/writer.py has {len(deletion_calls)} deletion call(s); "
-        f"expected exactly 2 (the FR-030 transcript sweep + the atomic-write "
-        f"tempfile cleanup). New deletion calls violate the FR-035 no-auto-delete "
-        f"contract — document and add a justification before raising this count."
+    assert len(deletion_call_names) == 2, (
+        f"artifacts/writer.py has {len(deletion_call_names)} deletion call(s) "
+        f"{deletion_call_names!r}; expected exactly 2 (the FR-030 transcript "
+        f"sweep `.unlink` + the atomic-write tempfile cleanup `os.unlink`). "
+        f"New deletion calls violate the FR-035 no-auto-delete contract — "
+        f"document and add a justification before raising this count."
     )
 
 
