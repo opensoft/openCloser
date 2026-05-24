@@ -1,0 +1,73 @@
+name: Claude Code Review
+
+# Triggers a Claude code review on every PR open/sync. Authentication uses
+# the repo secret `CLAUDE_CODE_OAUTH_TOKEN`, billed against the Claude.ai
+# Max-plan subscription that minted the token.
+#
+# A second `@claude` mention workflow is intentionally NOT included here —
+# add a separate file `.github/workflows/claude-mention.yml` listening on
+# `issue_comment` if you want to invoke Claude via PR comments later.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  claude-review:
+    # Codex/Copilot PR #10 review: skip on fork PRs and Dependabot — repo
+    # secrets are NOT provided to workflows triggered from forks, so the
+    # job would fail with an opaque auth error. The skip is explicit so
+    # operators understand the gap; if fork PR reviews are required later,
+    # switch to `pull_request_target` with careful sandboxing.
+    if: >-
+      github.event.pull_request.head.repo.fork == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # Sourcery PR #10 review: scoped to the job (least-privilege; future
+    # workflow-level jobs won't inherit these); dropped `issues: write`
+    # which the v1 action's auto-review path doesn't need.
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout PR
+        # actions/checkout v4.2.2 — pinned to SHA per SonarCloud supply-chain
+        # hotspot rule (unpinned major-version tags can silently move).
+        # The default `pull_request` event checks out the merge commit
+        # (post-merge state), which is what reviewers want to assess —
+        # Copilot PR #10 review suggested switching to head.sha but we
+        # keep the default intentionally.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Claude review
+        # anthropics/claude-code-action v1.0 — pinned to SHA per same rule.
+        # Upgraded from v0 in this PR per Codex P1: v1's `prompt` input is
+        # the documented automated-PR-review path (see the action's
+        # docs/solutions.md). v0 without a prompt stays in `mode: tag`
+        # and waits for `@claude` mentions, defeating the auto-review intent.
+        uses: anthropics/claude-code-action@537ffff2eff706bd7e3e1c3daf2d4b39067a9f85
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Please review this pull request with a focus on:
+            - Code quality and best practices
+            - Potential bugs or correctness issues
+            - Security implications (input validation, secret handling, supply-chain)
+            - Performance considerations
+            - Test coverage gaps (does the diff add tests where appropriate?)
+
+            Note: the PR branch is already checked out in the current
+            working directory.
+
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) to highlight specific code issues at the
+            file/line level. Be specific and actionable; avoid restating
+            what other reviewers (Sourcery, Copilot, Codex) have already
+            said.
