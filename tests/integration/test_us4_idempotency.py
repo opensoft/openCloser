@@ -80,6 +80,59 @@ def _run_write_enabled(*, conn, fake, artifact_dir, cfg=None):
     )
 
 
+def _stamp_progress(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    run_status: RunStatus,
+    phone_call_activity_done: bool = True,
+    queue_status_update_done: bool = True,
+    task_done: bool = True,
+    last_error: str | None = "simulated",
+) -> None:
+    """Synthesize a `writeback_progress` row for a session — used by the resume
+    tests to simulate post-failure states without driving the precise
+    transient sequence that would naturally produce them. Extracted so the
+    "drive successful run + restamp progress" preamble doesn't trip
+    SonarCloud's new-code duplication threshold (≤ 3%)."""
+    with store.transaction(conn):
+        store.upsert_writeback_progress(
+            conn,
+            WriteBackProgress(
+                session_id=session_id,
+                phone_call_activity_done=phone_call_activity_done,
+                queue_status_update_done=queue_status_update_done,
+                task_done=task_done,
+                run_status=run_status,
+                last_error=last_error,
+                updated_at=_CLOCK.now_utc_ms(),
+            ),
+        )
+
+
+def _invoke_resume(
+    *,
+    session_id: str,
+    conn: sqlite3.Connection,
+    artifact_root: Path,
+    fake,
+    mapping,
+    cfg=None,
+):
+    """Wrap the `resume_session` call so the same 7-arg kwarg block isn't
+    duplicated in every test (Sonar duplication fix)."""
+    cfg = cfg or _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
+    return resume_session(
+        session_id=session_id,
+        conn=conn,
+        artifact_root=artifact_root,
+        client=fake.client(cfg.retry),
+        translator=MappingTranslator(mapping),
+        task_owners=cfg.task_owners,
+        clock=_CLOCK,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1 — within-session idempotency pre-query (FR-024)
 # ---------------------------------------------------------------------------
@@ -233,33 +286,24 @@ def test_us4_resume_completes_partial_writeback(
     # IS already there (from the first run), so the resume will pre-query,
     # find the existing Task, reuse its id, and mark the progress row done
     # — proving FR-024's pre-query short-circuits the duplicate.
-    with store.transaction(tmp_state_db):
-        store.upsert_writeback_progress(
-            tmp_state_db,
-            WriteBackProgress(
-                session_id=session_id,
-                phone_call_activity_done=True,
-                queue_status_update_done=True,
-                task_done=False,
-                run_status=RunStatus.RESUME_NEEDED,
-                last_error="simulated transient exhaust",
-                updated_at=_CLOCK.now_utc_ms(),
-            ),
-        )
+    _stamp_progress(
+        tmp_state_db,
+        session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        task_done=False,
+        last_error="simulated transient exhaust",
+    )
 
     # Capture pre-resume counts.
     pre_phone_calls = len([b for e, b in fake.created if e == "phonecall"])
     pre_tasks = len([b for e, b in fake.created if e == "task"])
 
-    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
-    result = resume_session(
+    result = _invoke_resume(
         session_id=session_id,
         conn=tmp_state_db,
         artifact_root=tmp_artifact_dir,
-        client=fake.client(cfg.retry),
-        translator=MappingTranslator(mapping),
-        task_owners=cfg.task_owners,
-        clock=_CLOCK,
+        fake=fake,
+        mapping=mapping,
     )
 
     assert result.exit_status == "completed"
@@ -305,15 +349,12 @@ def test_us4_resume_finalized_session_is_noop(
     pre_tasks = len([b for e, b in fake.created if e == "task"])
     pre_patches = len([c for e, _, c in fake.patched if e == "medx_callqueueitem"])
 
-    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
-    result = resume_session(
+    result = _invoke_resume(
         session_id=session_id,
         conn=tmp_state_db,
         artifact_root=tmp_artifact_dir,
-        client=fake.client(cfg.retry),
-        translator=MappingTranslator(mapping),
-        task_owners=cfg.task_owners,
-        clock=_CLOCK,
+        fake=fake,
+        mapping=mapping,
     )
 
     assert result.exit_status == "no-resume-needed"
@@ -360,19 +401,14 @@ def test_us4_adapter_flush_pending_failures_supports_resume_needed(
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
     assert report.exit_status == "completed"
     assert report.session_id is not None
-    with store.transaction(tmp_state_db):
-        store.upsert_writeback_progress(
-            tmp_state_db,
-            WriteBackProgress(
-                session_id=report.session_id,
-                phone_call_activity_done=True,
-                queue_status_update_done=False,
-                task_done=False,
-                run_status=RunStatus.IN_PROGRESS,
-                last_error=None,
-                updated_at=_CLOCK.now_utc_ms(),
-            ),
-        )
+    _stamp_progress(
+        tmp_state_db,
+        report.session_id,
+        run_status=RunStatus.IN_PROGRESS,
+        queue_status_update_done=False,
+        task_done=False,
+        last_error=None,
+    )
 
     # Construct a fresh adapter and stage a synthetic transient failure for
     # the queue-status record kind.
@@ -423,33 +459,24 @@ def test_us4_resume_raises_when_writeback_json_missing(
     session_id = report.session_id
 
     # Mark resume_needed AND delete the writeback.json.
-    with store.transaction(tmp_state_db):
-        store.upsert_writeback_progress(
-            tmp_state_db,
-            WriteBackProgress(
-                session_id=session_id,
-                phone_call_activity_done=True,
-                queue_status_update_done=False,
-                task_done=False,
-                run_status=RunStatus.RESUME_NEEDED,
-                last_error="simulated",
-                updated_at=_CLOCK.now_utc_ms(),
-            ),
-        )
+    _stamp_progress(
+        tmp_state_db,
+        session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        queue_status_update_done=False,
+        task_done=False,
+    )
     writeback_path = report.artifact_dir / "writeback.json"
     writeback_path.unlink()
     assert not writeback_path.exists()
 
-    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
     with pytest.raises(ResumeError, match=r"writeback\.json missing"):
-        resume_session(
+        _invoke_resume(
             session_id=session_id,
             conn=tmp_state_db,
             artifact_root=tmp_artifact_dir,
-            client=fake.client(cfg.retry),
-            translator=MappingTranslator(mapping),
-            task_owners=cfg.task_owners,
-            clock=_CLOCK,
+            fake=fake,
+            mapping=mapping,
         )
 
 
@@ -463,16 +490,13 @@ def test_us4_resume_raises_for_unknown_session(
 
     mapping = load_mapping(_MAPPING_FIXTURE)
     fake = fake_for_mapping(mapping, _seed())
-    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
     with pytest.raises(ResumeError, match="no writeback_progress row"):
-        resume_session(
+        _invoke_resume(
             session_id="never-seen-session",
             conn=tmp_state_db,
             artifact_root=tmp_artifact_dir,
-            client=fake.client(cfg.retry),
-            translator=MappingTranslator(mapping),
-            task_owners=cfg.task_owners,
-            clock=_CLOCK,
+            fake=fake,
+            mapping=mapping,
         )
 
 
@@ -489,35 +513,26 @@ def test_us4_resume_raises_when_writeback_json_malformed(
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
     session_id = report.session_id
-    with store.transaction(tmp_state_db):
-        store.upsert_writeback_progress(
-            tmp_state_db,
-            WriteBackProgress(
-                session_id=session_id,
-                phone_call_activity_done=True,
-                queue_status_update_done=False,
-                task_done=False,
-                run_status=RunStatus.RESUME_NEEDED,
-                last_error="simulated",
-                updated_at=_CLOCK.now_utc_ms(),
-            ),
-        )
+    _stamp_progress(
+        tmp_state_db,
+        session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        queue_status_update_done=False,
+        task_done=False,
+    )
     # Corrupt the writeback.json — truncate to half its content (the JSON
     # decoder will choke).
     writeback_path = report.artifact_dir / "writeback.json"
     raw = writeback_path.read_text(encoding="utf-8")
     writeback_path.write_text(raw[: len(raw) // 2], encoding="utf-8")
 
-    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
     with pytest.raises(ResumeError, match="malformed or unreadable"):
-        resume_session(
+        _invoke_resume(
             session_id=session_id,
             conn=tmp_state_db,
             artifact_root=tmp_artifact_dir,
-            client=fake.client(cfg.retry),
-            translator=MappingTranslator(mapping),
-            task_owners=cfg.task_owners,
-            clock=_CLOCK,
+            fake=fake,
+            mapping=mapping,
         )
 
 
@@ -543,29 +558,14 @@ def test_us4_resume_rejects_non_resumable_states(
     fake = fake_for_mapping(mapping, _seed())
 
     report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
-    with store.transaction(tmp_state_db):
-        store.upsert_writeback_progress(
-            tmp_state_db,
-            WriteBackProgress(
-                session_id=report.session_id,
-                phone_call_activity_done=True,
-                queue_status_update_done=True,
-                task_done=True,
-                run_status=state,
-                last_error="simulated",
-                updated_at=_CLOCK.now_utc_ms(),
-            ),
-        )
+    _stamp_progress(tmp_state_db, report.session_id, run_status=state)
 
-    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
-    result = resume_session(
+    result = _invoke_resume(
         session_id=report.session_id,
         conn=tmp_state_db,
         artifact_root=tmp_artifact_dir,
-        client=fake.client(cfg.retry),
-        translator=MappingTranslator(mapping),
-        task_owners=cfg.task_owners,
-        clock=_CLOCK,
+        fake=fake,
+        mapping=mapping,
     )
 
     assert result.exit_status == expected_exit
