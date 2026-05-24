@@ -237,8 +237,8 @@ Single project — `src/opencloser/`, `tests/` at repository root (per plan.md �
 ## Task Summary
 
 - **Total tasks**: 53 (T001–T044 plus T045 conflict-stop, T046 conflict-stop integration test, T047 secrets-not-in-artifacts test, T048 adapter unit tests, T049 run-report schema, T050 write-back state machine, T051 configured-campaign-not-found distinction, T052 planned-writeback.json sidecar [DEFERRED]; T029 split into T029a + T029b)
-- **Per phase**: Setup 4 · Foundational 12 · US1 8 (T017–T023 + T048) · US2 4 · US3 4 (T028 + T029a + T029b + T030) · US4 6 (T031–T034 + T045 + T046) · US5 2 · US6 3 · Polish 9 (T040–T044 + T047 + T049 + T050 + T051)
-- **Test tasks**: T016, T017, T023, T027, T030, T034, T036, T039, T040, T046, T047, T048 (unit, contract, integration, boundary)
+- **Per phase**: Setup 4 · Foundational 12 · US1 8 (T017–T023 + T048) · US2 4 · US3 4 (T028 + T029a + T029b + T030) · US4 6 (T031–T034 + T045 + T046) · US5 2 · US6 3 · Polish 10 (T040–T044 + T047 + T049 + T050 + T051 + T052)
+- **Test tasks**: T016, T017, T023, T027, T030, T034, T036, T039, T040, T041, T046, T047, T048 (unit, contract, integration, boundary, retention)
 - **Parallel opportunities**: 28 tasks marked `[P]`; US5 and US6 are fully parallel to the US1–US4 track.
 - **Deliberately not scheduled**: the optional Slice 1 `TransportEvent` / `MockCallEvent` type split (data-model.md §6) — explicitly optional, non-blocking hygiene; intentionally deferred out of Slice 2 scope.
 - **Past audit-pass remediations (all closed)** — post-implement `/speckit-analyze` pass: T045 + T046 (G1 — mid-run CRM-state conflict edge case), T047 (G2 — FR-005 no-secrets-in-artifacts assertion), T027/T028 description tightening (G3/I3 — dry-run readiness vs write-enabled readiness), T041 description expansion (G4 — FR-023 row retention), T029 split into T029a/T029b (U2), T048 (U1 — adapter unit tests).

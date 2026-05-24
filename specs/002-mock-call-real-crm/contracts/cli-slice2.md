@@ -80,7 +80,7 @@ re-invoking the same command triggers `slice2/resume.py`:
 | Status | Meaning |
 |---|---|
 | `completed` | loop finished; write-back done (or planned, in dry-run) |
-| `blocked` | eligibility/metadata block (SC-008) — no call placed — OR mid-run CRM-state conflict (T045) — partial `writeback_progress` persisted, already-completed approved writes preserved, human-changed values left unchanged. The run-report `block_reason` field disambiguates conflict from eligibility/metadata. |
+| `blocked` | eligibility/metadata block (SC-008) — no call placed — OR mid-run CRM-state conflict (T045) — partial `writeback_progress` persisted, already-completed approved writes preserved, human-changed values left unchanged — OR other permanent CRM/mapping failure (e.g. unverifiable owner-team per FR-025). The run-report `block_reason` field disambiguates: `eligibility \| metadata \| conflict_detected \| permanent_other`. |
 | `no-callable-item` | empty queue — clean no-op (FR-009) |
 | `resume_needed` | transient failure exhausted retry budget — re-invoke to resume |
 | `failed` | malformed fixture or permanent error — no attempt consumed (SC-006). Includes `configured_campaign_not_found:` prefix when the configured campaign GUID resolves to zero queue items in Dataverse (spec §Edge Cases "Configured campaign not found", T051). |
@@ -156,7 +156,7 @@ Exhaustive transition table:
 | `in_progress`    | Not surfaced as a terminal exit (a `run-crm` that crashes mid-flight leaves this state behind; a `--resume` against it returns `failed` per `resume.py` "refuse to race"). |
 | `completed`      | `completed` (exit 0). Re-invocation: `no-resume-needed` (exit 0).                                                                       |
 | `resume_needed`  | `resume_needed` (exit 2). Re-invocation routes to `slice2/resume.py`.                                                                  |
-| `blocked`        | `blocked` (exit 1). The run-report's `block_reason` field disambiguates the variant (eligibility/metadata vs T045 conflict_detected).   |
+| `blocked`        | `blocked` (exit 1). The run-report's `block_reason` field disambiguates the variant: `eligibility` (Slice 1 evaluator gate), `metadata` (readiness/verify() failure), `conflict_detected` (T045 mid-run conflict), or `permanent_other` (other permanent CRM/mapping failure like unverifiable owner-team per FR-025). |
 
 ### Operator-visible distinction (CHK052)
 

@@ -190,7 +190,7 @@ carry no secrets (FR-005 / T047).
 | Status              | Exit code | Meaning                                                                                                    |
 |---------------------|----------:|------------------------------------------------------------------------------------------------------------|
 | `completed`         | 0         | the loop finished; write-back done (or planned, in dry-run)                                                |
-| `blocked`           | 1         | eligibility/metadata blocked the run OR mid-run CRM conflict (T045 — `block_reason` field disambiguates)   |
+| `blocked`           | 1         | eligibility/metadata blocked the run, mid-run CRM conflict (T045), or other permanent CRM failure. The run-report `block_reason` field carries one of `eligibility \| metadata \| conflict_detected \| permanent_other` |
 | `no-callable-item`  | 0         | empty queue — clean no-op (FR-009)                                                                         |
 | `resume_needed`     | 2         | transient failure exhausted the retry budget — re-invoke with `--resume <session-id>` to resume            |
 | `failed`            | 2         | malformed fixture or permanent error before claim — no attempt consumed (SC-006). Carries `configured_campaign_not_found:` prefix when the configured campaign GUID resolves to zero queue items in Dataverse (T051) |
