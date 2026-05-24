@@ -680,6 +680,52 @@ def test_us4_t045_no_conflict_when_status_unchanged(
     adapter.emit_queue_status_update(payload)
 
 
+def test_us4_t045_runner_maps_queue_conflict_to_blocked(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """T045 + T046 — verify the runner's exception-handling contract for
+    `QueueConflictError`: the runner MUST produce `exit_status="blocked"`
+    (not `"failed"`), stamp `writeback_progress.run_status=BLOCKED`, and
+    surface the operator-visible "queue conflict — manual reconciliation
+    required" message prefix. End-to-end timing manipulation via the fake
+    isn't feasible (would need a `pre_request_hook` invasive change), so
+    this test forces the runner's catch path by monkey-patching
+    `emit_queue_status_update` to raise QueueConflictError directly.
+    (Copilot PR #11 review: the runner mapping was new behavior with no
+    test coverage; a future refactor could regress it silently.)"""
+    from unittest.mock import patch
+
+    from opencloser.crm.dataverse.adapter import QueueConflictError
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    def _raise_conflict(self, payload):
+        raise QueueConflictError(
+            "test-stub: queue item changed mid-run",
+            conflict_fields=["medx_callstatus=2 (snapshot expected 0)"],
+        )
+
+    with patch(
+        "opencloser.crm.dataverse.adapter.DataverseWriteBackAdapter."
+        "emit_queue_status_update",
+        _raise_conflict,
+    ):
+        report = _run_write_enabled(
+            conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir
+        )
+
+    assert report.exit_status == "blocked"
+    assert report.message is not None
+    assert "queue conflict" in report.message.lower()
+    assert "manual reconciliation required" in report.message
+    # The runner staged a failure correlation → writeback_progress is BLOCKED.
+    if report.session_id is not None:
+        progress = store.get_writeback_progress(tmp_state_db, report.session_id)
+        assert progress is not None
+        assert progress.run_status is RunStatus.BLOCKED
+
+
 def test_us4_t045_queue_item_deleted_raises_conflict(
     tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
 ) -> None:

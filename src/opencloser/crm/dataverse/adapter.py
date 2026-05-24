@@ -18,6 +18,7 @@ See `specs/002-mock-call-real-crm/contracts/dataverse-adapter.md`.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -64,6 +65,24 @@ _ODATA_FILTER = "$filter"
 _ODATA_SELECT = "$select"
 _ODATA_TOP = "$top"
 
+# Dataverse expects record/lookup ids unquoted in `$filter` (GUIDs); we
+# allowlist alphanumeric + dash + underscore (covers real GUIDs and the
+# test fixture ids) so any reserved-character or whitespace value cannot
+# break the filter or inject extra clauses. Duplicated from `queue_loader`
+# (Copilot PR #11 review prefers a shared helper; promoting it to a
+# dedicated `odata.py` module is a future cleanup — keeping the duplication
+# narrow rather than touching unrelated code in this PR).
+_SAFE_ODATA_TOKEN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _safe_odata_token(value: object) -> str:
+    text = str(value)
+    if not _SAFE_ODATA_TOKEN.fullmatch(text):
+        raise DataverseWriteBackError(
+            f"unsafe OData filter value {value!r} — must match [A-Za-z0-9_-]+"
+        )
+    return text
+
 
 class DataverseWriteBackError(RuntimeError):
     """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
@@ -72,12 +91,20 @@ class DataverseWriteBackError(RuntimeError):
 class QueueConflictError(DataverseWriteBackError):
     """T045 / spec §Edge Cases "Dataverse queue item changed by a human between
     claim and write-back". Raised by `emit_queue_status_update` when the
-    pre-write GET of the queue row reveals that a mapped field (or any
-    `preserve_if_present` field) has changed since the runner loaded its
-    snapshot. The run stops before the final status PATCH; the human-changed
-    values are left untouched; the runner surfaces the conflict as an
-    operator-visible `blocked` result requiring manual reconciliation
-    (FR-003 + FR-021).
+    pre-write GET of the queue row reveals a divergence from the snapshot
+    the runner captured at queue-load time. The run stops before the final
+    status PATCH; the human-changed values are left untouched; the runner
+    surfaces the conflict as an operator-visible `blocked` result requiring
+    manual reconciliation (FR-003 + FR-021).
+
+    Current scope (this PR): status-field divergence (mapped `queue.status`
+    differs from snapshot, OR the row has been deleted entirely). The
+    spec also calls out `preserve_if_present` field diffing — that's
+    tracked as a follow-up (requires the runner to capture raw Dataverse
+    field values as a side-channel dict; the list in
+    `mapping.preserve_if_present` is just logical-name strings, NOT entries
+    in `mapping.fields`, so it can't be diffed via $select without an
+    explicit per-field allowlist).
 
     Distinct from `TransientDataverseError` (retry won't recover — a human
     deliberately changed the row) and from generic `DataverseWriteBackError`
@@ -582,7 +609,14 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    # Validate the record-id token before interpolating it
+                    # into the `$filter` predicate — closes a filter-
+                    # injection vector for any caller that passes an
+                    # unvalidated id (Copilot PR #11 review noted the same
+                    # pattern needed fixing in the new `_detect_queue_conflict`
+                    # call site; covering both here keeps the safe-token
+                    # invariant consistent).
+                    _ODATA_FILTER: f"{primary_id} eq {_safe_odata_token(queue_item_id)}",
                     _ODATA_SELECT: last_session_field,
                     _ODATA_TOP: "1",
                 },
@@ -645,7 +679,10 @@ class DataverseWriteBackAdapter:
             self._client.get(
                 entity_set,
                 params={
-                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    # `_safe_odata_token` validates the id before interpolation
+                    # — closes the same OData-filter-injection vector covered
+                    # in `_fetch_queue_last_session` (Copilot PR #11 SECURITY).
+                    _ODATA_FILTER: f"{primary_id} eq {_safe_odata_token(queue_item_id)}",
                     _ODATA_SELECT: ",".join(select_fields),
                     _ODATA_TOP: "1",
                 },
@@ -666,10 +703,15 @@ class DataverseWriteBackAdapter:
 
         conflicts: list[str] = []
         # Status check: only meaningful when we resolved the snapshot's
-        # callable_status to an option-set integer.
+        # callable_status to an option-set integer. Null/missing current
+        # status counts as a divergence — a human or sync job clearing the
+        # field is still a workflow change that should block the PATCH
+        # (Copilot + Codex PR #11 P2: previous version had a
+        # `current_status is not None` guard that silently let cleared-
+        # status rows through).
         if expected_status_value is not None:
             current_status = current.get(status_field)
-            if current_status is not None and current_status != expected_status_value:
+            if current_status != expected_status_value:
                 conflicts.append(
                     f"{status_field}={current_status!r} (snapshot expected "
                     f"{expected_status_value!r})"
