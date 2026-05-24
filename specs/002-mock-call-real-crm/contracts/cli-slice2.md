@@ -72,7 +72,7 @@ re-invoking the same command triggers `slice2/resume.py`:
 | `blocked` | eligibility/metadata block (SC-008) — no call placed — OR mid-run CRM-state conflict (T045) — partial `writeback_progress` persisted, already-completed approved writes preserved, human-changed values left unchanged. The run-report `block_reason` field disambiguates conflict from eligibility/metadata. |
 | `no-callable-item` | empty queue — clean no-op (FR-009) |
 | `resume_needed` | transient failure exhausted retry budget — re-invoke to resume |
-| `failed` | malformed fixture or permanent error — no attempt consumed (SC-006) |
+| `failed` | malformed fixture or permanent error — no attempt consumed (SC-006). Includes `configured_campaign_not_found:` prefix when the configured campaign GUID resolves to zero queue items in Dataverse (spec §Edge Cases "Configured campaign not found", T051). |
 
 All non-`completed` statuses are operator-visible per the spec Definitions §"Operator-visible"
 (CLI result + exit status + local run report), never leaking secrets or CRM record contents.
@@ -197,6 +197,19 @@ Every processed Dataverse queue item MUST produce a traceable record carrying:
 
 ### JSON shape
 
+> **Implementation note (2026-05-24 Pass 1C + audit-pass)**: the shape below is
+> the canonical "future on-disk `run-report.json`" schema. As of this commit
+> the `CrmRunReport` dataclass carries `exit_status`, `session_id`,
+> `final_disposition`, `artifact_dir`, `queue_item_id`, `metadata_report`,
+> `warnings`, `message`, and `block_reason` directly. The remaining documented
+> fields (`schema_version`, `started_at`/`ended_at`, `persona_version`,
+> `mock_provider_call_id`, `eligibility_decision`, `run_mode`, `crm_correlations`,
+> `writeback_progress`) are reconstructable today from `session-result.json`,
+> `writeback.json`, `task.json`, and the `crm_correlations` / `writeback_progress`
+> SQLite rows. A future `write_run_report(...)` writer in
+> `artifacts/writer.py` would compose them into a single JSON artifact per
+> this contract.
+
 ```jsonc
 {
   "schema_version": "slice2-run-report-v1",
@@ -223,7 +236,7 @@ Every processed Dataverse queue item MUST produce a traceable record carrying:
   ],
   "message": "completed",                     // operator-visible summary; for `blocked` carries
                                               // `conflict_detected: ...` or the eligibility/metadata reason
-  "block_reason": null,                       // populated for `blocked` exits: `eligibility | metadata | conflict_detected`
+  "block_reason": null,                       // populated for `blocked` exits: `eligibility | metadata | conflict_detected | permanent_other` (Pass 1C)
   "artifact_dir": "/var/openCloser/artifacts/ses_2026-05-22T19-00-00Z_q-test-0001",
   "run_mode": "write_enabled | dry_run",
   "crm_correlations": [                       // write-enabled ONLY (see field-set table below)
@@ -243,6 +256,34 @@ Every processed Dataverse queue item MUST produce a traceable record carrying:
     "run_status": "completed",
     "last_error": null
   }
+}
+```
+
+### Worked examples — non-completed `writeback_progress.run_status` (Pass 2B)
+
+`resume_needed` (transient retry budget exhausted mid-write-back; later
+re-invocation routes to `slice2/resume.py`):
+
+```jsonc
+"writeback_progress": {
+  "phone_call_activity_done": true,
+  "queue_status_update_done": false,
+  "task_done": false,
+  "run_status": "resume_needed",
+  "last_error": "dataverse write failed: Dataverse returned HTTP 503 for POST <env>/api/data/v9.2/tasks"
+}
+```
+
+`blocked` (T045 conflict-stop variant — manual reconciliation required;
+`exit_status="blocked"`, `block_reason="conflict_detected"`):
+
+```jsonc
+"writeback_progress": {
+  "phone_call_activity_done": true,
+  "queue_status_update_done": false,
+  "task_done": false,
+  "run_status": "blocked",
+  "last_error": "mid-run CRM-state conflict on queue item 'q-test-0001': the following field(s) changed since load: medx_lastsessionid, medx_priority"
 }
 ```
 

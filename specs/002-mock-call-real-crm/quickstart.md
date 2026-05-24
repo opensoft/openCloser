@@ -193,7 +193,7 @@ carry no secrets (FR-005 / T047).
 | `blocked`           | 1         | eligibility/metadata blocked the run OR mid-run CRM conflict (T045 — `block_reason` field disambiguates)   |
 | `no-callable-item`  | 0         | empty queue — clean no-op (FR-009)                                                                         |
 | `resume_needed`     | 2         | transient failure exhausted the retry budget — re-invoke with `--resume <session-id>` to resume            |
-| `failed`            | 2         | malformed fixture or permanent error before claim — no attempt consumed (SC-006)                           |
+| `failed`            | 2         | malformed fixture or permanent error before claim — no attempt consumed (SC-006). Carries `configured_campaign_not_found:` prefix when the configured campaign GUID resolves to zero queue items in Dataverse (T051) |
 | `no-resume-needed`  | 0         | `--resume` invoked against an already-completed session (FR-021 idempotent re-invocation)                  |
 
 Full state-machine + run-report schema: [contracts/cli-slice2.md](./contracts/cli-slice2.md).
@@ -213,9 +213,10 @@ Dataverse fake (research.md §10; `tests/fixtures/dataverse/fake.py`). The bound
 (`tests/contract/test_boundary_isolation.py` — T040) enforces SC-010: zero Dataverse vendor
 names in the orchestrator / eligibility / transport / persona modules.
 
-## 11. Closing GitHub issue #2
+## 11. GitHub issue #2
 
-GH issue #2 (malformed-fixture pre-validation) is resolved by T035 + T036
+GH issue [opensoft/openCloser#2](https://github.com/opensoft/openCloser/issues/2)
+(malformed-fixture pre-validation) was resolved by T035 + T036
 (`src/opencloser/transport/mock.py` + the orchestrator `pre_validate_fixture` hook + the
-US5 unit + integration tests). Close the issue with a comment referencing PR #4 (US5/US6
-foundation) and this quickstart's §11 once Slice 2 ships.
+US5 unit + integration tests) and **closed on 2026-05-24** via T043. The closure comment
+references PR #4 (US5/US6 foundation) and this section.
