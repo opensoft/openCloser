@@ -151,11 +151,14 @@ def process_one_queue_item(
 
     # FR-019/FR-020 (Slice 2 / GitHub issue #2 / FR-014 allowed exception):
     # structurally pre-validate the transport fixture BEFORE any session/decision/
-    # queue-status row is written, so a malformed fixture raises MalformedFixtureError
-    # here — leaving no session row, no eligibility-decision row, no attempt consumed,
-    # and no Dataverse queue change (SC-006). The hook is side-effect-free (no call
-    # id allocated, no real call dialed) so the long-standing "session row before
-    # call attempt" ordering contract is preserved for any future real transport.
+    # queue-status row is written. An invalid or malformed fixture fails here
+    # (the transport hook may raise `MalformedFixtureError` for shape problems
+    # or plain `ValueError` for resolver problems such as path-traversal /
+    # invalid fixture_id) — either way, no session row, no eligibility-decision
+    # row, no attempt consumed, and no Dataverse queue change (SC-006). The
+    # hook is side-effect-free (no call id allocated, no real call dialed) so
+    # the long-standing "session row before call attempt" ordering contract
+    # is preserved for any future real transport.
     if decision.outcome != "block":
         assert transport_fixture_id is not None  # narrowed by the check above
         transport.pre_validate_fixture(transport_fixture_id)
