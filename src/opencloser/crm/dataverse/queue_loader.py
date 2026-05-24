@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import odata_string_literal
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
-from opencloser.models import CallableStatus, DataverseFieldRef, QueueItem
+from opencloser.models import CallableStatus, DataverseFieldRef, QueueBaseline, QueueItem
 
 # The Dataverse system-field name that every table carries — used as the
 # next-ready tie-breaker between two rows with the same next_attempt_at
@@ -141,11 +141,46 @@ class DataverseQueueLoader:
         callable status in the Dataverse query itself (so a non-callable row is never
         a "next ready" candidate).
         """
+        row = self._fetch_one_row(selector)
+        if row is None:
+            return None
+        return self._to_queue_item(row, self._primary_id_or_default())
+
+    def load_with_baseline(
+        self, selector: QueueSelector, *, now_utc_ms: str
+    ) -> tuple[QueueItem, QueueBaseline] | None:
+        """T045 — like ``load`` but also returns a ``QueueBaseline`` snapshot
+        of the row's status + ``preserve_if_present`` field values at load
+        time. The adapter's ``_check_conflict`` compares this baseline against
+        a fresh GET immediately before the final queue-status PATCH; any
+        mismatch raises ``CrmConflictError`` and the runner surfaces
+        ``exit_status="blocked"``.
+
+        The baseline is captured from the same row that produces the
+        ``QueueItem`` — single GET, consistent snapshot, no extra Dataverse
+        round-trip at startup.
+        """
+        row = self._fetch_one_row(selector)
+        if row is None:
+            return None
+        primary_id = self._primary_id_or_default()
+        queue_item = self._to_queue_item(row, primary_id)
+        baseline = self._baseline_from_row(row, queue_item.queue_item_id, now_utc_ms)
+        return queue_item, baseline
+
+    def _primary_id_or_default(self) -> str:
         entity_logical = self._t.entity_logical_name("queue_item")
+        return self._t.entity("queue_item").primary_id or f"{entity_logical}id"
+
+    def _fetch_one_row(self, selector: QueueSelector) -> dict | None:
+        """Run the selector's Dataverse query and return the raw row dict, or
+        None for an empty result. Shared by ``load`` and ``load_with_baseline``
+        so the (somewhat involved) selector → $filter translation lives in
+        exactly one place."""
         # Record CRUD URLs use the entity-set name (often plural); only metadata uses
         # the singular logical name (Copilot PR #3 review).
         entity_set = self._t.entity_set_name("queue_item")
-        primary_id = self._t.entity("queue_item").primary_id or f"{entity_logical}id"
+        primary_id = self._primary_id_or_default()
 
         if isinstance(selector, ExplicitId):
             rows = self._query(
@@ -196,9 +231,26 @@ class DataverseQueueLoader:
                 ),
                 top=1,
             )
-        if not rows:
-            return None
-        return self._to_queue_item(rows[0], primary_id)
+        return rows[0] if rows else None
+
+    def _baseline_from_row(
+        self, row: dict, queue_item_id: str, captured_at: str
+    ) -> QueueBaseline:
+        """Extract the T045 conflict-detection baseline from a Dataverse row:
+        the current ``queue.status`` option-set integer plus the current value
+        of every ``preserve_if_present`` logical name. Missing fields surface
+        as ``None`` so the adapter's ``_check_conflict`` can detect a
+        human-added value (None → non-None) the same way it detects edits."""
+        status_field = self._t.logical_name(_QUEUE_STATUS_FIELD)
+        return QueueBaseline(
+            queue_item_id=queue_item_id,
+            captured_at=captured_at,
+            status_value=int(row.get(status_field, 0) or 0),
+            preserve_values={
+                logical: row.get(logical)
+                for logical in self._t.preserve_if_present()
+            },
+        )
 
     def _optional_logical_name(self, conceptual: str) -> str | None:
         """The Dataverse logical name for a conceptual field, or None when the mapping

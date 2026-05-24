@@ -30,8 +30,19 @@ def entity_attributes(mapping: DataverseMapping) -> dict[str, set[str]]:
         entities[eref.logical_name] = attrs
 
     queue_ref = mapping.entities.get("queue_item")
-    if queue_ref is not None and mapping.task_owner_override_field:
-        entities.setdefault(queue_ref.logical_name, set()).add(mapping.task_owner_override_field)
+    if queue_ref is not None:
+        if mapping.task_owner_override_field:
+            entities.setdefault(queue_ref.logical_name, set()).add(
+                mapping.task_owner_override_field
+            )
+        # T045 — preserve_if_present logical names are queue_item fields that
+        # the deployment knows exist (the adapter's `_check_conflict` $selects
+        # them before the final PATCH); register them on the fake so the
+        # strict $select validator doesn't 400 on a known-good check.
+        if mapping.preserve_if_present:
+            entities.setdefault(queue_ref.logical_name, set()).update(
+                mapping.preserve_if_present
+            )
 
     entities.setdefault("account", set()).update({"accountid", "name"})
     entities.setdefault("systemuser", set()).update({"systemuserid", "isdisabled"})

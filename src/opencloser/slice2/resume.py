@@ -49,6 +49,11 @@ from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, Datavers
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import DataverseError, TransientDataverseError
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
+from opencloser.crm.dataverse.queue_loader import (
+    DataverseQueueLoader,
+    ExplicitId,
+    QueueLoadError,
+)
 from opencloser.models import (
     RunStatus,
     TaskOwnersConfig,
@@ -217,6 +222,25 @@ def resume_session(
             adapter.emit_phone_call_activity(writeback.phone_call_activity)
             replayed.append("phone_call_activity")
 
+        # T045 — fresh baseline at resume start. The original-run baseline is
+        # in-memory only (not persisted), so the resume captures its own
+        # snapshot of the queue row. This protects the window between
+        # resume start and the final queue-status PATCH against human-driven
+        # changes, mirroring the initial-run conflict-stop semantics (CHK061).
+        # A re-detected conflict re-enters the T045 path: the adapter raises
+        # CrmConflictError (a DataverseWriteBackError subclass) and the
+        # broader except below maps it to RunStatus.BLOCKED + exit_status="blocked"
+        # — never RESUME_NEEDED, since conflict-stop is permanent per spec
+        # §Definitions §Permanent Dataverse error.
+        if not progress.queue_status_update_done:
+            _snapshot_resume_baseline(
+                adapter=adapter,
+                client=client,
+                translator=translator,
+                queue_item_id=writeback.queue_status_update.queue_item_id,
+                clk=clk,
+            )
+
         # Queue status update — replay only if not already done. The adapter's
         # _fetch_queue_last_session check skips the PATCH if the row already
         # carries this session's id.
@@ -279,6 +303,37 @@ def resume_session(
         artifact_dir=session_dir,
         operations_replayed=replayed,
     )
+
+
+def _snapshot_resume_baseline(
+    *,
+    adapter: DataverseWriteBackAdapter,
+    client: DataverseClient,
+    translator: MappingTranslator,
+    queue_item_id: str,
+    clk: Clock,
+) -> None:
+    """T045 / CHK061 — snapshot the queue row at resume start and register it
+    on the adapter so the conflict-check in ``emit_queue_status_update`` fires
+    on the resume path too. Failure to snapshot (queue gone, transient GET
+    failure) is swallowed silently here — the subsequent ``emit_queue_status_update``
+    will surface the same underlying failure via the broader except (and a
+    snapshot 404 means the conflict check would no-op anyway).
+
+    ``callable_status`` is set to a literal because ``ExplicitId`` selectors
+    don't reference it; only ``NextReady`` selectors do.
+    """
+    loader = DataverseQueueLoader(client, translator, callable_status="ready")
+    try:
+        loaded = loader.load_with_baseline(
+            ExplicitId(queue_item_id), now_utc_ms=clk.now_utc_ms()
+        )
+    except (MappingError, QueueLoadError, DataverseError):
+        return
+    if loaded is None:
+        return
+    _, baseline = loaded
+    adapter.record_baseline(baseline)
 
 
 __all__ = ("ResumeError", "ResumeReport", "resume_session")

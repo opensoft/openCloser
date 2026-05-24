@@ -32,7 +32,11 @@ from pydantic import ValidationError
 from opencloser.artifacts.writer import write_dry_run_marker
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
-from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
+from opencloser.crm.dataverse.adapter import (
+    CrmConflictError,
+    DataverseWriteBackAdapter,
+    DataverseWriteBackError,
+)
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import (
     DataverseError,
@@ -51,6 +55,7 @@ from opencloser.models import (
     DataQualityWarning,
     Disposition,
     MetadataVerificationReport,
+    QueueBaseline,
     QueueItem,
     RunMode,
     RunStatus,
@@ -192,10 +197,11 @@ def run_one_crm_item(
         translator=translator,
         slice2_config=slice2_config,
         metadata_report=report,
+        clk=clk,
     )
     if isinstance(queue_item_result, CrmRunReport):
         return queue_item_result
-    queue_item = queue_item_result
+    queue_item, queue_baseline = queue_item_result
 
     # 3) FR-034 — non-E.164 phone-quality warning. Recorded into the runner report and
     # the queue-status payload's `queue.last_error` column (via the adapter; see
@@ -219,6 +225,12 @@ def run_one_crm_item(
         now_utc_ms=clk.now_utc_ms,
         dry_run=is_dry_run,
     )
+    # T045 — register the conflict-detection baseline captured at queue load.
+    # Dry-run never PATCHes, so the baseline is harmless in dry-run too (the
+    # adapter's `_check_conflict` only runs in the write-enabled `emit_queue_status_update`
+    # path, not in the dry-run capture path).
+    if not is_dry_run:
+        adapter.record_baseline(queue_baseline)
     for warning in runner_warnings:
         adapter.add_warning(warning)
 
@@ -251,6 +263,30 @@ def run_one_crm_item(
             exit_status="failed",
             message=str(exc),
             warnings=adapter.warnings(),
+        )
+    except CrmConflictError as exc:
+        # T045 — mid-run CRM-state conflict (human change detected between
+        # queue load and the final queue-status PATCH). Spec §Definitions
+        # §Permanent Dataverse error classifies this as permanent, so the
+        # progress row is stamped `BLOCKED` (NOT `RESUME_NEEDED` — auto-
+        # resuming a conflict-stopped session would silently re-run the
+        # check against the now-current state, which is exactly what an
+        # operator MUST do manually per the recovery flow in
+        # contracts/cli-slice2.md "Behavior — resume").
+        failure_session_ids = adapter.pending_failure_session_ids()
+        adapter.flush_pending_failures(failure_run_status=RunStatus.BLOCKED)
+        return CrmRunReport(
+            exit_status="blocked",
+            session_id=failure_session_ids[0] if failure_session_ids else None,
+            queue_item_id=queue_item.queue_item_id,
+            metadata_report=report,
+            warnings=adapter.warnings(),
+            message=(
+                f"conflict_detected: queue item {exc.queue_item_id!r} changed "
+                f"between claim and write-back; conflicting fields: "
+                f"{', '.join(exc.conflicting_fields)}. Manual reconciliation "
+                "required per contracts/cli-slice2.md 'Behavior — resume'."
+            ),
         )
     except (DataverseError, DataverseWriteBackError, MappingError) as exc:
         # A Dataverse write failure mid-run, or a missing/invalid mapping entry
@@ -500,28 +536,31 @@ def _load_dataverse_queue_item(
     translator: MappingTranslator,
     slice2_config: Slice2Config,
     metadata_report: MetadataVerificationReport,
-) -> QueueItem | CrmRunReport:
-    # 2) Load the queue item. Any mapping/option-set/transient failure surfaces as a
-    # structured `failed` report instead of an unhandled exception. `ValidationError`
-    # is included because `loader.load(...)` constructs a `QueueItem` from the
-    # Dataverse row, and a schema-corrupted row (e.g. a negative `attempt_count`
-    # the CHECK clause would also reject) surfaces from there.
+    clk: Clock,
+) -> tuple[QueueItem, QueueBaseline] | CrmRunReport:
+    # 2) Load the queue item + capture the T045 conflict-detection baseline
+    # from the same Dataverse row. Any mapping/option-set/transient failure
+    # surfaces as a structured `failed` report instead of an unhandled
+    # exception. `ValidationError` is included because `loader.load_with_baseline(...)`
+    # constructs a `QueueItem` from the Dataverse row, and a schema-corrupted
+    # row (e.g. a negative `attempt_count` the CHECK clause would also reject)
+    # surfaces from there.
     loader = DataverseQueueLoader(
         client,
         translator,
         callable_status=slice2_config.dataverse.callable_status,
     )
     try:
-        queue_item = loader.load(selector)
+        loaded = loader.load_with_baseline(selector, now_utc_ms=clk.now_utc_ms())
     except (MappingError, QueueLoadError, DataverseError, ValidationError) as exc:
         return CrmRunReport(exit_status="failed", message=f"queue loader error: {exc}")
-    if queue_item is None:
+    if loaded is None:
         return CrmRunReport(
             exit_status="no-callable-item",
             metadata_report=metadata_report,
             message="no callable queue item",
         )
-    return queue_item
+    return loaded
 
 
 def _phone_quality_warnings(queue_item: QueueItem) -> list[DataQualityWarning]:

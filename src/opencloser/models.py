@@ -581,6 +581,35 @@ class WriteBackProgress(BaseModel):
     updated_at: UtcMs
 
 
+class QueueBaseline(BaseModel):
+    """T045 — the Dataverse queue row state at load time, used by the adapter's
+    mid-run conflict detection (spec §Edge Cases "Dataverse queue item changed by
+    a human between claim and write-back"). Compared field-by-field against a
+    fresh GET immediately before the final queue-status / DNC / attempt PATCH;
+    any mismatch surfaces as a `CrmConflictError` and stops the write-back.
+
+    Captured by `DataverseQueueLoader.load_with_baseline` from the same Dataverse
+    row that produces the `QueueItem`, so the baseline is consistent with the
+    state the Slice 1 eligibility evaluator and orchestrator saw at session
+    start. The resume coordinator (FR-023) captures its own fresh baseline at
+    resume start since the original-run baseline is in-memory only — the
+    resume path's conflict surface therefore covers human changes during the
+    resume window, not the original pause window.
+
+    `preserve_values` keys are Dataverse logical names (the names that appear
+    on the wire). A field absent from the wire row maps to `None` here, so
+    "field added by a human between load and final write" surfaces as a
+    None → non-None mismatch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    queue_item_id: str
+    captured_at: UtcMs
+    status_value: int
+    preserve_values: dict[str, object] = Field(default_factory=dict)
+
+
 class MetadataVerificationReport(BaseModel):
     """FR-001/FR-002 — the result of lightweight live metadata verification."""
 

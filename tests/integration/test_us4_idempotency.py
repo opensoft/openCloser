@@ -576,3 +576,166 @@ def test_us4_resume_rejects_non_resumable_states(
 
     assert result.exit_status == expected_exit
     assert result.message is not None and state.value in result.message
+
+
+# ---------------------------------------------------------------------------
+# T045 / T046 — Mid-run CRM-state conflict detection
+# ---------------------------------------------------------------------------
+#
+# Spec §Edge Cases "Dataverse queue item changed by a human between claim and
+# write-back": the adapter re-reads mapped queue fields + the preserve_if_present
+# set immediately before the final queue-status PATCH; any mismatch against the
+# runner's claim-time baseline raises `CrmConflictError`, which the runner
+# converts into `CrmRunReport(exit_status="blocked", message="conflict_detected: ...")`.
+# The resume coordinator captures its own fresh baseline at resume start (CHK061),
+# so a human change during the pause window re-enters the same conflict-stop path.
+#
+# These tests inject the mid-run mutation by monkey-patching the
+# DataverseFake's `_handle_query` to mutate the queue row on the FIRST GET
+# whose `$select` lists `medx_callstatus` together with `medx_notes`
+# — that is the conflict-check GET, distinguishable from every other GET the
+# adapter issues (idempotency pre-queries select a single field; the
+# `_fetch_queue_last_session` GET selects only `medx_lastsessionid`).
+
+
+def _install_conflict_mutator(fake, *, mutation: dict[str, object]):
+    """Monkey-patch `fake._handle_query` so the FIRST conflict-check GET also
+    mutates the queue row before returning. Returns a list whose membership
+    tells the caller whether the hook fired (useful for sanity-asserting the
+    test exercised the intended code path)."""
+    original = fake._handle_query
+    fired: list[bool] = []
+
+    def patched(request, entity):
+        sel = request.url.params.get("$select", "")
+        is_conflict_check = "medx_callstatus" in sel and "medx_notes" in sel
+        if is_conflict_check and not fired:
+            fake._records["medx_callqueueitem"][0].update(mutation)
+            fired.append(True)
+        return original(request, entity)
+
+    fake._handle_query = patched
+    return fired
+
+
+def test_t045_initial_run_conflict_on_preserve_field_blocks(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """T045 — a human change to a `preserve_if_present` field between the
+    runner's claim-time baseline and the final queue-status PATCH stops the
+    write-back. Result: `exit_status="blocked"`, `message` names the
+    conflicting field, the final queue PATCH is NOT issued, and the
+    `writeback_progress.run_status` is `BLOCKED`."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+    fired = _install_conflict_mutator(fake, mutation={"medx_notes": "human-edited"})
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+
+    assert fired, "conflict-check GET hook did not fire — the test did not exercise T045"
+    assert report.exit_status == "blocked"
+    assert report.message is not None
+    assert "conflict_detected" in report.message
+    assert "medx_notes" in report.message
+
+    # No queue-row PATCH was issued (the final status update was aborted).
+    queue_patches = [
+        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
+    ]
+    assert queue_patches == [], (
+        f"queue PATCH must NOT issue when a conflict is detected; got {queue_patches}"
+    )
+
+    # writeback_progress reflects the blocked terminal state.
+    progress = store.get_writeback_progress(tmp_state_db, report.session_id)
+    assert progress is not None
+    assert progress.run_status is RunStatus.BLOCKED
+    assert progress.queue_status_update_done is False
+
+
+def test_t045_initial_run_conflict_on_status_field_blocks(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """T045 — a human change to `queue.status` (the option-set integer)
+    between the runner's claim-time baseline (status=0 = ready) and the
+    final queue-status PATCH stops the write-back. Captures the case where
+    a parallel/manual workflow moved the row to a different status, e.g. an
+    operator clicked "Complete" in Dynamics while the run was in flight."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+    # 2 = `queue_status.completed` per dataverse_mapping.json — pretend a
+    # human marked the row complete mid-run.
+    fired = _install_conflict_mutator(fake, mutation={"medx_callstatus": 2})
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+
+    assert fired
+    assert report.exit_status == "blocked"
+    assert "conflict_detected" in (report.message or "")
+    assert "medx_callstatus" in (report.message or "")
+
+    queue_patches = [
+        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
+    ]
+    assert queue_patches == []
+
+
+def test_t045_resume_detects_conflict_during_pause_window(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """T045 + CHK061 — the resume coordinator snapshots its own baseline at
+    resume start and re-runs the conflict check before re-issuing the final
+    queue-status PATCH. A human change between resume's baseline snapshot
+    and the conflict-check GET re-enters the conflict-stop path with
+    `exit_status="blocked"` (NOT auto-resumed)."""
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # First run completes normally (no conflict yet — produces writeback.json).
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+    assert report.session_id is not None
+
+    # Restore the queue row to a pre-PATCH-looking state so the resume sees
+    # an "unfinished" queue item (last_session_id cleared, status back to
+    # ready) — then synthesize the resume_needed precondition for the
+    # queue-status replay.
+    fake._records["medx_callqueueitem"][0]["medx_lastsessionid"] = None
+    fake._records["medx_callqueueitem"][0]["medx_callstatus"] = 0
+    _stamp_progress(
+        tmp_state_db,
+        report.session_id,
+        run_status=RunStatus.RESUME_NEEDED,
+        queue_status_update_done=False,
+        last_error="simulated transient exhaust",
+    )
+
+    # Install the mutation hook for the resume window.
+    fired = _install_conflict_mutator(fake, mutation={"medx_notes": "edited-mid-resume"})
+
+    result = _invoke_resume(
+        session_id=report.session_id,
+        conn=tmp_state_db,
+        artifact_root=tmp_artifact_dir,
+        fake=fake,
+        mapping=mapping,
+    )
+
+    assert fired, "resume-time conflict-check hook did not fire"
+    assert result.exit_status == "blocked"
+    assert result.message is not None
+    assert "conflict" in result.message.lower()
+
+    # The resume's PATCH was NOT issued (no new queue PATCH after the first
+    # run's success).
+    queue_patches = [
+        changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
+    ]
+    # The first (successful) run produced exactly one PATCH; the resume must
+    # not have added a second one.
+    assert len(queue_patches) == 1
+
+    # writeback_progress is now BLOCKED.
+    progress = store.get_writeback_progress(tmp_state_db, report.session_id)
+    assert progress is not None
+    assert progress.run_status is RunStatus.BLOCKED

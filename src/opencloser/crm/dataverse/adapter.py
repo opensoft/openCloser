@@ -39,6 +39,7 @@ from opencloser.models import (
     DataQualityWarning,
     Disposition,
     PhoneCallActivityPayload,
+    QueueBaseline,
     QueueStatusUpdatePayload,
     RunStatus,
     TaskOwnersConfig,
@@ -63,9 +64,43 @@ _ODATA_FILTER = "$filter"
 _ODATA_SELECT = "$select"
 _ODATA_TOP = "$top"
 
+# Conceptual mapping key for the queue's status field — referenced by
+# `_check_conflict` to look up the Dataverse logical name and the baseline
+# status value (T045).
+_QUEUE_STATUS_FIELD = "queue.status"
+
 
 class DataverseWriteBackError(RuntimeError):
     """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
+
+
+class CrmConflictError(DataverseWriteBackError):
+    """T045 — a human-driven mid-run change was detected on the Dataverse queue
+    row between the runner's baseline snapshot and the final queue-status PATCH.
+    The adapter refuses the PATCH; the runner converts this into an
+    operator-visible ``CrmRunReport(exit_status="blocked", message="conflict_detected: ...")``
+    per spec §Edge Cases "Dataverse queue item changed by a human between claim
+    and write-back".
+
+    Subclassed from ``DataverseWriteBackError`` so the runner's existing
+    ``except (DataverseError, DataverseWriteBackError, MappingError)`` block
+    catches it; the runner then narrows on ``CrmConflictError`` first to map
+    it to ``blocked`` (with `block_reason=conflict_detected`) rather than the
+    default ``resume_needed``/``failed`` mapping. Treated as a permanent
+    Dataverse error per spec §Definitions §Permanent Dataverse error — never
+    retried, never escalated to ``resume_needed``.
+    """
+
+    def __init__(self, queue_item_id: str, conflicting_fields: list[str]) -> None:
+        self.queue_item_id = queue_item_id
+        self.conflicting_fields = list(conflicting_fields)
+        joined = ", ".join(conflicting_fields) if conflicting_fields else "(unknown)"
+        super().__init__(
+            f"mid-run CRM-state conflict on queue item {queue_item_id!r}: "
+            f"the following field(s) changed since load: {joined}. "
+            "Write-back stopped before the final queue-status update; "
+            "manual reconciliation required (T045)."
+        )
 
 
 class _AggregateBuilder:
@@ -143,6 +178,11 @@ class DataverseWriteBackAdapter:
         # exception (when the orchestrator's transaction has rolled back and
         # the write lock is free).
         self._pending_failures: list[_PendingFailure] = []
+        # T045 — the runner's claim-time snapshot, set via `record_baseline`
+        # before the orchestrator drives the emit_* sequence. `None` means
+        # "no baseline available; skip conflict detection" so dry-run and
+        # tests that don't exercise the conflict path are unaffected.
+        self._baseline: QueueBaseline | None = None
 
     # ----- public protocol surface -----------------------------------------
 
@@ -223,10 +263,25 @@ class DataverseWriteBackAdapter:
                 self._aggregate(payload.session_id).queue_status_update = payload
                 return
 
+            # T045 — mid-run conflict detection. Fresh GET of the queue row;
+            # compare against the runner's claim-time baseline. A mismatch
+            # raises `CrmConflictError` (a `DataverseWriteBackError` subclass)
+            # so the runner's existing failure-recording try/except records a
+            # `crm_correlations(write_status=failed)` row + stamps
+            # `writeback_progress(run_status=blocked)`. The runner narrows on
+            # `CrmConflictError` to surface `exit_status="blocked",
+            # block_reason="conflict_detected"` rather than the default
+            # `resume_needed`/`failed` mapping.
+            self._check_conflict(payload.queue_item_id)
+
             body = self._queue_status_body(payload)
             path = f"{entity_set}({payload.queue_item_id})"
             self._client.patch(path, json=body)
-        except (DataverseError, MappingError) as exc:
+        except (DataverseError, DataverseWriteBackError, MappingError) as exc:
+            # `DataverseWriteBackError` here is the T045 `CrmConflictError`
+            # path — record the failed correlation + stamp the progress row
+            # so resume sees the conflict-blocked state. The runner narrows
+            # on `CrmConflictError` (subclass) to surface `exit_status=blocked`.
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.QUEUE_STATUS,
@@ -362,6 +417,15 @@ class DataverseWriteBackAdapter:
             if failure.session_id not in seen:
                 seen.append(failure.session_id)
         return seen
+
+    def record_baseline(self, baseline: QueueBaseline) -> None:
+        """T045 — register the runner's claim-time snapshot of the Dataverse
+        queue row. ``emit_queue_status_update`` consults it via
+        ``_check_conflict`` before issuing the final PATCH; a mismatch raises
+        ``CrmConflictError`` and the runner converts that into an
+        operator-visible ``blocked`` exit. No-op in dry-run (the adapter never
+        PATCHes in dry-run, so there's nothing to gate)."""
+        self._baseline = baseline
 
     def warnings(self) -> list[DataQualityWarning]:
         """Operator-visible warnings accumulated during this adapter's session
@@ -539,6 +603,72 @@ class DataverseWriteBackAdapter:
             return None
         value = rows[0].get(last_session_field)
         return None if value is None else str(value)
+
+    def _check_conflict(self, queue_item_id: str) -> None:
+        """T045 — fresh GET of the queue row immediately before the final PATCH;
+        raise ``CrmConflictError`` if any baseline value has changed.
+
+        Compared fields:
+          * ``queue.status`` — the queue's option-set status. A change here
+            means a different session moved it, OR a human moved it out of the
+            "callable" state we loaded it in.
+          * ``preserve_if_present`` mapped logical names — any value change
+            means a human edited a high-confidence field during our run.
+
+        A ``None`` baseline (no ``record_baseline`` call by the runner) skips
+        the check — preserves backward compatibility for callers that don't
+        opt in (the existing US1/US4 happy-path tests construct the adapter
+        directly without a baseline). The check also no-ops when the row
+        cannot be found (a deleted queue is its own permanent error surfaced
+        elsewhere) or when the baseline is for a different queue item id
+        (defensive — never compare across queue items).
+        """
+        baseline = self._baseline
+        if baseline is None or baseline.queue_item_id != queue_item_id:
+            return
+
+        status_field = self._t.logical_name(_QUEUE_STATUS_FIELD)
+        preserve_fields = self._t.preserve_if_present()
+        select_fields = sorted({status_field, *preserve_fields})
+
+        entity_set = self._entity_set("queue_item")
+        primary_id = self._primary_id("queue_item")
+        rows = (
+            self._client.get(
+                entity_set,
+                params={
+                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_SELECT: ",".join(select_fields),
+                    _ODATA_TOP: "1",
+                },
+            )
+            .json()
+            .get("value", [])
+        )
+        if not rows:
+            # Row deleted between load and final write — the queue lookup at
+            # the final PATCH will 404 anyway; let that path own the failure
+            # rather than synthesizing one here.
+            return
+
+        current = rows[0]
+        conflicting: list[str] = []
+        # Status change → conflict. Compare raw option-set integers; the
+        # baseline holds what we saw at load (typically `callable_status`
+        # integer), the row holds whatever it is now.
+        current_status = current.get(status_field)
+        if current_status != baseline.status_value:
+            conflicting.append(status_field)
+        # Preserve_if_present change → conflict. Missing-on-current is
+        # treated as `None`; baseline holds `None` for fields that weren't
+        # set at load, so an explicit add-by-human (None → non-None) is
+        # caught the same as a value-change.
+        for field in preserve_fields:
+            if current.get(field) != baseline.preserve_values.get(field):
+                conflicting.append(field)
+
+        if conflicting:
+            raise CrmConflictError(queue_item_id, conflicting)
 
     def _entity_set(self, entity_key: str) -> str:
         """Resolve the Dataverse Web API entity-set (collection) name for an entity
@@ -933,6 +1063,7 @@ def _default_now_utc_ms() -> str:
 
 
 __all__: Iterable[str] = (
+    "CrmConflictError",
     "DataverseWriteBackAdapter",
     "DataverseWriteBackError",
     "MappingError",
