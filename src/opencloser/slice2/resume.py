@@ -35,7 +35,7 @@ from pathlib import Path
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
 from opencloser.crm.dataverse.client import DataverseClient
-from opencloser.crm.dataverse.errors import DataverseError
+from opencloser.crm.dataverse.errors import DataverseError, TransientDataverseError
 from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator
 from opencloser.models import (
     RunStatus,
@@ -92,19 +92,48 @@ def resume_session(
         raise ResumeError(
             f"session {session_id!r} has no writeback_progress row; nothing to resume"
         )
-    if progress.run_status is not RunStatus.RESUME_NEEDED:
+    # Codex/Copilot PR #9 review: distinguish per-state outcomes instead of
+    # collapsing every non-`resume_needed` state into `no-resume-needed`. A
+    # `blocked` session is permanently non-resumable; an `in_progress` session
+    # is being processed elsewhere; only `completed` is a true no-op (the
+    # idempotent re-invocation of a finalized session per FR-021).
+    if progress.run_status is RunStatus.COMPLETED:
         return ResumeReport(
             exit_status="no-resume-needed",
             session_id=session_id,
+            message="session is already completed; no replay performed (FR-021)",
+        )
+    if progress.run_status is RunStatus.BLOCKED:
+        return ResumeReport(
+            exit_status="blocked",
+            session_id=session_id,
             message=(
-                f"session is in {progress.run_status.value!r}, not 'resume_needed'; "
-                "no replay performed"
+                f"session {session_id!r} is in 'blocked' — a permanent error "
+                "stopped the original run. Resume cannot recover; inspect the "
+                "writeback_progress.last_error and re-discover the mapping or "
+                "manually reconcile before re-running."
             ),
         )
+    if progress.run_status is RunStatus.IN_PROGRESS:
+        return ResumeReport(
+            exit_status="failed",
+            session_id=session_id,
+            message=(
+                f"session {session_id!r} is in 'in_progress' — another run "
+                "may still be working on it (or the previous run crashed "
+                "mid-write). Refuse to replay rather than racing; investigate "
+                "the writeback_progress.updated_at timestamp."
+            ),
+        )
+    # RESUME_NEEDED → continue with the replay below.
 
     # Load the persisted WriteBack payloads. The Slice 1 artifact writer
     # always emits writeback.json atomically; its presence is part of the
-    # resume contract per FR-023.
+    # resume contract per FR-023. Both missing-file AND
+    # malformed-content cases surface as ResumeError so the CLI handler
+    # reports them uniformly (Codex PR #9 P2: previously a malformed
+    # writeback.json raised ValidationError out of resume_session as an
+    # unhandled exception, bypassing the structured ResumeError surface).
     session_dir = artifact_root / session_id
     writeback_path = session_dir / _WRITEBACK_FILENAME
     if not writeback_path.exists():
@@ -113,9 +142,18 @@ def resume_session(
             "without persisted payloads (FR-023). Inspect local audit-artifact "
             "retention (FR-035) and re-run the original `run-crm` instead."
         )
-    writeback = WriteBack.model_validate_json(
-        writeback_path.read_text(encoding="utf-8")
-    )
+    try:
+        writeback = WriteBack.model_validate_json(
+            writeback_path.read_text(encoding="utf-8")
+        )
+    except (ValueError, OSError) as exc:
+        # Pydantic's ValidationError is a ValueError subclass; OSError catches
+        # truncated/locked files that read_text might surface as IOError.
+        raise ResumeError(
+            f"writeback.json under {session_dir!r} is malformed or unreadable "
+            f"({type(exc).__name__}): {exc}. Cannot resume safely; re-run the "
+            "original `run-crm` instead."
+        ) from exc
 
     # Build a fresh adapter. dry_run=False because resume is a write-enabled
     # operation by definition (FR-023 — completes the missing writes).
@@ -151,13 +189,23 @@ def resume_session(
             adapter.emit_task(writeback.task)
             replayed.append("task")
     except (DataverseError, DataverseWriteBackError, MappingError) as exc:
-        # The replay itself failed (transient exhausted again, mapping
-        # invalidated, permission regression, etc.). Persist staged failures
-        # exactly as the write-enabled runner does, leaving the session in a
-        # state another resume invocation can pick up if appropriate.
-        adapter.flush_pending_failures()
+        # The replay itself failed. Distinguish transient (retry budget
+        # exhausted again — leave the session resumable so a third
+        # invocation can pick it up later) from permanent (mapping invalid,
+        # permission regression — escalate to BLOCKED so the operator must
+        # intervene). Codex PR #9 P1: previously this path always called
+        # flush_pending_failures() with the default BLOCKED, which made
+        # resumed sessions permanently non-resumable on any transient.
+        failure_run_status = (
+            RunStatus.RESUME_NEEDED
+            if isinstance(exc, TransientDataverseError)
+            else RunStatus.BLOCKED
+        )
+        adapter.flush_pending_failures(failure_run_status=failure_run_status)
         return ResumeReport(
-            exit_status="failed",
+            exit_status="resume_needed"
+            if failure_run_status is RunStatus.RESUME_NEEDED
+            else "failed",
             session_id=session_id,
             message=f"resume replay failed: {exc}",
             artifact_dir=session_dir,

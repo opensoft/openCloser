@@ -387,6 +387,21 @@ def run_crm(
                 err=True,
             )
             raise typer.Exit(code=2)
+        # Copilot PR #9 review: warn when other orchestrator-input flags
+        # are silently ignored. These have no effect in resume mode because
+        # the resume coordinator does not re-run process_one_queue_item.
+        if conversation_fixture is not None:
+            typer.echo(
+                "warning:     --conversation-fixture is ignored when --resume is set "
+                "(resume does not re-run the orchestrator)",
+                err=True,
+            )
+        if campaign is not None:
+            typer.echo(
+                "warning:     --campaign is ignored when --resume is set "
+                "(resume operates on the session id only)",
+                err=True,
+            )
         _run_crm_resume(
             session_id=resume,
             config_path=config_path,
@@ -513,15 +528,72 @@ def _run_crm_resume(
     slice2_config_path: Path,
 ) -> None:
     """T033 — `run-crm --resume <session-id>` entry point. Loads configs,
-    constructs the Dataverse client + mapping translator, and routes to the
-    FR-023 resume coordinator. Exit codes mirror `run-crm`'s normal table:
-    completed → 0, failed → 2, no-resume-needed → 0 (the session was
-    already finalized; idempotency holds)."""
+    short-circuits on a non-replayable progress state BEFORE touching
+    Dataverse secrets (so a finalized session can be re-invoked without
+    credentials per FR-021 idempotency — Codex PR #9 P1), then constructs
+    the Dataverse client + mapping translator and routes to the FR-023
+    resume coordinator.
+
+    Exit codes mirror `run-crm`'s normal table: completed → 0,
+    no-resume-needed → 0 (FR-021), blocked → 1, failed → 2.
+    """
+    from opencloser.models import RunStatus
+
     slice1_config, slice2_config = _load_run_crm_configs(config_path, slice2_config_path)
+
+    # PRE-FLIGHT: check writeback_progress BEFORE loading Dataverse secrets.
+    # An already-`completed` session is a true no-op and must not fail just
+    # because the operator running the resume happens to be missing creds.
+    # A `blocked` session is permanently non-resumable; surface that early
+    # too — no Dataverse round-trip is needed to know it (Codex PR #9 P1).
+    conn = store.connect(slice1_config.state.db)
+    try:
+        progress = store.get_writeback_progress(conn, session_id)
+        if progress is None:
+            typer.echo(
+                f"error:       resume pre-flight failed: session {session_id!r} "
+                "has no writeback_progress row; nothing to resume",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if progress.run_status is RunStatus.COMPLETED:
+            typer.echo("exit_status:           no-resume-needed")
+            typer.echo(f"session_id:            {session_id}")
+            typer.echo(
+                "message:               session is already completed; no replay "
+                "performed (FR-021)"
+            )
+            raise typer.Exit(code=0)
+        if progress.run_status is RunStatus.BLOCKED:
+            typer.echo("exit_status:           blocked")
+            typer.echo(f"session_id:            {session_id}")
+            typer.echo(
+                f"message:               session is in 'blocked'; a permanent error "
+                f"({progress.last_error!r}) stopped the original run. Resume cannot "
+                "recover."
+            )
+            raise typer.Exit(code=1)
+        if progress.run_status is RunStatus.IN_PROGRESS:
+            typer.echo("exit_status:           failed")
+            typer.echo(f"session_id:            {session_id}")
+            typer.echo(
+                "message:               session is in 'in_progress'; another run "
+                "may still be working on it. Investigate writeback_progress."
+                "updated_at before retrying."
+            )
+            raise typer.Exit(code=2)
+        # RESUME_NEEDED → fall through to the live-Dataverse path below.
+    except typer.Exit:
+        conn.close()
+        raise
+    except Exception:
+        conn.close()
+        raise
 
     try:
         secrets = load_dataverse_secrets()
     except Slice2ConfigError as exc:
+        conn.close()
         typer.echo(f"error:       {exc}", err=True)
         raise typer.Exit(code=2) from None
 
@@ -531,9 +603,11 @@ def _run_crm_resume(
     try:
         mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
     except MappingError as exc:
+        conn.close()
         typer.echo(f"error:       mapping artifact error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     if not mapping.meta.approved:
+        conn.close()
         typer.echo(
             "error:       mapping artifact "
             f"{slice2_config.dataverse.mapping_artifact!r} is not approved; "
@@ -546,7 +620,6 @@ def _run_crm_resume(
     clock = SystemClock()
     token_provider = DataverseTokenProvider(secrets)
     client = DataverseClient(secrets.env_url, token_provider, slice2_config.retry)
-    conn = store.connect(slice1_config.state.db)
     try:
         try:
             result = resume_session(
@@ -577,9 +650,13 @@ def _run_crm_resume(
     if result.message:
         typer.echo(f"message:               {result.message}")
 
-    code = {"completed": 0, "no-resume-needed": 0, "failed": 2}.get(
-        result.exit_status, 2
-    )
+    code = {
+        "completed": 0,
+        "no-resume-needed": 0,
+        "blocked": 1,
+        "resume_needed": 2,
+        "failed": 2,
+    }.get(result.exit_status, 2)
     raise typer.Exit(code=code)
 
 
