@@ -30,7 +30,7 @@ from opencloser.core.orchestrator import QueueItemNotFound, process_one_queue_it
 from opencloser.crm.dataverse.auth import DataverseTokenProvider
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import DataverseError
-from opencloser.crm.dataverse.mapping import MappingError, load_mapping
+from opencloser.crm.dataverse.mapping import MappingError, MappingTranslator, load_mapping
 from opencloser.crm.dataverse.metadata import MetadataError, discover
 from opencloser.crm.dataverse.queue_loader import ExplicitId, NextReady, QueueSelector
 from opencloser.crm.mock import MockWriteBackAdapter
@@ -38,6 +38,7 @@ from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import DataverseSecrets, QueueItem, RunMode
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import ConversationFixture, ConversationTurn
+from opencloser.slice2.resume import ResumeError, resume_session
 from opencloser.slice2.runner import run_one_crm_item
 from opencloser.state import store
 from opencloser.transport.mock import FixtureDrivenTransport
@@ -319,9 +320,28 @@ def run_crm(
         typer.Option("--campaign", help="Campaign selector (overrides slice2.toml [run].campaign)"),
     ] = None,
     transport_fixture: Annotated[
-        Path,
-        typer.Option("--transport-fixture", help="Path to a transport-events JSON fixture"),
-    ] = ...,  # type: ignore[assignment]
+        Path | None,
+        typer.Option(
+            "--transport-fixture",
+            help=(
+                "Path to a transport-events JSON fixture. Required unless --resume "
+                "is supplied (resume replays persisted write-back payloads and does "
+                "not re-run the orchestrator)."
+            ),
+        ),
+    ] = None,
+    resume: Annotated[
+        str | None,
+        typer.Option(
+            "--resume",
+            help=(
+                "Session ID of a `resume_needed` write-back to replay (FR-023). "
+                "Routes to the resume coordinator and skips queue load + persona + "
+                "transport — only the missing emit_* operations are issued. "
+                "Requires --write."
+            ),
+        ),
+    ] = None,
     conversation_fixture: Annotated[
         Path | None,
         typer.Option(
@@ -343,8 +363,43 @@ def run_crm(
     mapping, exercise persona + transport, capture planned write-back artifacts,
     zero CRM mutations). ``--write`` enables the write-enabled path. There is no
     way to mutate Dataverse without ``--write`` (SC-013).
+
+    ``--resume <session-id>`` (FR-023, T033): when supplied, the CLI replays
+    only the missing ``emit_*`` operations for a ``resume_needed`` session
+    using the persisted ``writeback.json`` and ``writeback_progress`` rows.
+    Requires ``--write`` (resume is by definition a write-back continuation)
+    and is incompatible with ``--queue-item-id`` / ``--next-ready`` /
+    ``--transport-fixture`` (resume does not re-run the orchestrator).
     """
     run_mode = RunMode.WRITE_ENABLED if write else RunMode.DRY_RUN
+
+    if resume is not None:
+        if not write:
+            typer.echo(
+                "error:       --resume requires --write (resume is a write-back continuation)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if queue_item_id or next_ready or transport_fixture is not None:
+            typer.echo(
+                "error:       --resume is incompatible with --queue-item-id / --next-ready / "
+                "--transport-fixture (resume operates on persisted write-back payloads only)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _run_crm_resume(
+            session_id=resume,
+            config_path=config_path,
+            slice2_config_path=slice2_config_path,
+        )
+        return
+
+    if transport_fixture is None:
+        typer.echo(
+            "error:       --transport-fixture is required when --resume is not set",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     slice1_config, slice2_config = _load_run_crm_configs(config_path, slice2_config_path)
     selector = _build_run_crm_selector(
@@ -449,6 +504,83 @@ def _build_run_crm_selector(
         )
         raise typer.Exit(code=2)
     return selector
+
+
+def _run_crm_resume(
+    *,
+    session_id: str,
+    config_path: Path,
+    slice2_config_path: Path,
+) -> None:
+    """T033 — `run-crm --resume <session-id>` entry point. Loads configs,
+    constructs the Dataverse client + mapping translator, and routes to the
+    FR-023 resume coordinator. Exit codes mirror `run-crm`'s normal table:
+    completed → 0, failed → 2, no-resume-needed → 0 (the session was
+    already finalized; idempotency holds)."""
+    slice1_config, slice2_config = _load_run_crm_configs(config_path, slice2_config_path)
+
+    try:
+        secrets = load_dataverse_secrets()
+    except Slice2ConfigError as exc:
+        typer.echo(f"error:       {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    # Load + validate the mapping artifact — resume requires the same approved
+    # mapping the original run used. Schema/approval errors are operator-
+    # visible-blocked (mirrors `_verify_readiness`'s first two gates).
+    try:
+        mapping = load_mapping(slice2_config.dataverse.mapping_artifact)
+    except MappingError as exc:
+        typer.echo(f"error:       mapping artifact error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    if not mapping.meta.approved:
+        typer.echo(
+            "error:       mapping artifact "
+            f"{slice2_config.dataverse.mapping_artifact!r} is not approved; "
+            "re-run `discover-crm` and have a reviewer flip _meta.approved to true",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    translator = MappingTranslator(mapping)
+
+    clock = SystemClock()
+    token_provider = DataverseTokenProvider(secrets)
+    client = DataverseClient(secrets.env_url, token_provider, slice2_config.retry)
+    conn = store.connect(slice1_config.state.db)
+    try:
+        try:
+            result = resume_session(
+                session_id=session_id,
+                conn=conn,
+                artifact_root=Path(slice1_config.artifacts.dir),
+                client=client,
+                translator=translator,
+                task_owners=slice2_config.task_owners,
+                clock=clock,
+            )
+        except ResumeError as exc:
+            typer.echo(f"error:       resume pre-flight failed: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+    finally:
+        conn.close()
+        client.close()
+        token_provider.close()
+
+    typer.echo(f"exit_status:           {result.exit_status}")
+    typer.echo(f"session_id:            {result.session_id}")
+    if result.artifact_dir is not None:
+        typer.echo(f"artifact_dir:          {result.artifact_dir}")
+    if result.operations_replayed is not None:
+        typer.echo(
+            f"operations_replayed:   {', '.join(result.operations_replayed) or 'none'}"
+        )
+    if result.message:
+        typer.echo(f"message:               {result.message}")
+
+    code = {"completed": 0, "no-resume-needed": 0, "failed": 2}.get(
+        result.exit_status, 2
+    )
+    raise typer.Exit(code=code)
 
 
 def _print_crm_report(report) -> None:
