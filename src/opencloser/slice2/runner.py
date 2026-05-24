@@ -32,7 +32,11 @@ from pydantic import ValidationError
 from opencloser.artifacts.writer import write_dry_run_marker
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.core.orchestrator import QueueItemNotFound, RunReport, process_one_queue_item
-from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter, DataverseWriteBackError
+from opencloser.crm.dataverse.adapter import (
+    DataverseWriteBackAdapter,
+    DataverseWriteBackError,
+    QueueConflictError,
+)
 from opencloser.crm.dataverse.client import DataverseClient
 from opencloser.crm.dataverse.errors import (
     DataverseError,
@@ -218,6 +222,12 @@ def run_one_crm_item(
         task_owners=slice2_config.task_owners,
         now_utc_ms=clk.now_utc_ms,
         dry_run=is_dry_run,
+        # T045: pass the loaded queue snapshot so the adapter can detect
+        # mid-run human changes (FR-003 + FR-021) before the final PATCH.
+        # Skipped for dry-run because dry-run never PATCHes anyway, and
+        # the conflict-detection GET would defeat the FR-031 "zero write"
+        # guarantee's narrow scoping if we issued it without need.
+        queue_snapshot=None if is_dry_run else queue_item,
     )
     for warning in runner_warnings:
         adapter.add_warning(warning)
@@ -260,18 +270,26 @@ def run_one_crm_item(
         # rolled back; the SQLite write lock is free again, so we can now
         # safely persist the failure markers the adapter staged.
         #
-        # Distinguish TRANSIENT (retry-budget-exhausted) from PERMANENT for
-        # the resume ledger (Copilot PR #9 review: previously every failure
-        # got `BLOCKED`, so the resume coordinator could never be triggered
-        # by a real failed run). The client's `_request` retries on transient
-        # errors until budget exhausted then re-raises, so seeing a
-        # TransientDataverseError here means retry-exhaust; that's exactly
-        # the FR-023 resume-needed case.
-        failure_run_status = (
-            RunStatus.RESUME_NEEDED
-            if isinstance(exc, TransientDataverseError)
-            else RunStatus.BLOCKED
-        )
+        # Distinguish three failure modes for the resume ledger + exit status:
+        # 1. TransientDataverseError (retry budget exhausted) → RESUME_NEEDED,
+        #    exit_status="resume_needed" (FR-023). The client's `_request`
+        #    retries on transient errors until budget exhausted then re-raises.
+        # 2. QueueConflictError (T045 — human change between claim and write)
+        #    → BLOCKED, exit_status="blocked". A conflict is a workflow
+        #    state divergence requiring human reconciliation; retry won't
+        #    recover. Spec §Edge Cases "Dataverse queue item changed by a
+        #    human between claim and write-back".
+        # 3. Other DataverseError / DataverseWriteBackError / MappingError
+        #    → BLOCKED, exit_status="failed".
+        if isinstance(exc, QueueConflictError):
+            failure_run_status = RunStatus.BLOCKED
+            failure_exit_status = "blocked"
+        elif isinstance(exc, TransientDataverseError):
+            failure_run_status = RunStatus.RESUME_NEEDED
+            failure_exit_status = "resume_needed"
+        else:
+            failure_run_status = RunStatus.BLOCKED
+            failure_exit_status = "failed"
         # Capture session ids BEFORE flush clears the pending queue (Copilot
         # PR #9 round-2 P1: operators need the session id to invoke
         # `run-crm --resume <session-id>` — the orchestrator's caught
@@ -280,11 +298,18 @@ def run_one_crm_item(
         failure_session_ids = adapter.pending_failure_session_ids()
         adapter.flush_pending_failures(failure_run_status=failure_run_status)
         return CrmRunReport(
-            exit_status="resume_needed"
-            if failure_run_status is RunStatus.RESUME_NEEDED
-            else "failed",
+            exit_status=failure_exit_status,
             session_id=failure_session_ids[0] if failure_session_ids else None,
-            message=f"dataverse write failed: {exc}",
+            queue_item_id=queue_item.queue_item_id,
+            metadata_report=report,
+            message=(
+                # Conflict gets a distinct prefix so operators can grep
+                # for it in run reports without having to inspect the
+                # underlying exception type.
+                f"queue conflict — manual reconciliation required: {exc}"
+                if isinstance(exc, QueueConflictError)
+                else f"dataverse write failed: {exc}"
+            ),
             warnings=adapter.warnings(),
         )
 

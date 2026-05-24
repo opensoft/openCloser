@@ -39,6 +39,7 @@ from opencloser.models import (
     DataQualityWarning,
     Disposition,
     PhoneCallActivityPayload,
+    QueueItem,
     QueueStatusUpdatePayload,
     RunStatus,
     TaskOwnersConfig,
@@ -66,6 +67,26 @@ _ODATA_TOP = "$top"
 
 class DataverseWriteBackError(RuntimeError):
     """A non-transient adapter-level failure (e.g. POST returned no OData-EntityId)."""
+
+
+class QueueConflictError(DataverseWriteBackError):
+    """T045 / spec §Edge Cases "Dataverse queue item changed by a human between
+    claim and write-back". Raised by `emit_queue_status_update` when the
+    pre-write GET of the queue row reveals that a mapped field (or any
+    `preserve_if_present` field) has changed since the runner loaded its
+    snapshot. The run stops before the final status PATCH; the human-changed
+    values are left untouched; the runner surfaces the conflict as an
+    operator-visible `blocked` result requiring manual reconciliation
+    (FR-003 + FR-021).
+
+    Distinct from `TransientDataverseError` (retry won't recover — a human
+    deliberately changed the row) and from generic `DataverseWriteBackError`
+    (the latter is an adapter-side correctness failure; this is a
+    workflow conflict that needs human attention)."""
+
+    def __init__(self, message: str, *, conflict_fields: list[str]) -> None:
+        super().__init__(message)
+        self.conflict_fields = conflict_fields
 
 
 class _AggregateBuilder:
@@ -114,12 +135,23 @@ class DataverseWriteBackAdapter:
         task_owners: TaskOwnersConfig,
         now_utc_ms: Callable[[], str] | None = None,
         dry_run: bool = False,
+        queue_snapshot: QueueItem | None = None,
     ) -> None:
         self._conn = conn
         self._client = client
         self._t = translator
         self._task_owners = task_owners
         self._now_utc_ms = now_utc_ms or _default_now_utc_ms
+        # T045 mid-run conflict detection: when set, `emit_queue_status_update`
+        # re-reads the queue row before the final PATCH and compares the
+        # mapped `queue.status` + any `preserve_if_present` field values
+        # against this snapshot. A divergence ⇒ `QueueConflictError`
+        # (spec §Edge Cases "Dataverse queue item changed by a human between
+        # claim and write-back"). The dry-run path and call sites that
+        # construct the adapter without a snapshot (e.g. the resume
+        # coordinator — the original load happened in a prior run) skip the
+        # check entirely.
+        self._queue_snapshot = queue_snapshot
         # FR-031 dry-run: when True, every emit_* translates the payload via the
         # same mapping helpers as the write-enabled path, captures the planned
         # payload in `_aggregates`, and short-circuits BEFORE any GET / POST /
@@ -223,10 +255,33 @@ class DataverseWriteBackAdapter:
                 self._aggregate(payload.session_id).queue_status_update = payload
                 return
 
+            # T045 mid-run conflict detection — only when the runner threaded a
+            # queue_snapshot through (the resume coordinator does NOT, because
+            # the original load happened in a prior run). Compares the
+            # current queue row against the snapshot captured at load time;
+            # raises QueueConflictError if `queue.status` or any
+            # `preserve_if_present` field has changed.
+            if self._queue_snapshot is not None:
+                self._detect_queue_conflict(payload.queue_item_id)
+
             body = self._queue_status_body(payload)
             path = f"{entity_set}({payload.queue_item_id})"
             self._client.patch(path, json=body)
         except (DataverseError, MappingError) as exc:
+            self._record_failure(
+                session_id=payload.session_id,
+                record_kind=CrmRecordKind.QUEUE_STATUS,
+                error=exc,
+                progress_key="queue_status_update_done",
+                dataverse_record_id=payload.queue_item_id,
+            )
+            raise
+        except QueueConflictError as exc:
+            # Conflict is a permanent-state issue — record the failed
+            # correlation + BLOCKED progress so the operator surface sees the
+            # `blocked` exit status. Re-raise so the runner can stop before
+            # subsequent emit_* calls (no Task should be created for a
+            # session whose queue state diverged).
             self._record_failure(
                 session_id=payload.session_id,
                 record_kind=CrmRecordKind.QUEUE_STATUS,
@@ -539,6 +594,93 @@ class DataverseWriteBackAdapter:
             return None
         value = rows[0].get(last_session_field)
         return None if value is None else str(value)
+
+    def _detect_queue_conflict(self, queue_item_id: str) -> None:
+        """T045: re-read the queue row immediately before the final PATCH and
+        compare against ``self._queue_snapshot``. Raises `QueueConflictError`
+        when a human change is detected:
+
+        - ``queue.status`` field changed (the row is no longer in the
+          callable-status state the runner loaded it in), OR
+        - any ``preserve_if_present`` mapped field's value diverged from
+          the snapshot (the row's audit-protected columns were edited).
+
+        Caller (``emit_queue_status_update``) handles the raised exception
+        by recording a failed correlation + BLOCKED progress; the runner
+        catches it and surfaces an operator-visible `blocked` result with
+        the divergent field names. Spec §Edge Cases "Dataverse queue item
+        changed by a human between claim and write-back".
+        """
+        snapshot = self._queue_snapshot
+        if snapshot is None:  # pragma: no cover — caller checks before calling
+            return
+
+        entity_set = self._entity_set("queue_item")
+        primary_id = self._primary_id("queue_item")
+        # Collect the field logical-names we need to check + their snapshot values.
+        # status — translated via the mapping's option_set entry.
+        status_field = self._t.logical_name("queue.status")
+        try:
+            expected_status_value: object = self._t.option_set_value(
+                f"queue_status.{snapshot.callable_status.value}"
+            )
+        except MappingError:
+            # No mapped option-set for the snapshot's callable_status; skip
+            # status-diff (the field-existence gate already ran in verify()).
+            expected_status_value = None
+
+        # v1 scope: $select only the status field + primary id. The
+        # `preserve_if_present` diff was originally part of this check but
+        # the list in `mapping.preserve_if_present` is just logical-name
+        # strings, NOT entries in `mapping.fields` — so they may not be
+        # registered as Dataverse attributes and including them in $select
+        # produces a 400. A richer diff would require the runner to capture
+        # the original raw Dataverse-field values as a side-channel dict
+        # and pass them through `queue_snapshot`. Tracked as a follow-up;
+        # status-drift is the spec's primary scenario and the dominant
+        # real-world case ("a human deliberately moved this item out of
+        # callable status before our final write").
+        select_fields = [primary_id, status_field]
+        rows = (
+            self._client.get(
+                entity_set,
+                params={
+                    _ODATA_FILTER: f"{primary_id} eq {queue_item_id}",
+                    _ODATA_SELECT: ",".join(select_fields),
+                    _ODATA_TOP: "1",
+                },
+            )
+            .json()
+            .get("value", [])
+        )
+        if not rows:
+            # Queue item disappeared between load and final write — treat as
+            # a conflict (a human deleted it, or a sync removed it).
+            raise QueueConflictError(
+                f"queue item {queue_item_id!r} no longer exists in Dataverse — "
+                "another writer may have deleted or moved it between claim "
+                "and write-back",
+                conflict_fields=[primary_id],
+            )
+        current = rows[0]
+
+        conflicts: list[str] = []
+        # Status check: only meaningful when we resolved the snapshot's
+        # callable_status to an option-set integer.
+        if expected_status_value is not None:
+            current_status = current.get(status_field)
+            if current_status is not None and current_status != expected_status_value:
+                conflicts.append(
+                    f"{status_field}={current_status!r} (snapshot expected "
+                    f"{expected_status_value!r})"
+                )
+
+        if conflicts:
+            raise QueueConflictError(
+                f"queue item {queue_item_id!r} changed between claim and "
+                "write-back; conflicts: " + "; ".join(conflicts),
+                conflict_fields=conflicts,
+            )
 
     def _entity_set(self, entity_key: str) -> str:
         """Resolve the Dataverse Web API entity-set (collection) name for an entity

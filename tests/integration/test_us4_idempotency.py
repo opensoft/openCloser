@@ -37,7 +37,7 @@ import pytest
 from opencloser.core.clock import FrozenClock
 from opencloser.crm.dataverse.mapping import MappingTranslator, load_mapping
 from opencloser.crm.dataverse.queue_loader import ExplicitId
-from opencloser.models import RunMode, RunStatus, WriteBackProgress
+from opencloser.models import QueueItem, RunMode, RunStatus, WriteBackProgress
 from opencloser.slice2.resume import resume_session
 from opencloser.slice2.runner import run_one_crm_item
 from opencloser.state import store
@@ -540,6 +540,185 @@ def test_us4_resume_raises_when_writeback_json_malformed(
             fake=fake,
             mapping=mapping,
         )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6 — T045/T046: mid-run CRM-state conflict detection
+# (spec §Edge Cases "Dataverse queue item changed by a human between claim
+# and write-back")
+# ---------------------------------------------------------------------------
+
+
+def _build_adapter_with_snapshot(*, conn, fake, mapping, snapshot):
+    """Build a DataverseWriteBackAdapter wired with a queue snapshot so
+    `emit_queue_status_update` runs `_detect_queue_conflict` before its PATCH."""
+    from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter
+
+    cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
+    return DataverseWriteBackAdapter(
+        conn=conn,
+        client=fake.client(cfg.retry),
+        translator=MappingTranslator(mapping),
+        task_owners=cfg.task_owners,
+        now_utc_ms=_CLOCK.now_utc_ms,
+        queue_snapshot=snapshot,
+    )
+
+
+def _seed_stub_session(conn: sqlite3.Connection, session_id: str) -> None:
+    """Insert a minimal session row so `emit_queue_status_update`'s
+    failure-recording path can persist a correlation against it."""
+    from opencloser.models import Session, SessionState
+
+    with store.transaction(conn):
+        store.insert_session(
+            conn,
+            Session(
+                session_id=session_id,
+                queue_item_id=_QID,
+                persona_version="alf-appointment-setter@0.1.0",
+                started_at=_CLOCK.now_utc_ms(),
+                state=SessionState.IN_FLIGHT,
+            ),
+        )
+
+
+def test_us4_t045_status_conflict_raises_queue_conflict_error(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """T045 / spec §Edge Cases: the queue row's mapped status field has
+    changed since the runner's snapshot was captured (a human moved the
+    item out of the callable status while the persona was running).
+    `_detect_queue_conflict` MUST raise `QueueConflictError` before the
+    final PATCH; the runner's exception handler then surfaces it as
+    `exit_status="blocked"` (verified by inspection of the runner diff —
+    end-to-end timing manipulation would need a `pre_request_hook` invasive
+    fake change, deferred)."""
+    from opencloser.crm.dataverse.adapter import QueueConflictError
+    from opencloser.models import CallableStatus, QueueStatusUpdatePayload
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    # Drive a successful first run so the fake is populated. The snapshot
+    # we build below will represent state at the SECOND run's load time.
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+
+    # Simulate a human change: the queue row's status moves from `ready`
+    # (the snapshot we captured) to `blocked` (option-set value 3).
+    fake._records["medx_callqueueitem"][0]["medx_callstatus"] = 3
+
+    snapshot = QueueItem(
+        queue_item_id=_QID,
+        facility_name="Sunage ALF",
+        callable_status=CallableStatus.READY,
+        phone_number="+15305551234",
+        attempt_count=0,
+    )
+    adapter = _build_adapter_with_snapshot(
+        conn=tmp_state_db, fake=fake, mapping=mapping, snapshot=snapshot
+    )
+    payload = QueueStatusUpdatePayload(
+        session_id=f"{report.session_id}-conflict-attempt",
+        queue_item_id=_QID,
+        previous_status=CallableStatus.READY,
+        new_status=CallableStatus.READY,
+        transition_reason="conflict-detection-test",
+        transition_at=_CLOCK.now_utc_ms(),
+    )
+    _seed_stub_session(tmp_state_db, payload.session_id)
+
+    pre_patch_count = len([c for e, _id, c in fake.patched if e == "medx_callqueueitem"])
+    with pytest.raises(QueueConflictError) as excinfo:
+        adapter.emit_queue_status_update(payload)
+
+    # Conflict message identifies the divergent field.
+    assert "medx_callstatus" in str(excinfo.value)
+    assert "snapshot expected" in str(excinfo.value)
+    assert any("medx_callstatus" in f for f in excinfo.value.conflict_fields)
+    # SPEC "leave the human-changed values unchanged" — no PATCH was issued.
+    post_patch_count = len([c for e, _id, c in fake.patched if e == "medx_callqueueitem"])
+    assert post_patch_count == pre_patch_count
+
+
+def test_us4_t045_no_conflict_when_status_unchanged(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Negative case — when the queue row matches the snapshot, no
+    conflict is raised; the PATCH proceeds. Guards against false-positive
+    conflict detection."""
+    from opencloser.models import CallableStatus, QueueStatusUpdatePayload
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+
+    # Snapshot matches the fake's current state (READY / status=0).
+    snapshot = QueueItem(
+        queue_item_id=_QID,
+        facility_name="Sunage ALF",
+        callable_status=CallableStatus.READY,
+        phone_number="+15305551234",
+        attempt_count=0,
+    )
+    adapter = _build_adapter_with_snapshot(
+        conn=tmp_state_db, fake=fake, mapping=mapping, snapshot=snapshot
+    )
+    payload = QueueStatusUpdatePayload(
+        session_id=f"{report.session_id}-no-conflict",
+        queue_item_id=_QID,
+        previous_status=CallableStatus.READY,
+        new_status=CallableStatus.COMPLETED,
+        transition_reason="happy-path",
+        transition_at=_CLOCK.now_utc_ms(),
+    )
+    _seed_stub_session(tmp_state_db, payload.session_id)
+    # Should not raise — the snapshot matches the fake's current state.
+    adapter.emit_queue_status_update(payload)
+
+
+def test_us4_t045_queue_item_deleted_raises_conflict(
+    tmp_state_db: sqlite3.Connection, tmp_artifact_dir: Path
+) -> None:
+    """Edge case — the queue row no longer exists in Dataverse between
+    claim and write-back (admin delete, sync removal). The conflict check
+    MUST raise `QueueConflictError` rather than letting the PATCH 404 deep
+    in the client retry loop."""
+    from opencloser.crm.dataverse.adapter import QueueConflictError
+    from opencloser.models import CallableStatus, QueueStatusUpdatePayload
+
+    mapping = load_mapping(_MAPPING_FIXTURE)
+    fake = fake_for_mapping(mapping, _seed())
+
+    report = _run_write_enabled(conn=tmp_state_db, fake=fake, artifact_dir=tmp_artifact_dir)
+    assert report.exit_status == "completed"
+
+    fake._records["medx_callqueueitem"] = []
+
+    snapshot = QueueItem(
+        queue_item_id=_QID,
+        facility_name="Sunage ALF",
+        callable_status=CallableStatus.READY,
+        phone_number="+15305551234",
+        attempt_count=0,
+    )
+    adapter = _build_adapter_with_snapshot(
+        conn=tmp_state_db, fake=fake, mapping=mapping, snapshot=snapshot
+    )
+    payload = QueueStatusUpdatePayload(
+        session_id=f"{report.session_id}-deleted-row",
+        queue_item_id=_QID,
+        previous_status=CallableStatus.READY,
+        new_status=CallableStatus.COMPLETED,
+        transition_reason="deleted-row-test",
+        transition_at=_CLOCK.now_utc_ms(),
+    )
+    _seed_stub_session(tmp_state_db, payload.session_id)
+    with pytest.raises(QueueConflictError, match="no longer exists in Dataverse"):
+        adapter.emit_queue_status_update(payload)
 
 
 @pytest.mark.parametrize(
