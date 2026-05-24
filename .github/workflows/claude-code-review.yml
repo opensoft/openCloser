@@ -31,9 +31,13 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - name: Checkout PR head
+      - name: Checkout PR
         # actions/checkout v4.2.2 — pinned to SHA per SonarCloud supply-chain
         # hotspot rule (unpinned major-version tags can silently move).
+        # The default `pull_request` event checks out the merge commit
+        # (post-merge state), which is what reviewers want to assess —
+        # Copilot PR #10 review suggested switching to head.sha but we
+        # keep the default intentionally.
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
