@@ -47,9 +47,47 @@ write-back operations have completed so a resume run replays only the missing on
 | `last_error` | TEXT | last transient/permanent error summary (no secrets, no CRM contents) |
 | `updated_at` | TEXT NOT NULL | |
 
-State transitions for `run_status`: `in_progress → completed` (all required ops done) ·
-`in_progress → resume_needed` (retry budget exhausted) · `in_progress → blocked`
-(eligibility/metadata block) · `resume_needed → completed` (resume run finishes the rest).
+#### State machine for `run_status` (T050 — addresses CHK068/CHK069)
+
+The four states are mutually exclusive and exhaustive — every persisted `writeback_progress`
+row is in exactly one of them at any instant.
+
+**Mutually exclusive entry criteria**:
+
+- `in_progress` — at least one `emit_*` attempted and **no** terminal event has fired. The
+  only non-terminal state. New-progress placeholder is written at the first emit.
+- `completed` — every required `emit_*` for the session's final disposition completed
+  successfully and `adapter.finalize_progress(..., RunStatus.COMPLETED)` was called.
+  Terminal.
+- `resume_needed` — at least one `emit_*` raised `TransientDataverseError` after the
+  bounded retry budget was exhausted (FR-023); the runner's catch block stamped
+  `flush_pending_failures(failure_run_status=RESUME_NEEDED)`. A later `--resume`
+  invocation routes to `slice2/resume.py`.
+- `blocked` — EITHER `final_disposition=BLOCKED` from eligibility/metadata
+  (`finalize_progress(..., RunStatus.BLOCKED)`), OR a permanent error mid-write-back
+  (`PermanentDataverseError`, `CrmConflictError` from T045 mid-run conflict detection,
+  `MappingError`, `DataverseWriteBackError` other than `TransientDataverseError`). Terminal
+  under normal CLI flow; the T045 conflict variant requires manual reconciliation in
+  Dynamics + a fresh `run-crm` invocation (which creates a NEW session row with its own
+  state machine).
+
+**Allowed transitions and triggering events**:
+
+| From            | To              | Trigger event                                                                                                          |
+|-----------------|-----------------|------------------------------------------------------------------------------------------------------------------------|
+| (new row)       | `in_progress`   | First `emit_*` call writes the new-progress row.                                                                       |
+| `in_progress`   | `completed`     | All required `emit_*` succeeded; `finalize_progress(..., COMPLETED)`.                                                  |
+| `in_progress`   | `resume_needed` | Retry budget exhausted on `TransientDataverseError`; `flush_pending_failures(RESUME_NEEDED)`.                          |
+| `in_progress`   | `blocked`       | `final_disposition=BLOCKED` (eligibility/metadata) → `finalize_progress(..., BLOCKED)`. OR permanent CRM error mid-write-back (`CrmConflictError` per T045, `PermanentDataverseError`, `MappingError`) → `flush_pending_failures(BLOCKED)`. |
+| `resume_needed` | `completed`     | Resume coordinator replayed all missing `emit_*`; `finalize_progress(..., COMPLETED)`.                                 |
+| `resume_needed` | `resume_needed` | Resume replay itself re-exhausted retry budget; `flush_pending_failures(RESUME_NEEDED)` (idempotent self-loop).        |
+| `resume_needed` | `blocked`       | Resume replay hit a permanent error or a re-detected T045 conflict (CHK061); `flush_pending_failures(BLOCKED)`.        |
+| `completed`     | (no transition) | Terminal. Re-invocation returns `no-resume-needed` (FR-021 idempotent re-invocation); the row is never overwritten.    |
+| `blocked`       | (no transition) | Terminal under normal CLI flow. For the T045 conflict variant, manual reconciliation + a fresh `run-crm` creates a NEW session row (the original row is preserved as audit evidence per FR-035). |
+
+The full operator-visible `run_status` → CLI exit-status mapping lives in
+[`contracts/cli-slice2.md`](./contracts/cli-slice2.md#run_status--cli-exit-status-mapping)
+to keep the exit-code contract in one place.
 
 ---
 

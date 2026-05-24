@@ -79,6 +79,209 @@ All non-`completed` statuses are operator-visible per the spec Definitions §"Op
 
 ---
 
+## Write-Back Progress State Machine (T050)
+
+The `writeback_progress.run_status` column ([data-model.md §1](../data-model.md#writeback_progress))
+takes exactly one of four values at any instant. Entry criteria are mutually exclusive and
+exhaustive — every persisted row matches exactly one of the four. The state machine governs
+which run-time path (initial run, resume, or no-op) the CLI takes when re-invoked.
+
+### States — mutually exclusive, exhaustive entry criteria
+
+| `run_status`     | Entry criterion (true only of this state)                                                                                                       |
+|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| `in_progress`   | The session row exists, at least one `emit_*` has been attempted (or the new-progress placeholder was written at first emit), and **no** terminal event has fired. This is the only non-terminal state. |
+| `completed`     | All required `emit_*` for the session's final disposition have completed successfully and `finalize_progress(..., RunStatus.COMPLETED)` has been called. Terminal — no further writes for this session. |
+| `resume_needed` | At least one `emit_*` raised a `TransientDataverseError` after the bounded retry budget was exhausted; `flush_pending_failures(failure_run_status=RESUME_NEEDED)` stamped this row. Re-invocation routes to the resume coordinator (`slice2/resume.py`). |
+| `blocked`       | EITHER eligibility/metadata permanently failed before any CRM write (orchestrator returned `final_disposition=BLOCKED`, runner mapped to this state) OR a permanent CRM error occurred mid-write-back (`PermanentDataverseError` other than `TransientDataverseError`, `CrmConflictError` from T045 mid-run conflict detection, `MappingError`, `DataverseWriteBackError`). Terminal under normal CLI flow — manual operator reconciliation required for the conflict variant. |
+
+### Allowed transitions
+
+```text
+                    ┌──────────────┐
+                    │ in_progress  │ ← initial state for any session that issues at least one emit_*
+                    └──────┬───────┘
+                           │
+            ┌──────────────┼──────────────┬─────────────────┐
+            │              │              │                 │
+            ▼              ▼              ▼                 ▼
+      ┌──────────┐  ┌──────────────┐  ┌─────────┐    (no other targets)
+      │completed │  │resume_needed │  │ blocked │
+      └──────────┘  └──────┬───────┘  └─────────┘
+       (terminal)          │              (terminal under normal CLI flow;
+                           │               operator may reset for conflict
+                           ▼               via manual reconciliation + new run)
+                    ┌──────────────┐
+                    │  completed   │ ← resume-replay success
+                    └──────────────┘
+                           OR
+                    ┌──────────────┐
+                    │   blocked    │ ← conflict re-detected on resume (CHK061)
+                    └──────────────┘
+                           OR
+                    ┌──────────────┐
+                    │resume_needed │ ← replay re-exhausted retry budget (loops)
+                    └──────────────┘
+```
+
+Exhaustive transition table:
+
+| From              | To               | Trigger event                                                                                                                                          |
+|-------------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| (new row)         | `in_progress`    | First `emit_*` call writes the new-progress row.                                                                                                       |
+| `in_progress`     | `completed`      | All required `emit_*` succeeded; runner calls `adapter.finalize_progress(..., COMPLETED)`.                                                              |
+| `in_progress`     | `resume_needed`  | `emit_*` raised `TransientDataverseError` after retry budget exhausted; runner's catch block flushes pending failures with `RESUME_NEEDED`.             |
+| `in_progress`     | `blocked`        | Orchestrator returned `final_disposition=BLOCKED` (eligibility/metadata) → `finalize_progress(..., BLOCKED)`. OR adapter raised `CrmConflictError` / `PermanentDataverseError` → runner stamps `BLOCKED`. |
+| `resume_needed`   | `completed`      | Resume coordinator replayed all missing `emit_*` successfully; calls `finalize_progress(..., COMPLETED)`.                                              |
+| `resume_needed`   | `resume_needed`  | Resume replay itself re-exhausted retry budget; `flush_pending_failures(RESUME_NEEDED)` stamps the row again (idempotent, fires another resume window). |
+| `resume_needed`   | `blocked`        | Resume replay hit a permanent error (`PermanentDataverseError`, `CrmConflictError` on resume per CHK061, `MappingError`). Escalates to permanent terminal. |
+| `completed`       | (no transition)  | Re-invocation returns `no-resume-needed` (FR-021 idempotent re-invocation); the row is never overwritten.                                              |
+| `blocked`         | (no transition)  | Re-invocation returns `blocked` again with the original `block_reason`. For the T045 conflict variant: manual reconciliation in Dynamics + a fresh `run-crm` invocation (not `--resume`) creates a NEW session row with its own state machine. |
+
+### `run_status` → CLI exit-status mapping
+
+| `run_status`     | CLI exit-status (`run-crm` or `--resume`)                                                                                              |
+|------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `in_progress`    | Not surfaced as a terminal exit (a `run-crm` that crashes mid-flight leaves this state behind; a `--resume` against it returns `failed` per `resume.py` "refuse to race"). |
+| `completed`      | `completed` (exit 0). Re-invocation: `no-resume-needed` (exit 0).                                                                       |
+| `resume_needed`  | `resume_needed` (exit 2). Re-invocation routes to `slice2/resume.py`.                                                                  |
+| `blocked`        | `blocked` (exit 1). The run-report's `block_reason` field disambiguates the variant (eligibility/metadata vs T045 conflict_detected).   |
+
+### Operator-visible distinction (CHK052)
+
+Every state surfaces an operator-visible label via the run report's `message` and the
+process exit status. Specifically:
+
+- `in_progress` rows are not normally observed because the runner always transitions out
+  before returning. If observed (orphan from a crash), `--resume` returns `failed` with the
+  message `session ... is in 'in_progress' — refuse to replay rather than racing`.
+- `completed` surfaces as exit code 0 with `message="..."` confirming the loop finished.
+- `resume_needed` surfaces as exit code 2 with `message="dataverse write failed: ..."` and
+  the resume invocation message lists which operations were replayed.
+- `blocked` surfaces as exit code 1 with `message` carrying either the eligibility/metadata
+  block reason OR `conflict_detected: queue item ..., conflicting fields: ...` (T045).
+  The two variants are distinguishable by the `conflict_detected` prefix.
+
+---
+
+## Run Report (T049 — addresses CHK046-CHK049)
+
+The **run report** is the runner's structured outcome record. Its canonical Python
+representation is `CrmRunReport` (a dataclass in `slice2/runner.py`); its on-disk
+manifestation today is the existing per-session artifacts
+([`session-result.json`](#cross-artifact-consistency-chk049), `writeback.json`,
+`task.json`, the `crm_correlations`/`writeback_progress` SQLite rows) plus the CLI's
+stdout serialization of the dataclass on exit. Future operator tooling MAY persist the
+dataclass directly as `run-report.json` under the session's artifact directory; doing so
+MUST conform to the JSON shape below.
+
+### Required content (spec §Constitution Alignment §Auditability)
+
+Every processed Dataverse queue item MUST produce a traceable record carrying:
+
+1. **Session ID** — the stable identifier linking every artifact, every Dataverse
+   correlation row, and every log line for this run.
+2. **Eligibility decision** — the orchestrator's `EligibilityDecision` (allow / blocked +
+   reason codes). Carried in the Slice 1 `session-result.json` as the
+   `final_disposition` + `blocked_reason` fields.
+3. **Mock provider call ID** — populated only when a call was placed (no-callable-item,
+   blocked, and dry-run-without-call paths leave this absent).
+4. **Persona version** — the `alf-appointment-setter@<semver>` identifier the persona
+   contract supplies on every emit_* payload.
+5. **Started / ended timestamps** — ISO 8601 UTC millisecond strings matching the
+   `UtcMs` model type (`YYYY-MM-DDTHH:MM:SS.sssZ`); identical format across every
+   artifact for grep-friendly correlation.
+6. **Final disposition** — one of the 11 dispositions enumerated by FR-013.
+7. **CRM correlation identifiers** — the `crm_correlations` rows' `idempotency_key` +
+   `dataverse_record_id` per `record_kind`. Present only in write-enabled mode.
+
+### JSON shape
+
+```jsonc
+{
+  "schema_version": "slice2-run-report-v1",
+  "exit_status": "completed | blocked | no-callable-item | resume_needed | failed",
+  "session_id": "ses_2026-05-22T19-00-00Z_q-test-0001",  // null when no session was created
+  "queue_item_id": "22222222-2222-2222-2222-222222222222",  // null only on hard pre-claim failures
+  "final_disposition": "interested_callback_requested",  // null when no call was placed
+  "started_at": "2026-05-22T19:00:00.000Z",
+  "ended_at": "2026-05-22T19:00:12.345Z",
+  "persona_version": "alf-appointment-setter@0.1.0",
+  "mock_provider_call_id": "call_2026-05-22_q-test-0001",  // null when no call was placed
+  "eligibility_decision": {
+    "allowed": true,
+    "blocked_reason": null
+  },
+  "metadata_report": {                       // FR-001 verify() report
+    "ok": true,
+    "missing": [],
+    "drift": [],
+    "checked_at": "2026-05-22T19:00:00.500Z"
+  },
+  "warnings": [                               // FR-034 data-quality warnings (any mode)
+    {"code": "non_e164_phone", "field": "queue.phone", "message": "..."}
+  ],
+  "message": "completed",                     // operator-visible summary; for `blocked` carries
+                                              // `conflict_detected: ...` or the eligibility/metadata reason
+  "block_reason": null,                       // populated for `blocked` exits: `eligibility | metadata | conflict_detected`
+  "artifact_dir": "/var/openCloser/artifacts/ses_2026-05-22T19-00-00Z_q-test-0001",
+  "run_mode": "write_enabled | dry_run",
+  "crm_correlations": [                       // write-enabled ONLY (see field-set table below)
+    {
+      "record_kind": "phone_call_activity",
+      "idempotency_key": "ses_2026-05-22T19-00-00Z_q-test-0001",
+      "dataverse_record_id": "00000000-0000-0000-0000-000000000001",
+      "write_status": "confirmed"
+    },
+    {"record_kind": "queue_status", "idempotency_key": "ses_...", "dataverse_record_id": "22222222-...", "write_status": "confirmed"},
+    {"record_kind": "task",         "idempotency_key": "ses_...", "dataverse_record_id": "00000000-...000002", "write_status": "confirmed"}
+  ],
+  "writeback_progress": {                     // write-enabled ONLY
+    "phone_call_activity_done": true,
+    "queue_status_update_done": true,
+    "task_done": true,
+    "run_status": "completed",
+    "last_error": null
+  }
+}
+```
+
+### Dry-run vs write-enabled field set (CHK048)
+
+| Field                                         | Dry-run | Write-enabled |
+|-----------------------------------------------|:-------:|:-------------:|
+| `schema_version`, `exit_status`, `session_id`, `queue_item_id`, `started_at`, `ended_at` | ✓ | ✓ |
+| `final_disposition`, `persona_version`, `mock_provider_call_id`, `eligibility_decision`  | ✓ | ✓ |
+| `metadata_report`                              | ✓ (write-enabled may fail; dry-run tolerates per `_is_dry_run_tolerable_verify_failure`) | ✓ |
+| `warnings`, `message`, `block_reason`, `artifact_dir` | ✓ | ✓ |
+| `run_mode`                                     | ✓ (`"dry_run"`) | ✓ (`"write_enabled"`) |
+| `crm_correlations`                             | absent (no CRM writes) | ✓ |
+| `writeback_progress`                           | absent (no resume ledger row written) | ✓ |
+
+A missing field in dry-run is therefore not a defect — operators inspecting the report can
+distinguish the two modes by the presence/absence of `crm_correlations` /
+`writeback_progress`, or directly via `run_mode`.
+
+### Cross-artifact consistency (CHK049)
+
+The same `session_id` MUST appear in every artifact this run produces, in every Dataverse
+record stamped via the idempotency key, and in every persisted SQLite row for the session:
+
+| Artifact                     | session-id field            | correlation-id field                  | timestamp format |
+|------------------------------|-----------------------------|---------------------------------------|------------------|
+| Run report (this contract)   | `session_id`                | `crm_correlations[].dataverse_record_id` | ISO ms UTC `YYYY-MM-DDTHH:MM:SS.sssZ` |
+| `session-result.json` (FR-014) | `session_id`              | n/a (Slice 1 artifact)                | ISO ms UTC                         |
+| `writeback.json` (Slice 1)   | each payload's `session_id` | implicit (Dataverse records carry the idempotency key) | ISO ms UTC          |
+| `crm_correlations` row       | `session_id`                | `dataverse_record_id`                 | `created_at` / `updated_at` ISO ms UTC |
+| `writeback_progress` row     | `session_id`                | n/a (linkage is via session_id)       | `updated_at` ISO ms UTC            |
+| Dataverse record (PCA, Task) | `medx_idempotencykey` = session_id | the record's primary id        | n/a (Dataverse-owned)               |
+
+Implementation pointer: `CrmRunReport` is defined at `src/opencloser/slice2/runner.py` and
+its docstring links back to this contract; any future on-disk serializer
+(e.g. `write_run_report(...)` in `artifacts/writer.py`) MUST emit the shape above.
+
+---
+
 ## Dependencies
 
 - **Allowed**: `opencloser.slice2.*`, `opencloser.core.orchestrator` (call only, unchanged),

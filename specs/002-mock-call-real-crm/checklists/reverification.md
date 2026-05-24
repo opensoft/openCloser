@@ -84,12 +84,12 @@ the implementation.
 ## Cross-Cutting: Observability (previously implicit)
 
 - [X] CHK046 Does the spec specify the minimum required content of the local run report — session ID, eligibility decision, mock provider call ID, persona version, started/ended timestamps, final disposition, CRM correlation identifiers per §Constitution Alignment §Auditability? [Completeness, Spec §Constitution Alignment, Gap] → Resolved: spec §Constitution Alignment §Auditability enumerates all seven fields. T049 will codify as JSON schema in contracts/cli-slice2.md.
-- [ ] CHK047 Does the spec specify the format or schema of the run report (JSON / TOML / text) so a downstream tool or operator can parse it deterministically? [Clarity, Gap] → Pending T049 (Phase 9). No format declared today.
-- [ ] CHK048 Does the spec specify which run-report fields are present in dry-run vs write-enabled (e.g., "Dataverse correlation IDs" exist only in write-enabled), so a missing field in dry-run is not mistaken for a defect? [Coverage, Gap] → Pending T049 (Phase 9). Field-set distinction not yet documented.
-- [ ] CHK049 Are observability requirements consistent across the run report, planned write-back artifacts, and write-back progress records — same session-ID linkage, same correlation-ID wording, same timestamps? [Consistency, Gap] → Pending T049 (Phase 9). Cross-artifact consistency not yet documented.
+- [X] CHK047 Does the spec specify the format or schema of the run report (JSON / TOML / text) so a downstream tool or operator can parse it deterministically? [Clarity, Gap] → Resolved 2026-05-24 (T049): `contracts/cli-slice2.md` §"Run Report" documents the JSON schema (`schema_version: "slice2-run-report-v1"`) with every required field typed.
+- [X] CHK048 Does the spec specify which run-report fields are present in dry-run vs write-enabled (e.g., "Dataverse correlation IDs" exist only in write-enabled), so a missing field in dry-run is not mistaken for a defect? [Coverage, Gap] → Resolved 2026-05-24 (T049): `contracts/cli-slice2.md` §"Dry-run vs write-enabled field set" enumerates per-mode presence — `crm_correlations` and `writeback_progress` are write-enabled only; `run_mode` distinguishes the two.
+- [X] CHK049 Are observability requirements consistent across the run report, planned write-back artifacts, and write-back progress records — same session-ID linkage, same correlation-ID wording, same timestamps? [Consistency, Gap] → Resolved 2026-05-24 (T049): `contracts/cli-slice2.md` §"Cross-artifact consistency" tabulates the session_id field name and ISO ms UTC timestamp format across all artifacts.
 - [X] CHK050 Does the spec specify any log-line requirements (level, structured fields, redaction rules) distinct from the run-report artifact, or are logs intentionally out of scope and the run-report is the sole observability surface? [Coverage, Gap] → Resolved 2026-05-24: spec §Assumptions now has an "Out-of-scope: structured log emission" bullet declaring this out of Slice 2 scope; the run-report artifact (FR-033) is the sole structured observability surface for Slice 2.
 - [X] CHK051 Are requirements defined for *correlating* a Slice 2 session ID with the corresponding Dataverse Phone Call activity / Task / queue update so an operator can navigate from one to the other? [Completeness, Spec §FR-024, Gap] → Resolved: FR-024 + data-model §1 `crm_correlations` (session_id ↔ dataverse_record_id, keyed by record_kind) + idempotency-key field stamped on the Dataverse record itself.
-- [ ] CHK052 Does the spec specify operator-visible distinction between the four resume states (`in_progress` / `completed` / `resume_needed` / `blocked`) in the run-report or progress artifact? [Clarity, Spec §Key Entities §Write-Back Progress Ledger] → Pending T050 (Phase 9). data-model §1 names the four states and lists transitions but doesn't specify the operator-visible surface for each.
+- [X] CHK052 Does the spec specify operator-visible distinction between the four resume states (`in_progress` / `completed` / `resume_needed` / `blocked`) in the run-report or progress artifact? [Clarity, Spec §Key Entities §Write-Back Progress Ledger] → Resolved 2026-05-24 (T050): `contracts/cli-slice2.md` §"Operator-visible distinction (CHK052)" enumerates the surface per state (CLI message + exit code + run-report `block_reason` field).
 
 ## Cross-Cutting: Testing Strategy
 
@@ -117,8 +117,8 @@ the implementation.
 
 ## Depth: Release-Gate Items (resilience, rollback, partial failure)
 
-- [ ] CHK068 Are the four resume states (`in_progress` / `completed` / `resume_needed` / `blocked`) defined with mutually exclusive, exhaustive criteria so a session is always in exactly one state? [Completeness, Spec §Key Entities §Write-Back Progress Ledger] → Pending T050 (Phase 9). data-model.md §1 names the four states and lists transitions but does NOT enumerate mutually exclusive entry criteria for each state.
-- [ ] CHK069 Are state-transition requirements specified — which states can transition to which, what events cause each transition (transient error → resume_needed; conflict stop → blocked; etc.)? [Clarity, Gap] → Pending T050 (Phase 9). data-model.md §1 lists transitions briefly but with parenthetical events only ("all required ops done", "retry budget exhausted") — needs full enumeration including conflict-stop → blocked.
+- [X] CHK068 Are the four resume states (`in_progress` / `completed` / `resume_needed` / `blocked`) defined with mutually exclusive, exhaustive criteria so a session is always in exactly one state? [Completeness, Spec §Key Entities §Write-Back Progress Ledger] → Resolved 2026-05-24 (T050): `data-model.md` §1 "State machine for `run_status`" enumerates mutually exclusive entry criteria per state; `contracts/cli-slice2.md` §"Write-Back Progress State Machine" mirrors the table.
+- [X] CHK069 Are state-transition requirements specified — which states can transition to which, what events cause each transition (transient error → resume_needed; conflict stop → blocked; etc.)? [Clarity, Gap] → Resolved 2026-05-24 (T050): `data-model.md` §1 and `contracts/cli-slice2.md` both contain the exhaustive transition table with triggering events (transient exhaustion → `resume_needed`, T045 conflict-stop / `CrmConflictError` → `blocked`, final emit success → `completed`, FR-021 idempotent re-invocation = no transition).
 - [X] CHK070 Does the spec specify the rollback / cleanup expectations for partial failures — e.g., if the Phone Call activity is created but the queue-status write fails, what's the operator-visible state and what's the resumption story? [Coverage, Spec §Edge Cases, FR-023] → Resolved: spec §Edge Cases line 144 "Transient Dataverse error mid-write-back" + FR-023 + cli-slice2.md "Behavior — resume" together specify: no rollback (Dataverse writes accumulate); state = `resume_needed`; later re-invocation completes only missing writes via the resume coordinator.
 - [X] CHK071 Are requirements defined for the demo-record cleanup path beyond the quickstart's manual cleanup — e.g., is there a "demo-mode rollback" CLI subcommand requirement, or is manual cleanup the only supported path? [Coverage, Spec §Assumptions §Demo posture, Gap] → Resolved: spec §Assumptions §Demo posture: "documented manual cleanup/rollback for the demo record". Manual is the only supported path; no CLI subcommand is required or implied.
 - [X] CHK072 Are requirements consistent on what happens to local artifacts when a CRM record is manually rolled back by the operator (demo cleanup) — do the local artifacts need a corresponding sweep, or are they retained as audit evidence? [Consistency, FR-035, Gap] → Resolved 2026-05-24: FR-035 now states "Manual CRM cleanup (e.g., deleting the demo Phone Call activity / Task / queue row after a write-enabled demo) does NOT sweep local audit artifacts; the `writeback_progress` row, `crm_correlations` rows, planned/actual write-back payloads, and run report all remain as audit evidence."
@@ -127,26 +127,24 @@ the implementation.
 
 - Requirements-quality audit only — every item asks whether the spec/plan/tasks *say* the right thing, not whether code behaves.
 - This file is a **re-verification checklist** scoped to the changes introduced by commit `45a2356` (post-`/speckit-analyze` remediation). The 12 pre-2026-05-22 domain checklists remain authoritative for their domains; this file augments them with (a) per-checklist alignment items, (b) new-scope items, and (c) previously-implicit cross-cutting items (observability, testing strategy, conflict detection).
-- **Result**: 72 items, **66 resolved / 6 open** after the 2026-05-24 audit + remediation pass. The 6 open items are all owned by scheduled Phase 9 tasks (T049 / T050).
+- **Result**: 72 items, **72 resolved / 0 open** after the 2026-05-24 audit + remediation pass and the subsequent T049/T050 docs (same date).
 - Domains intentionally skipped because they are genuinely inapplicable to a CLI-only Slice 2: `ux`, `accessibility` (no UI surface), `deployment` / `rollback at the infrastructure level` (no service deployment — local CLI only), `api` (no public HTTP API — the only HTTP surface is the Dataverse client, which is covered by `crm-integration.md`).
 
 ---
 
 ## Audit Result — 2026-05-24
 
-**66 resolved · 6 open** (72 total). The 6 open items are owned by scheduled Phase 9 tasks and will close as those tasks complete.
+**72 resolved · 0 open** (72 total). The 6 items previously pending T049/T050 closed when those Phase 9 docs landed (same date).
 
-### Open items, by remediation owner
+### Items closed by T049 (3 items)
+- CHK047 — run-report format/schema declaration → `contracts/cli-slice2.md` §"Run Report" JSON shape.
+- CHK048 — dry-run vs write-enabled field set → `contracts/cli-slice2.md` §"Dry-run vs write-enabled field set" table.
+- CHK049 — cross-artifact session-ID / correlation-ID / timestamp consistency → `contracts/cli-slice2.md` §"Cross-artifact consistency" table.
 
-**Pending T049 — run-report schema (Phase 9, 3 items)**
-- CHK047 — run-report format/schema declaration
-- CHK048 — dry-run vs write-enabled field set
-- CHK049 — cross-artifact session-ID/correlation-ID/timestamp consistency
-
-**Pending T050 — write-back state machine (Phase 9, 3 items)**
-- CHK052 — operator-visible distinction between the 4 resume states in run-report
-- CHK068 — mutually exclusive, exhaustive entry criteria for each state
-- CHK069 — full transition event enumeration
+### Items closed by T050 (3 items)
+- CHK052 — operator-visible distinction between the 4 resume states → `contracts/cli-slice2.md` §"Operator-visible distinction (CHK052)".
+- CHK068 — mutually exclusive, exhaustive entry criteria for each state → `data-model.md` §1 "State machine for `run_status`" + the parallel table in `contracts/cli-slice2.md`.
+- CHK069 — full transition event enumeration → exhaustive transition table in `data-model.md` §1 and `contracts/cli-slice2.md`.
 
 ### Inline edits completed in this remediation pass
 

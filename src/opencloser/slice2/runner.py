@@ -86,7 +86,20 @@ _E164_RE = re.compile(r"^\+[1-9]\d{1,14}$")
 
 @dataclass
 class CrmRunReport:
-    """The runner's exit report — superset of the orchestrator `RunReport`."""
+    """The runner's exit report — superset of the orchestrator `RunReport`.
+
+    Canonical Python representation of the Slice 2 **run report** (T049). The
+    field set, JSON shape, dry-run vs write-enabled distinction, and cross-
+    artifact session-ID / correlation-ID consistency contract are documented in
+    ``specs/002-mock-call-real-crm/contracts/cli-slice2.md`` under "Run Report".
+
+    The dataclass is currently returned to the CLI for stdout formatting and is
+    NOT yet persisted to disk on its own; the existing per-session artifacts
+    (`session-result.json`, `writeback.json`, the SQLite `crm_correlations` /
+    `writeback_progress` rows) together carry the same data. Any future on-disk
+    serializer (e.g. `run-report.json`) MUST conform to the JSON shape in that
+    contract.
+    """
 
     exit_status: ExitStatus
     session_id: str | None = None
