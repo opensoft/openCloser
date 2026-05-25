@@ -45,6 +45,26 @@ Policy and retention mode come from `config/slice2.toml [redaction]`. The layer 
 **default-on**: turning redaction off requires an explicit `policy = "noop"` — it cannot be
 silently disabled (spec §Assumptions §"Redaction default").
 
+> **Two layers, two defaults — do not conflate (added by /speckit-analyze I3, 2026-05-25):**
+>
+> 1. The **Slice 2 config-driven layer** built by the runner's readiness gate via
+>    `RedactionLayer.from_config(slice2_config.redaction)` is what "default-on" refers to.
+>    The Slice 2 config defaults (`policy = "regex"`, retention `"full"`, patterns =
+>    `_BUILTIN_REDACTION_PATTERNS`) ensure transcripts are redacted whenever the Slice 2
+>    runner is the caller. This is the path the spec/plan/research all describe.
+> 2. The **writer's silent fallback** (`artifacts/writer.py:_DEFAULT_REDACTION_LAYER`) is
+>    a **`NoOpPolicy + "full"` retention** layer (`RedactionLayer.noop()`), used only
+>    when a direct caller invokes `write_session_artifacts` *without* an explicit
+>    `redaction_layer=` kwarg. This preserves Slice 1's pre-Slice-2 behavior (Slice 1
+>    deferred redaction to Slice 2 entirely), so Slice 1 tests and callers that predate
+>    this contract are NOT silently opted into redaction they never asked for. Closed
+>    Copilot PR #3 LOW on commit `0a5b3b7`; the unit test
+>    `tests/unit/test_artifacts_writer.py::test_writer_without_explicit_layer_does_not_redact`
+>    pins the no-PII-leak property.
+>
+> Slice 2 callers MUST pass the configured layer explicitly (the runner already does so via
+> readiness). The writer's silent fallback is a backstop, not the Slice 2 default.
+
 The layer is pure with respect to openCloser state — its only effect is the returned string
 and the writer's retention decision.
 

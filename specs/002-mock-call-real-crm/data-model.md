@@ -176,7 +176,13 @@ review   = "<dataverse owner/team id>"
 [redaction]                       # FR-028..FR-030
 policy = "regex"                  # "regex" (default) | "noop"
 retention = "full"                # "full" | "summary-only"
-patterns = ["\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b", "[\\w.+-]+@[\\w-]+\\.[\\w.-]+"]
+# `patterns` is intentionally omitted: defaults live in
+# `opencloser.models._BUILTIN_REDACTION_PATTERNS` (phone + email) and are
+# applied by `RedactionPolicyConfig`'s default_factory. Keeping the list in
+# code as the single source of truth avoids the TOML-vs-code drift that the
+# inline example previously caused (Copilot PR #3 LOW, closed by commit
+# `0a5b3b7`). Operators wanting custom patterns add them explicitly:
+#   patterns = ["\\bMRN-\\d{6}\\b", ...]
 ```
 
 Secrets are **never** in this file — `DATAVERSE_TENANT_ID`, `DATAVERSE_CLIENT_ID`,
