@@ -16,7 +16,7 @@ clarity, consistency, and coverage. Tests the spec, not the implementation.
 
 ## Transcript Redaction
 
-- [x] CHK004 Are the default redaction patterns ("configured sensitive patterns") defined, or required to be defined, somewhere authoritative? [Gap, Spec §FR-028] — Resolved: data-model §3 + research §8 (default `[redaction] patterns` in `slice2.toml` — phone-number and email regexes).
+- [x] CHK004 Are the default redaction patterns ("configured sensitive patterns") defined, or required to be defined, somewhere authoritative? [Gap, Spec §FR-028] — Resolved: defaults live in `opencloser.models._BUILTIN_REDACTION_PATTERNS` (phone-number + email regexes) and are applied by `RedactionPolicyConfig`'s default_factory. `config/slice2.toml [redaction]` intentionally omits the `patterns` block so the code-defined defaults are the single source of truth (closed Copilot PR #3 LOW in commit `0a5b3b7`); see data-model §3 + contracts/redaction-layer.md for the two-layer hierarchy (config-driven vs. writer fallback).
 - [x] CHK005 Is the redaction ordering ("before any transcript artifact is written to disk") stated unambiguously? [Clarity, Spec §FR-028] — Resolved: FR-028 + contracts/redaction-layer.md.
 - [x] CHK006 Is the default policy ([REDACTED] replacement) specified as default-on for Slice 2? [Completeness, Spec §FR-028] — Resolved: FR-028 + §Assumptions §Redaction default + contracts/redaction-layer.md.
 - [x] CHK007 Is summary-only retention specified with its exact config trigger and the resulting artifact set? [Completeness, Spec §FR-030] — Resolved: FR-030 + data-model §3 (`retention = "summary-only"`) + contracts/redaction-layer.md.
