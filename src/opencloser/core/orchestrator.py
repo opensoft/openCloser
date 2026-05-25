@@ -130,8 +130,12 @@ def process_one_queue_item(
     (``contracts/redaction-layer.md``; FR-028..FR-030). Slice 2 callers should
     build one from ``Slice2Config.redaction`` via ``RedactionLayer.from_config``
     so operator-configured patterns / policy / retention take effect. Slice 1
-    callers may omit it; the artifact writer falls back to a default-on layer
-    so PII never lands on disk unredacted by accident.
+    callers may omit it; the artifact writer's silent fallback is a NO-OP
+    layer (``RedactionLayer.noop()``) — Slice 1 deferred redaction to Slice 2
+    entirely, so omitting the kwarg preserves that pre-Slice-2 behavior and
+    transcripts are written unredacted. Slice 2 callers MUST pass the layer
+    explicitly to get redaction (Copilot PR #3 LOW, closed by commit
+    `0a5b3b7`; see also `contracts/redaction-layer.md` §"Two layers").
     """
     clock = clock or SystemClock()
     start_ts_monotonic = time.monotonic()

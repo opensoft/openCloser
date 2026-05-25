@@ -44,8 +44,11 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.crm",
         # contracts/redaction-layer.md: the orchestrator accepts a configured
         # RedactionLayer and plumbs it through to the artifact writer
-        # (FR-028..FR-030). Slice 1 callers omit it and get the writer's
-        # cached default-on layer.
+        # (FR-028..FR-030). Slice 2 callers MUST pass the layer explicitly to
+        # get redaction; Slice 1 callers omit it and get the writer's cached
+        # NO-OP fallback (`RedactionLayer.noop()`) — preserving Slice 1's
+        # pre-Slice-2 unredacted behavior (Copilot PR #3 LOW, closed by
+        # commit `0a5b3b7`).
         "opencloser.redaction",
         "opencloser.core",
     },
