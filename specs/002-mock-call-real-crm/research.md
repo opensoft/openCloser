@@ -172,6 +172,6 @@ resolved the behavioral unknowns; no `NEEDS CLARIFICATION` remained entering Pha
 | Config | `config/slice2.toml` (non-secret) + env-var secrets |
 | Retry / resume | inline bounded retry; resume coordinator replays persisted payloads |
 | Idempotency anchor | session ID stamped on a verified custom column + pre-query |
-| Redaction | `RedactionLayer` at the artifact-writer boundary, default-on |
+| Redaction | `RedactionLayer` at the artifact-writer boundary; default-on for Slice 2 callers (via `RedactionLayer.from_config` in readiness), no-op fallback for direct Slice 1 callers — see `contracts/redaction-layer.md` §"Two layers" |
 | Fixture validation | `validate_fixture()` inside `place_call` |
 | Testing | in-process Dataverse fake; contract + integration tests |
