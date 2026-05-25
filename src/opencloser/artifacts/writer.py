@@ -3,6 +3,51 @@
 Writes deterministic, sorted-keys, 2-space-indented, UTF-8, LF-ended JSON. Atomic via
 ``tempfile + os.replace`` so duplicate-event redelivery (FR-019) can re-emit identical
 bytes without races.
+
+**Retention contract (FR-035, T041)**:
+
+- Local audit artifacts are retained for **at least 90 days** by default; deployments
+  MAY configure longer retention but MUST NOT configure shorter.
+- The application **MUST NOT auto-delete** any audit artifact. Pruning is a manual
+  operator action — neither this writer nor any other module schedules deletion of
+  session artifacts, run reports, or any file under ``<artifact_root>/<session_id>/``.
+- The one exception is the same-session transcript sweep
+  (``(session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)``), which fires
+  on every write whenever NO transcript file will be written for this run. Two
+  cases reach this branch:
+
+  1. **FR-030 summary-only retention** — Slice 2 callers configured
+     ``retention = "summary-only"`` so the layer suppressed the transcript
+     contents; any stale transcript from an earlier run of the same session
+     MUST be deleted so PII cannot persist past a policy change.
+  2. **No transcript provided by the caller** — e.g. the orchestrator path
+     ran without a transcript text (Slice 1 default, blocked sessions, etc.).
+     The sweep removes any stale transcript from an earlier run of the same
+     session id so ``session-result.json``'s ``transcript_pointer`` cannot
+     dangle.
+
+  This is not an auto-deletion of audit data — it is a per-session privacy
+  enforcement at write time, scoped to a single ``<artifact_root>/<session_id>/``
+  directory, and ``session-result.json`` clears its ``transcript_pointer`` to
+  match. Note: the unlink-then-write order is intentional and privacy-safe —
+  if ``_write_json_atomic(session_result_path, ...)`` fails after the unlink,
+  the worst case is a session-result.json from a prior run advertising a
+  now-deleted transcript file (a dangling pointer the operator can spot); the
+  next successful run resyncs the pointer. Copilot PR #3 LOW: previously the
+  docstring named only case (1); the unlink call itself has always handled
+  both, so the docstring is being widened to match the implementation
+  (Pass 3 / T041 retention-contract AST test counts the literal
+  ``.unlink(`` call against this same documented expectation).
+- Secrets MUST NOT be retained in any local audit artifact (FR-005, FR-035). This is
+  asserted by ``tests/contract/test_no_secrets_in_artifacts.py`` (T047), which runs
+  a write-enabled flow with distinctive secret env values and greps every produced
+  artifact for those values.
+- Boundary contract (SC-010 / T040): vendor-specific Dataverse field names MUST NOT
+  appear in this module. ``tests/contract/test_boundary_isolation.py`` enforces the
+  property across the orchestrator/eligibility/transport/persona boundary modules;
+  the writer is permitted to know about ``writeback.json`` / ``task.json`` filenames
+  because those carry the Slice 1 CONCEPTUAL contract payloads, not vendor logical
+  names.
 """
 
 from __future__ import annotations
@@ -23,6 +68,7 @@ from opencloser.models import (
     TaskPayload,
     WriteBack,
 )
+from opencloser.redaction.layer import RedactionLayer
 
 _TRANSCRIPT_FILENAME = "transcript.txt"
 _SESSION_RESULT_FILENAME = "session-result.json"
@@ -30,6 +76,17 @@ _WRITEBACK_FILENAME = "writeback.json"
 _TASK_FILENAME = "task.json"
 _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
+_DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
+
+# Cached so repeated calls without an explicit layer don't re-compile a noop on
+# every session write. Copilot PR #3 LOW: this was previously
+# `RedactionLayer.default()` (regex policy, built-in patterns), which silently
+# redacted transcripts for Slice 1 callers that don't yet configure a
+# Slice 2 `[redaction]` policy — a behavior change vs. the Slice 1 spec
+# (which deferred redaction to Slice 2). The implicit fallback is now a
+# no-op layer; Slice 2 callers MUST pass the configured layer via the
+# `redaction_layer=` kwarg (the runner's readiness gate already does this).
+_DEFAULT_REDACTION_LAYER = RedactionLayer.noop()
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +112,50 @@ def write_session_artifacts(
     transcript_text: str | None = None,
     conflicting_events: list[ConflictingEventAuditRecord] | None = None,
     task: TaskPayload | None = None,
+    redaction_layer: RedactionLayer | None = None,
 ) -> ArtifactPaths:
-    """Write all per-session artifacts into ``<artifact_root>/<session_id>/`` atomically."""
+    """Write all per-session artifacts into ``<artifact_root>/<session_id>/``.
+
+    Each individual file is written atomically (tempfile + ``os.replace``); the set
+    of artifacts as a whole is not transactional. Atomicity is per-file, which is
+    what duplicate-event redelivery (FR-019) and idempotent re-emission need.
+
+    Transcript text always passes through the configured ``RedactionLayer`` before
+    disk write (FR-028..FR-030). When the layer's retention mode is
+    ``"summary-only"`` — or no transcript text was supplied — no transcript file
+    is written; the exported ``transcript_pointer`` is cleared so the
+    session-result never advertises a file that does not exist. Under
+    ``"summary-only"`` retention, any pre-existing transcript file from an
+    earlier run is removed so idempotent re-emit cannot leave PII on disk.
+
+    See :func:`write_dry_run_marker` for the FR-031 US2 dry-run signal — the
+    orchestrator's ``write_session_artifacts`` call is unchanged in dry-run
+    (the ``writeback.json`` / ``task.json`` it writes happen to contain planned
+    content because the adapter captured planned payloads), and the runner
+    calls :func:`write_dry_run_marker` separately after
+    ``process_one_queue_item`` returns to flag the session as dry-run.
+    """
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Decide retention BEFORE writing session-result, so the exported pointer never
+    # advertises a transcript file that the writer is about to skip
+    # (contracts/redaction-layer.md §Behavior; FR-030).
+    effective_layer = redaction_layer or _DEFAULT_REDACTION_LAYER
+    summary_only = (
+        transcript_text is not None and effective_layer.retention_mode() == "summary-only"
+    )
+    transcript_will_be_written = transcript_text is not None and not summary_only
+    if not transcript_will_be_written and normalized_result.transcript_pointer is not None:
+        normalized_result = normalized_result.model_copy(update={"transcript_pointer": None})
+
+    # FR-030 + FR-019: when no transcript will be written (summary-only retention OR no
+    # transcript_text supplied), remove any transcript file from an earlier run BEFORE
+    # writing session-result.json. If the unlink fails (locked file / permissions), we
+    # raise here without having advertised a null transcript_pointer that would leave
+    # the on-disk state both privacy-inconsistent and harder to detect.
+    if not transcript_will_be_written:
+        (session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)
 
     session_result_path = session_dir / _SESSION_RESULT_FILENAME
     _write_json_atomic(session_result_path, normalized_result)
@@ -72,9 +169,9 @@ def write_session_artifacts(
         _write_json_atomic(task_path, task)
 
     transcript_path: Path | None = None
-    if transcript_text is not None:
+    if transcript_will_be_written:
         transcript_path = session_dir / _TRANSCRIPT_FILENAME
-        _write_text_atomic(transcript_path, transcript_text)
+        _write_text_atomic(transcript_path, effective_layer.redact(transcript_text))
 
     eligibility_path = session_dir / _ELIGIBILITY_DECISION_FILENAME
     _write_json_atomic(eligibility_path, eligibility_decision)
@@ -110,6 +207,38 @@ class _ConflictingEventsArtifact(BaseModel):
     schema_version: str
     session_id: str
     events: list[ConflictingEventAuditRecord]
+
+
+class _DryRunMarker(BaseModel):
+    """Container for dry-run-marker.json (FR-031 US2 dry-run artifact marker)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "slice2-dry-run-marker-v1"
+    session_id: str
+    note: str = (
+        "This session ran in dry-run mode (FR-031). The writeback.json and task.json "
+        "files in this directory contain what a write-enabled run WOULD have sent to "
+        "Dataverse; zero create or update operations were issued against the CRM."
+    )
+
+
+def write_dry_run_marker(*, artifact_root: str | Path, session_id: str) -> Path:
+    """Write the FR-031 US2 dry-run marker file alongside the session artifacts.
+
+    The Slice 1 orchestrator is unchanged (FR-014), so it writes
+    ``writeback.json`` / ``task.json`` with the same filenames in both modes.
+    In dry-run those files contain the payloads the adapter CAPTURED (no
+    Dataverse writes were issued). This marker makes the dry-run nature
+    inspectable at a glance without changing the orchestrator's artifact
+    filenames (SC-002, SC-013). The runner calls this AFTER
+    ``process_one_queue_item`` returns in dry-run mode.
+    """
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = session_dir / _DRY_RUN_MARKER_FILENAME
+    _write_json_atomic(marker_path, _DryRunMarker(session_id=session_id))
+    return marker_path
 
 
 def _write_json_atomic(path: Path, model: BaseModel) -> None:

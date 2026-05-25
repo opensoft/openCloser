@@ -2,6 +2,23 @@
 
 Stateless module: each public function takes an explicit ``sqlite3.Connection`` or a
 context manager that yields one. The orchestrator owns connection lifetime.
+
+**Slice 2 retention contract (FR-023, T041)**:
+
+- The Slice 2 ``crm_correlations`` and ``writeback_progress`` rows are retained for
+  **at least 90 days**, or until local audit-artifact retention (FR-035) expires —
+  whichever is longer — so a later CLI re-invocation can resume a partial write-back
+  within the documented window (FR-023, SC-014).
+- The application **MUST NOT auto-delete** any of those rows. There are no DELETE
+  statements against ``crm_correlations`` or ``writeback_progress`` anywhere in
+  this module; pruning is a manual operator action (FR-035).
+- A ``writeback_progress`` row in ``resume_needed`` state MUST be retained until
+  the session is resumed-completed or explicitly abandoned by the operator, even
+  if it predates the calendar floor.
+- ``writeback_progress.last_error`` MUST NOT contain secrets or full CRM record
+  contents (spec §Definitions §"Operator-visible"). The adapter's failure path
+  passes a sanitized summary string. ``tests/contract/test_no_secrets_in_artifacts.py``
+  greps the serialized row for known-secret env values to enforce this property.
 """
 
 from __future__ import annotations
@@ -19,6 +36,9 @@ from opencloser.models import (
     SCHEMA_VERSION,
     CallableStatus,
     ConflictingEventAuditRecord,
+    CrmCorrelation,
+    CrmRecordKind,
+    CrmWriteStatus,
     Disposition,
     EligibilityDecision,
     EventType,
@@ -28,9 +48,11 @@ from opencloser.models import (
     QueueItem,
     QueueStatusUpdatePayload,
     RuleCode,
+    RunStatus,
     Session,
     SessionState,
     TaskPayload,
+    WriteBackProgress,
 )
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -162,6 +184,12 @@ def update_queue_item_status(
     dnc_flag: bool | None = None,
     last_decision_at: str | None = None,
 ) -> None:
+    """Partial-update DAO: `None` means "leave this column alone".
+
+    For Slice 2's runner staging — where every mutable column on the queue row
+    must mirror the live Dataverse snapshot including null clears — use
+    `replace_queue_item_mutable_fields` instead.
+    """
     fields: list[str] = []
     values: list[Any] = []
     if callable_status is not None:
@@ -179,6 +207,49 @@ def update_queue_item_status(
     conn.execute(
         f"UPDATE queue_items SET {', '.join(fields)} WHERE queue_item_id = ?;",
         tuple(values),
+    )
+
+
+def replace_queue_item_mutable_fields(
+    conn: sqlite3.Connection,
+    queue_item: QueueItem,
+) -> None:
+    """Overwrite every mutable column on the local queue row from a fresh source
+    snapshot — including null clears.
+
+    `update_queue_item_status` treats `None` as "don't update", so a Dataverse
+    field that has been cleared to null since the last run never propagates to
+    local state. Slice 2's runner needs the opposite semantics when re-staging
+    a row read live from Dataverse: every mutable column should mirror the
+    snapshot, null included, so eligibility evaluates against current state
+    rather than whatever a prior run last wrote.
+    """
+    conn.execute(
+        """
+        UPDATE queue_items SET
+            facility_name = ?,
+            phone_number = ?,
+            timezone = ?,
+            default_tz_applied = ?,
+            email = ?,
+            attempt_count = ?,
+            dnc_flag = ?,
+            callable_status = ?,
+            last_decision_at = ?
+        WHERE queue_item_id = ?;
+        """,
+        (
+            queue_item.facility_name,
+            queue_item.phone_number,
+            queue_item.timezone,
+            int(queue_item.default_tz_applied),
+            queue_item.email,
+            queue_item.attempt_count,
+            int(queue_item.dnc_flag),
+            queue_item.callable_status.value,
+            queue_item.last_decision_at,
+            queue_item.queue_item_id,
+        ),
     )
 
 
@@ -533,4 +604,110 @@ def insert_normalized_result(conn: sqlite3.Connection, result: NormalizedResult)
             result.started_at,
             result.ended_at,
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — CRM correlation + write-back progress (data-model.md §1)
+# ---------------------------------------------------------------------------
+
+
+def upsert_crm_correlation(conn: sqlite3.Connection, corr: CrmCorrelation) -> None:
+    """FR-024 — record or refresh the local correlation row for one CRM record kind."""
+    conn.execute(
+        """
+        INSERT INTO crm_correlations (
+            session_id, record_kind, idempotency_key, dataverse_record_id,
+            write_status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (session_id, record_kind) DO UPDATE SET
+            idempotency_key = excluded.idempotency_key,
+            dataverse_record_id = excluded.dataverse_record_id,
+            write_status = excluded.write_status,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            corr.session_id,
+            corr.record_kind.value,
+            corr.idempotency_key,
+            corr.dataverse_record_id,
+            corr.write_status.value,
+            corr.created_at,
+            corr.updated_at,
+        ),
+    )
+
+
+def get_crm_correlation(
+    conn: sqlite3.Connection, session_id: str, record_kind: CrmRecordKind
+) -> CrmCorrelation | None:
+    row = conn.execute(
+        "SELECT * FROM crm_correlations WHERE session_id = ? AND record_kind = ?;",
+        (session_id, record_kind.value),
+    ).fetchone()
+    return _row_to_crm_correlation(row) if row is not None else None
+
+
+def list_crm_correlations(conn: sqlite3.Connection, session_id: str) -> list[CrmCorrelation]:
+    rows = conn.execute(
+        "SELECT * FROM crm_correlations WHERE session_id = ? ORDER BY record_kind;",
+        (session_id,),
+    ).fetchall()
+    return [_row_to_crm_correlation(row) for row in rows]
+
+
+def _row_to_crm_correlation(row: sqlite3.Row) -> CrmCorrelation:
+    return CrmCorrelation(
+        session_id=row["session_id"],
+        record_kind=CrmRecordKind(row["record_kind"]),
+        idempotency_key=row["idempotency_key"],
+        dataverse_record_id=row["dataverse_record_id"],
+        write_status=CrmWriteStatus(row["write_status"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def upsert_writeback_progress(conn: sqlite3.Connection, progress: WriteBackProgress) -> None:
+    """FR-023 — record or refresh the per-session write-back resume ledger."""
+    conn.execute(
+        """
+        INSERT INTO writeback_progress (
+            session_id, phone_call_activity_done, queue_status_update_done,
+            task_done, run_status, last_error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (session_id) DO UPDATE SET
+            phone_call_activity_done = excluded.phone_call_activity_done,
+            queue_status_update_done = excluded.queue_status_update_done,
+            task_done = excluded.task_done,
+            run_status = excluded.run_status,
+            last_error = excluded.last_error,
+            updated_at = excluded.updated_at;
+        """,
+        (
+            progress.session_id,
+            int(progress.phone_call_activity_done),
+            int(progress.queue_status_update_done),
+            int(progress.task_done),
+            progress.run_status.value,
+            progress.last_error,
+            progress.updated_at,
+        ),
+    )
+
+
+def get_writeback_progress(conn: sqlite3.Connection, session_id: str) -> WriteBackProgress | None:
+    row = conn.execute(
+        "SELECT * FROM writeback_progress WHERE session_id = ?;", (session_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return WriteBackProgress(
+        session_id=row["session_id"],
+        phone_call_activity_done=bool(row["phone_call_activity_done"]),
+        queue_status_update_done=bool(row["queue_status_update_done"]),
+        task_done=bool(row["task_done"]),
+        run_status=RunStatus(row["run_status"]),
+        last_error=row["last_error"],
+        updated_at=row["updated_at"],
     )

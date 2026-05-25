@@ -513,3 +513,329 @@ class SliceConfig(BaseModel):
     artifacts: ArtifactsConfig
     persona: PersonaConfig
     state: StateConfig
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — Mock Call, Real CRM (data-model.md §4 — additive only)
+# ---------------------------------------------------------------------------
+
+
+class RunMode(StrEnum):
+    """FR-031 — CLI run mode. Dry-run is the default; write-enabled needs an explicit flag."""
+
+    DRY_RUN = "dry-run"
+    WRITE_ENABLED = "write-enabled"
+
+
+class RunStatus(StrEnum):
+    """`writeback_progress.run_status` — the resume-ledger state (FR-023)."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    RESUME_NEEDED = "resume_needed"
+    BLOCKED = "blocked"
+
+
+class CrmRecordKind(StrEnum):
+    """`crm_correlations.record_kind` — the CRM record kinds Slice 2 writes back."""
+
+    PHONE_CALL_ACTIVITY = "phone_call_activity"
+    TASK = "task"
+    QUEUE_STATUS = "queue_status"
+
+
+class CrmWriteStatus(StrEnum):
+    """`crm_correlations.write_status`."""
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    FAILED = "failed"
+
+
+class CrmCorrelation(BaseModel):
+    """FR-024 — local record tying a session to one Dataverse record (mirrors the
+    `crm_correlations` table)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    record_kind: CrmRecordKind
+    idempotency_key: str
+    dataverse_record_id: str | None = None
+    write_status: CrmWriteStatus
+    created_at: UtcMs
+    updated_at: UtcMs
+
+
+class WriteBackProgress(BaseModel):
+    """FR-023 — the per-session resume ledger (mirrors the `writeback_progress` table)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    phone_call_activity_done: bool = False
+    queue_status_update_done: bool = False
+    task_done: bool = False
+    run_status: RunStatus
+    last_error: str | None = None
+    updated_at: UtcMs
+
+
+class QueueBaseline(BaseModel):
+    """T045 — the Dataverse queue row state at load time, used by the adapter's
+    mid-run conflict detection (spec §Edge Cases "Dataverse queue item changed by
+    a human between claim and write-back"). Compared field-by-field against a
+    fresh GET immediately before the final queue-status / DNC / attempt PATCH;
+    any mismatch surfaces as a `CrmConflictError` and stops the write-back.
+
+    Captured by `DataverseQueueLoader.load_with_baseline` from the same Dataverse
+    row that produces the `QueueItem`, so the baseline is consistent with the
+    state the Slice 1 eligibility evaluator and orchestrator saw at session
+    start. The resume coordinator (FR-023) captures its own fresh baseline at
+    resume start since the original-run baseline is in-memory only — the
+    resume path's conflict surface therefore covers human changes during the
+    resume window, not the original pause window.
+
+    `preserve_values` keys are Dataverse logical names (the names that appear
+    on the wire). A field absent from the wire row maps to `None` here, so
+    "field added by a human between load and final write" surfaces as a
+    None → non-None mismatch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    queue_item_id: str
+    captured_at: UtcMs
+    # `int | None` (post-2026-05-24 audit): the prior `int`-with-coercion broke
+    # symmetry — a missing status at load round-tripped to `0` while a later
+    # GET surfaced `None`, producing spurious conflicts (None != 0) AND
+    # missed conflicts (human sets None → 0 → no detection). The nullable
+    # type lets `_check_conflict` compare raw values without coercion.
+    status_value: int | None
+    # Slice 2 mid-run conflict detection (Pass 1B): the queue's
+    # `last_session_id` field at load time. `_check_conflict` flags a mismatch
+    # as a concurrent-session clobber (a different session — or a human —
+    # set the field between our load and our final PATCH). Captures `None`
+    # when the field was empty at load (the typical "ready" state).
+    last_session_id: str | None = None
+    # Dataverse `@odata.etag` annotation for the queue row at load time.
+    # `emit_queue_status_update` sends `If-Match: <etag>` on the final PATCH;
+    # Dataverse returns 412 Precondition Failed when the row was mutated in
+    # the gap between conflict-check GET and PATCH (closes the TOCTOU race
+    # the bare _check_conflict left open). `None` means the GET did not
+    # return an etag annotation — common in tests; PATCH proceeds without
+    # the header.
+    etag: str | None = None
+    preserve_values: dict[str, Any] = Field(default_factory=dict)
+
+
+class MetadataVerificationReport(BaseModel):
+    """FR-001/FR-002 — the result of lightweight live metadata verification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    missing: list[str] = Field(default_factory=list)
+    drift: list[str] = Field(default_factory=list)
+    checked_at: UtcMs
+
+
+class DataQualityWarning(BaseModel):
+    """FR-034 — a non-fatal data-quality warning (e.g. a non-E.164 phone number)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    field: str
+    message: str
+
+
+# ---- Dataverse mapping artifact (config/dataverse_mapping.json — data-model.md §2) ----
+
+
+class DataverseMappingMeta(BaseModel):
+    """`_meta` block of the mapping artifact (tolerates documentation keys)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: str
+    discovered_at: str
+    dataverse_env_url: str
+    approved: bool = False
+
+
+class DataverseEntityRef(BaseModel):
+    """One entry of the mapping artifact's `entities` map.
+
+    Dataverse Web API addresses tables under TWO names that may differ:
+
+    - `logical_name` — the singular table logical name used by metadata endpoints
+      (e.g. `EntityDefinitions(LogicalName='account')`).
+    - `entity_set_name` — the (often plural) entity-set name used in record CRUD
+      URLs (e.g. `/api/data/v9.2/accounts(id)`). Many publisher-prefixed custom
+      tables pluralize differently (e.g. `medx_callqueueitem` → `medx_callqueueitems`),
+      so we cannot derive it by appending `s`.
+
+    `entity_set_name` is optional and falls back to `logical_name` for backward
+    compatibility, but every mapping intended for live Dataverse SHOULD set both
+    explicitly (Copilot PR #3 review).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    logical_name: str
+    entity_set_name: str | None = None
+    primary_id: str | None = None
+
+
+class DataverseFieldRef(BaseModel):
+    """One entry of the mapping artifact's `fields` map."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    entity: str
+    logical_name: str
+    type: str
+    lookup_target: str | None = None
+    approved_update_field: bool = False
+
+
+class DataverseOptionSetRef(BaseModel):
+    """One entry of the mapping artifact's `option_sets` map."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    field: str
+    value: int
+
+
+class DataverseMapping(BaseModel):
+    """FR-004 — the documented, verified Dataverse field-mapping artifact."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    meta: DataverseMappingMeta = Field(alias="_meta")
+    entities: dict[str, DataverseEntityRef] = Field(default_factory=dict)
+    fields: dict[str, DataverseFieldRef] = Field(default_factory=dict)
+    option_sets: dict[str, DataverseOptionSetRef] = Field(default_factory=dict)
+    task_owner_override_field: str | None = None
+    preserve_if_present: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _require_entities(self) -> DataverseMapping:
+        # An artifact with no entities would parse cleanly and then pass `verify()`
+        # vacuously (ok=True after checking nothing) — a readiness-gate false
+        # positive that defers the real failure to runtime mapping errors in queue
+        # loading. Reject at load time so the failure surfaces during startup
+        # (Codex review on PR #3). `fields`/`option_sets` may legitimately be empty
+        # for a deployment that only touches the queue table without option-set or
+        # update fields, so they remain optional.
+        if not self.entities:
+            raise ValueError(
+                "DataverseMapping must declare at least one entry in `entities`"
+            )
+        return self
+
+
+# ---- Slice 2 configuration (config/slice2.toml — data-model.md §3) ----
+
+
+class RunConfig(BaseModel):
+    """`[run]` section of slice2.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default_mode: RunMode = RunMode.DRY_RUN
+    campaign: str = ""
+
+
+class DataverseConfig(BaseModel):
+    """`[dataverse]` section of slice2.toml.
+
+    Note: the Dataverse environment URL is **not** here — it lives only in
+    `DataverseSecrets.env_url` (loaded from the `DATAVERSE_ENV_URL` env var) so the
+    runtime has a single authoritative source for the connection target. Keeping a
+    second copy in this config file risked the two values drifting.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mapping_artifact: str
+    callable_status: str
+
+
+class RetryConfig(BaseModel):
+    """`[retry]` section — FR-023 bounded-retry tunables."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries: int = Field(ge=0)
+    backoff_seconds: list[float]
+    retry_after_cap_seconds: float = Field(gt=0)
+
+
+class TaskOwnersConfig(BaseModel):
+    """`[task_owners]` section — FR-025 default owner per Task kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    callback: str
+    review: str
+
+
+# Default ``[redaction] patterns`` for the regex policy: email + NA phone numbers.
+#
+# Lives on the config so the implicit and config-driven defaults cannot diverge —
+# ``RegexRedactionPolicy`` compiles exactly the patterns it is given, no implicit
+# prepending. Operators who supply a custom ``patterns`` list replace these
+# defaults outright (set ``policy = "noop"`` to disable redaction entirely).
+#
+# Phone-number regex is privacy-conservative: separators are OPTIONAL so bare
+# 10-digit forms (e.g. ``5551234567``) are also redacted (aligned with the
+# default in ``config/slice2.toml``). This may over-match true 10-digit IDs in
+# transcript text — operators with that concern should configure stricter
+# patterns explicitly.
+_BUILTIN_REDACTION_PATTERNS: tuple[str, ...] = (
+    # Email addresses.
+    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    # North American phone numbers. Matches all of: 555-123-4567, 5551234567,
+    # 555.123.4567, (555) 123-4567, +1 555 123 4567.
+    r"(?:\+?\d{1,2}[\s.-])?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}",
+)
+
+BUILTIN_REDACTION_PATTERNS: tuple[str, ...] = _BUILTIN_REDACTION_PATTERNS
+
+
+class RedactionPolicyConfig(BaseModel):
+    """`[redaction]` section (FR-028, FR-029, FR-030)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy: Literal["regex", "noop"] = "regex"
+    retention: Literal["full", "summary-only"] = "full"
+    patterns: list[str] = Field(
+        default_factory=lambda: list(_BUILTIN_REDACTION_PATTERNS),
+    )
+
+
+class Slice2Config(BaseModel):
+    """Root non-secret Slice 2 configuration loaded from config/slice2.toml."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run: RunConfig
+    dataverse: DataverseConfig
+    retry: RetryConfig
+    task_owners: TaskOwnersConfig
+    redaction: RedactionPolicyConfig
+
+
+class DataverseSecrets(BaseModel):
+    """Dataverse connection secrets — loaded from environment variables only (FR-005)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    client_id: str
+    client_secret: str
+    env_url: str

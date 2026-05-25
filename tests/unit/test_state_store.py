@@ -165,6 +165,87 @@ def test_update_queue_item_status_partial(tmp_state_db: sqlite3.Connection) -> N
     assert restored.last_decision_at == _T
 
 
+def test_replace_queue_item_mutable_fields_overwrites_all_columns(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """`replace_queue_item_mutable_fields` mirrors a fresh source snapshot
+    onto local state — every mutable column moves to the snapshot value."""
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    snapshot = QueueItem(
+        queue_item_id="q1",
+        facility_name="Renamed Facility",
+        phone_number="+19998887777",
+        timezone="America/New_York",
+        default_tz_applied=True,
+        email="ops@example.com",
+        attempt_count=3,
+        dnc_flag=True,
+        callable_status=CallableStatus.BLOCKED,
+        last_decision_at=_T,
+    )
+    store.replace_queue_item_mutable_fields(tmp_state_db, snapshot)
+    restored = store.get_queue_item(tmp_state_db, "q1")
+    assert restored == snapshot
+
+
+def test_replace_queue_item_mutable_fields_clears_nullable_columns(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """The replace DAO must propagate null clears — Dataverse can legitimately
+    blank out phone/timezone/email, and stale local values would corrupt
+    eligibility decisions on the next run."""
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    # Verify the seed had non-null values.
+    seeded = store.get_queue_item(tmp_state_db, "q1")
+    assert seeded is not None
+    assert seeded.phone_number is not None and seeded.timezone is not None
+
+    cleared = QueueItem(
+        queue_item_id="q1",
+        facility_name="Sunset Ridge",
+        phone_number=None,
+        timezone=None,
+        email=None,
+        attempt_count=0,
+        callable_status=CallableStatus.READY,
+    )
+    store.replace_queue_item_mutable_fields(tmp_state_db, cleared)
+    restored = store.get_queue_item(tmp_state_db, "q1")
+    assert restored is not None
+    assert restored.phone_number is None
+    assert restored.timezone is None
+    assert restored.email is None
+
+
+def test_replace_queue_item_mutable_fields_preserves_fk_children(
+    tmp_state_db: sqlite3.Connection,
+) -> None:
+    """Refreshing the queue row must not cascade-delete dependent sessions —
+    only the mutable columns change; the FK remains intact."""
+    store.insert_queue_item(tmp_state_db, _make_queue_item())
+    store.insert_session(tmp_state_db, _make_session())
+    store.replace_queue_item_mutable_fields(
+        tmp_state_db,
+        QueueItem(
+            queue_item_id="q1",
+            facility_name="Refreshed",
+            phone_number=None,
+            timezone=None,
+            attempt_count=7,
+            dnc_flag=True,
+            callable_status=CallableStatus.DNC,
+        ),
+    )
+    # The session row still exists and still resolves its FK.
+    restored = store.get_session(tmp_state_db, "ses_1")
+    assert restored is not None
+    assert restored.queue_item_id == "q1"
+    rows = tmp_state_db.execute(
+        "SELECT COUNT(*) AS n FROM sessions WHERE queue_item_id = 'q1';"
+    ).fetchone()
+    assert rows["n"] == 1
+
+
 # -- sessions ----------------------------------------------------------------
 
 

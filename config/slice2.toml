@@ -1,0 +1,53 @@
+# openCloser Slice 2 — non-secret Dataverse configuration (spec FR-006).
+# Dataverse connection SECRETS are NOT here — they come from environment variables
+# (spec FR-005): DATAVERSE_TENANT_ID / DATAVERSE_CLIENT_ID / DATAVERSE_CLIENT_SECRET /
+# DATAVERSE_ENV_URL. Local-only overrides may live in config/slice2.local.toml (gitignored).
+# See specs/002-mock-call-real-crm/data-model.md §3.
+
+[run]
+# FR-031: dry-run unless an explicit write flag is supplied on the CLI.
+default_mode = "dry-run"
+# Default ALF campaign selector (overridable on the CLI).
+campaign = ""
+
+[dataverse]
+# The Dataverse environment URL is NOT here — it lives only in the
+# DATAVERSE_ENV_URL environment variable so the runtime has a single
+# authoritative source (spec FR-005; review fixup to PR #3 — env_url removed
+# from this section to eliminate drift risk with the env-var copy).
+
+# FR-004: the discovered + PR-reviewed mapping artifact.
+mapping_artifact = "config/dataverse_mapping.json"
+# FR-011: the queue status that is eligible to be called.
+callable_status = "ready"
+
+[retry]
+# FR-023: bounded in-run retry — initial attempt + max_retries, fixed backoff,
+# capped Retry-After.
+max_retries = 3
+backoff_seconds = [1, 2, 4]
+retry_after_cap_seconds = 30
+
+[task_owners]
+# FR-025: default Dataverse owner/team per Task kind. Replace the placeholders with
+# real Dynamics owner/team GUIDs at deployment time.
+callback = "REPLACE_WITH_DATAVERSE_OWNER_OR_TEAM_ID"
+review = "REPLACE_WITH_DATAVERSE_OWNER_OR_TEAM_ID"
+
+[redaction]
+# FR-028..FR-030: default-on transcript redaction. "regex" replaces matches with
+# [REDACTED]; "noop" disables replacement (must be explicit — never silent).
+policy = "regex"
+# "full" writes a (redacted) transcript file; "summary-only" writes none.
+retention = "full"
+# `patterns` is INTENTIONALLY omitted. The defaults live in
+# `opencloser.models._BUILTIN_REDACTION_PATTERNS` and are applied by
+# `RedactionPolicyConfig`'s default_factory when no override is set. Keeping
+# them in the code is the single source of truth — duplicating the list here
+# was reviewed and reverted (Copilot PR #3 LOW): the two copies drifted (TOML
+# defaults were strictly less comprehensive than the built-ins), yielding
+# different redaction behavior depending on whether a caller passed a
+# configured layer vs. relied on the writer's default. Operators who want
+# custom patterns SHOULD declare them here explicitly:
+#
+#     patterns = ["\\bMRN-\\d{6}\\b", ...]

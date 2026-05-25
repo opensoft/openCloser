@@ -160,6 +160,34 @@ CREATE TABLE IF NOT EXISTS normalized_results (
     CHECK (captured_email IS NULL OR captured_email_unverified IS NULL)
 );
 
+-- Slice 2 — CRM correlation + write-back progress (data-model.md §1).
+
+CREATE TABLE IF NOT EXISTS crm_correlations (
+    session_id           TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    record_kind          TEXT NOT NULL
+                         CHECK (record_kind IN ('phone_call_activity', 'task', 'queue_status')),
+    idempotency_key      TEXT NOT NULL,
+    dataverse_record_id  TEXT,
+    write_status         TEXT NOT NULL CHECK (write_status IN ('pending', 'confirmed', 'failed')),
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    PRIMARY KEY (session_id, record_kind)
+);
+
+CREATE TABLE IF NOT EXISTS writeback_progress (
+    session_id                 TEXT PRIMARY KEY NOT NULL
+                               REFERENCES sessions(session_id) ON DELETE CASCADE,
+    phone_call_activity_done   INTEGER NOT NULL DEFAULT 0
+                               CHECK (phone_call_activity_done IN (0, 1)),
+    queue_status_update_done   INTEGER NOT NULL DEFAULT 0
+                               CHECK (queue_status_update_done IN (0, 1)),
+    task_done                  INTEGER NOT NULL DEFAULT 0 CHECK (task_done IN (0, 1)),
+    run_status                 TEXT NOT NULL
+                               CHECK (run_status IN ('in_progress', 'completed', 'resume_needed', 'blocked')),
+    last_error                 TEXT,
+    updated_at                 TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
     applied_at  TEXT PRIMARY KEY NOT NULL,
     version     TEXT NOT NULL

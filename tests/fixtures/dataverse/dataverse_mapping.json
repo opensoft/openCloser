@@ -1,0 +1,41 @@
+{
+  "_meta": {
+    "schema_version": "slice2-mapping-v1",
+    "discovered_at": "2026-05-22T00:00:00.000Z",
+    "dataverse_env_url": "https://fake.crm.dynamics.com",
+    "approved": true,
+    "_comment": "Verified fixture mapping for the in-process Dataverse fake (tests only). Real runs produce config/dataverse_mapping.json via `opencloser discover-crm`."
+  },
+  "entities": {
+    "queue_item": { "logical_name": "medx_callqueueitem", "entity_set_name": "medx_callqueueitems", "primary_id": "medx_callqueueitemid" },
+    "phone_call_activity": { "logical_name": "phonecall", "entity_set_name": "phonecalls", "primary_id": "activityid" },
+    "task": { "logical_name": "task", "entity_set_name": "tasks", "primary_id": "activityid" },
+    "account": { "logical_name": "account", "entity_set_name": "accounts", "primary_id": "accountid" }
+  },
+  "fields": {
+    "queue.facility_account": { "entity": "queue_item", "logical_name": "medx_accountid", "type": "lookup", "lookup_target": "account" },
+    "queue.phone": { "entity": "queue_item", "logical_name": "medx_phonenumber", "type": "string" },
+    "queue.timezone": { "entity": "queue_item", "logical_name": "medx_timezone", "type": "string" },
+    "queue.attempt_count": { "entity": "queue_item", "logical_name": "medx_attemptcount", "type": "integer", "approved_update_field": true },
+    "queue.max_attempts": { "entity": "queue_item", "logical_name": "medx_maxattempts", "type": "integer" },
+    "queue.dnc": { "entity": "queue_item", "logical_name": "medx_donotcall", "type": "boolean", "approved_update_field": true },
+    "queue.status": { "entity": "queue_item", "logical_name": "medx_callstatus", "type": "optionset", "approved_update_field": true },
+    "queue.last_disposition": { "entity": "queue_item", "logical_name": "medx_lastdisposition", "type": "string", "approved_update_field": true },
+    "queue.last_session_id": { "entity": "queue_item", "logical_name": "medx_lastsessionid", "type": "string", "approved_update_field": true },
+    "queue.last_error": { "entity": "queue_item", "logical_name": "medx_lasterror", "type": "string", "approved_update_field": true },
+    "queue.next_attempt_at": { "entity": "queue_item", "logical_name": "medx_nextattemptat", "type": "datetime" },
+    "queue.campaign": { "entity": "queue_item", "logical_name": "medx_campaignid", "type": "lookup", "lookup_target": "campaign" },
+    "phone_call.idempotency_key": { "entity": "phone_call_activity", "logical_name": "medx_idempotencykey", "type": "string" },
+    "task.idempotency_key": { "entity": "task", "logical_name": "medx_idempotencykey", "type": "string" },
+    "task.owner": { "entity": "task", "logical_name": "ownerid", "type": "lookup", "lookup_target": "systemuser,team" }
+  },
+  "option_sets": {
+    "queue_status.ready": { "field": "queue.status", "value": 0 },
+    "queue_status.in_progress": { "field": "queue.status", "value": 1 },
+    "queue_status.completed": { "field": "queue.status", "value": 2 },
+    "queue_status.blocked": { "field": "queue.status", "value": 3 },
+    "queue_status.dnc": { "field": "queue.status", "value": 4 }
+  },
+  "task_owner_override_field": "medx_assignedownerid",
+  "preserve_if_present": ["medx_notes", "medx_priority", "medx_ownernotes"]
+}
