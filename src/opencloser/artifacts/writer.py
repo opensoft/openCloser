@@ -11,17 +11,33 @@ bytes without races.
 - The application **MUST NOT auto-delete** any audit artifact. Pruning is a manual
   operator action — neither this writer nor any other module schedules deletion of
   session artifacts, run reports, or any file under ``<artifact_root>/<session_id>/``.
-- The one exception is the FR-030 summary-only transcript sweep
-  (``(session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)``): when redaction
-  retention is set to ``summary-only`` the writer removes any stale transcript file
-  from an earlier run for the SAME session so PII cannot persist after a policy
-  change. This is not an auto-deletion of audit data — it is a per-session privacy
-  enforcement at write time, and ``session-result.json`` clears its
-  ``transcript_pointer`` to match. Note: the unlink-then-write order is intentional
-  and privacy-safe — if ``_write_json_atomic(session_result_path, ...)`` fails after
-  the unlink, the worst case is a session-result.json from a prior run advertising
-  a now-deleted transcript file (a dangling pointer the operator can spot); the
-  next successful run resyncs the pointer.
+- The one exception is the same-session transcript sweep
+  (``(session_dir / _TRANSCRIPT_FILENAME).unlink(missing_ok=True)``), which fires
+  on every write whenever NO transcript file will be written for this run. Two
+  cases reach this branch:
+
+  1. **FR-030 summary-only retention** — Slice 2 callers configured
+     ``retention = "summary-only"`` so the layer suppressed the transcript
+     contents; any stale transcript from an earlier run of the same session
+     MUST be deleted so PII cannot persist past a policy change.
+  2. **No transcript provided by the caller** — e.g. the orchestrator path
+     ran without a transcript text (Slice 1 default, blocked sessions, etc.).
+     The sweep removes any stale transcript from an earlier run of the same
+     session id so ``session-result.json``'s ``transcript_pointer`` cannot
+     dangle.
+
+  This is not an auto-deletion of audit data — it is a per-session privacy
+  enforcement at write time, scoped to a single ``<artifact_root>/<session_id>/``
+  directory, and ``session-result.json`` clears its ``transcript_pointer`` to
+  match. Note: the unlink-then-write order is intentional and privacy-safe —
+  if ``_write_json_atomic(session_result_path, ...)`` fails after the unlink,
+  the worst case is a session-result.json from a prior run advertising a
+  now-deleted transcript file (a dangling pointer the operator can spot); the
+  next successful run resyncs the pointer. Copilot PR #3 LOW: previously the
+  docstring named only case (1); the unlink call itself has always handled
+  both, so the docstring is being widened to match the implementation
+  (Pass 3 / T041 retention-contract AST test counts the literal
+  ``.unlink(`` call against this same documented expectation).
 - Secrets MUST NOT be retained in any local audit artifact (FR-005, FR-035). This is
   asserted by ``tests/contract/test_no_secrets_in_artifacts.py`` (T047), which runs
   a write-enabled flow with distinctive secret env values and greps every produced
@@ -62,9 +78,15 @@ _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
 _DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
 
-# Cached so repeated calls without an explicit layer don't re-compile the built-in
-# redaction patterns on every session write.
-_DEFAULT_REDACTION_LAYER = RedactionLayer.default()
+# Cached so repeated calls without an explicit layer don't re-compile a noop on
+# every session write. Copilot PR #3 LOW: this was previously
+# `RedactionLayer.default()` (regex policy, built-in patterns), which silently
+# redacted transcripts for Slice 1 callers that don't yet configure a
+# Slice 2 `[redaction]` policy — a behavior change vs. the Slice 1 spec
+# (which deferred redaction to Slice 2). The implicit fallback is now a
+# no-op layer; Slice 2 callers MUST pass the configured layer via the
+# `redaction_layer=` kwarg (the runner's readiness gate already does this).
+_DEFAULT_REDACTION_LAYER = RedactionLayer.noop()
 
 
 @dataclass(frozen=True, slots=True)

@@ -110,3 +110,26 @@ def test_blocked_session_omits_phone_call_activity_and_task(tmp_artifact_dir: Pa
     writeback_content = paths.writeback.read_text(encoding="utf-8")
     assert '"phone_call_activity": null' in writeback_content
     assert '"task": null' in writeback_content
+
+
+def test_writer_without_explicit_layer_does_not_redact(tmp_artifact_dir: Path) -> None:
+    """Copilot PR #3 LOW: when a caller omits ``redaction_layer``, the writer's
+    silent fallback MUST be a no-op (no PII patterns applied). This restores the
+    Slice 1 pre-Slice-2 behavior (Slice 1 spec deferred redaction to Slice 2)
+    that the prior default-on fallback silently broke. Slice 2 callers MUST
+    pass the configured layer explicitly; the runner's readiness gate does so.
+    """
+    inputs = _make_inputs()
+    # Distinctive PII that the default-on built-in patterns WOULD redact.
+    inputs["transcript_text"] = (
+        "[contact] Call me at 555-123-4567 or email alice@example.com\n"
+    )
+    paths = write_session_artifacts(
+        artifact_root=tmp_artifact_dir, session_id="ses_1", **inputs
+    )
+    assert paths.transcript is not None
+    content = paths.transcript.read_text(encoding="utf-8")
+    # Both PII fragments must survive verbatim — the fallback is no-op.
+    assert "555-123-4567" in content
+    assert "alice@example.com" in content
+    assert "[REDACTED]" not in content

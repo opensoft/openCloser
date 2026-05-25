@@ -506,7 +506,13 @@ def _build_run_crm_selector(
     next_ready: bool,
     campaign: str | None,
 ) -> QueueSelector:
-    if queue_item_id is not None and not _GUID_RE.match(queue_item_id):
+    # `.fullmatch` (not `.match`) so a trailing newline / whitespace / extra
+    # characters can't slip past the anchor. Python's `$` matches BEFORE a
+    # final `\n` by default, so `.match("…-12hex\n")` against an `^…$`-
+    # anchored pattern returns a match — letting a value with a trailing
+    # newline reach OData URL interpolation. Mirrors the same fix already
+    # shipped for the `--resume` session-id validator. Copilot PR #3 LOW.
+    if queue_item_id is not None and not _GUID_RE.fullmatch(queue_item_id):
         typer.echo(
             f"error:       --queue-item-id {queue_item_id!r} is not a valid "
             "Dataverse GUID (expected 8-4-4-4-12 hex digits, e.g. "

@@ -426,11 +426,19 @@ def _persona_version_mismatch_report(
     # against a mismatched persona silently produces records tagged with a
     # different version than the operator configured. The Slice 1 CLI's run-one
     # checks this and the Slice 2 runner mirrors that fail-fast behavior.
+    #
+    # Exit shape: `failed` (→ exit code 2 per `_EXIT_CODE` in cli.py), NOT
+    # `blocked` (→ exit code 1). Copilot PR #3 LOW: this is an operator /
+    # config error before any session work, identical in shape to Slice 1's
+    # `run-one` which also exits 2 on the same condition (see
+    # `test_cli_run_one_persona_version_mismatch_exits_2`). Routing it through
+    # `blocked` was inconsistent across slices and conflated this with the
+    # block_reason-bearing readiness gates (eligibility / metadata / conflict /
+    # permanent_other) — a persona-version mismatch is none of those.
     if persona.version == slice1_config.persona.version:
         return None
     return CrmRunReport(
-        exit_status="blocked",
-        block_reason="metadata",
+        exit_status="failed",
         message=(
             f"persona version mismatch: slice1.toml requires "
             f"{slice1_config.persona.version!r} but the running persona is "

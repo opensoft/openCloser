@@ -40,8 +40,14 @@ review = "REPLACE_WITH_DATAVERSE_OWNER_OR_TEAM_ID"
 policy = "regex"
 # "full" writes a (redacted) transcript file; "summary-only" writes none.
 retention = "full"
-# Default sensitive patterns — phone numbers and email addresses.
-patterns = [
-    "\\b\\d{3}[-.\\s]?\\d{3}[-.\\s]?\\d{4}\\b",
-    "[\\w.+-]+@[\\w-]+\\.[\\w.-]+",
-]
+# `patterns` is INTENTIONALLY omitted. The defaults live in
+# `opencloser.models._BUILTIN_REDACTION_PATTERNS` and are applied by
+# `RedactionPolicyConfig`'s default_factory when no override is set. Keeping
+# them in the code is the single source of truth — duplicating the list here
+# was reviewed and reverted (Copilot PR #3 LOW): the two copies drifted (TOML
+# defaults were strictly less comprehensive than the built-ins), yielding
+# different redaction behavior depending on whether a caller passed a
+# configured layer vs. relied on the writer's default. Operators who want
+# custom patterns SHOULD declare them here explicitly:
+#
+#     patterns = ["\\bMRN-\\d{6}\\b", ...]

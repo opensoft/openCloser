@@ -435,6 +435,83 @@ def test_pre_validate_fixture_rejects_path_traversal_fixture_id(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
+# Codex PR #3 P2 (post-swarm) — close the SECOND TOCTOU window: between
+# pre_validate_fixture (called by the orchestrator BEFORE session insert) and
+# place_call (called AFTER session insert). A fixture that mutates between
+# those two calls must NOT cause place_call to raise — that would persist a
+# session row with no call attempt, the partial-state failure mode SC-006 is
+# meant to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_place_call_reuses_prevalidated_snapshot_when_present(tmp_path: Path) -> None:
+    """When pre_validate_fixture has run for a given fixture_id, the subsequent
+    place_call MUST consume the validated event list from the in-memory cache
+    rather than re-reading the file from disk — closing the TOCTOU window
+    between session-row-insert and place_call."""
+    fixture_path = _write(
+        tmp_path / "toctou.json",
+        json.dumps({"events": [{"event_id": "e1", "type": "connected", "timestamp": _T}]}),
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+
+    # Orchestrator's actual sequence: pre_validate BEFORE session insert.
+    transport.pre_validate_fixture("toctou")
+
+    # Mutate the fixture on disk to a payload that would FAIL validation —
+    # simulates a concurrent edit / atomic-replace landing in the pause window
+    # between the orchestrator's pre-validation and its place_call.
+    fixture_path.write_text("not json anymore", encoding="utf-8")
+
+    # AFTER session insert — must NOT raise; the cached snapshot is used.
+    call_id = transport.place_call(_qi(), "toctou")
+    assert call_id  # successfully allocated
+
+    # And the event stream still yields what was validated at pre_validate time.
+    events = list(transport.event_stream(call_id))
+    assert [e.event_id for e in events] == ["e1"]
+
+
+def test_place_call_consumes_prevalidated_snapshot_so_repeat_falls_back_to_disk(
+    tmp_path: Path,
+) -> None:
+    """The snapshot is one-shot per fixture_id: a SECOND place_call without
+    another pre_validate_fixture MUST re-read from disk (so any genuine
+    later corruption surfaces). This mirrors the orchestrator's actual
+    lifetime — one pre_validate per process_one_queue_item call."""
+    fixture_path = _write(
+        tmp_path / "oneshot.json",
+        json.dumps({"events": [{"event_id": "e1", "type": "no_answer", "timestamp": _T}]}),
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    transport.pre_validate_fixture("oneshot")
+
+    # First place_call — cache hit, consumes the snapshot.
+    transport.place_call(_qi(), "oneshot")
+
+    # Corrupt the fixture; the snapshot is gone, the next place_call re-reads.
+    fixture_path.write_text("not json", encoding="utf-8")
+    with pytest.raises(MalformedFixtureError):
+        transport.place_call(_qi(), "oneshot")
+
+
+def test_place_call_without_prevalidate_still_validates_from_disk(
+    tmp_path: Path,
+) -> None:
+    """Legacy direct callers (no orchestrator pre-validation) MUST still get the
+    same FR-019 fixture validation at place_call time — the cache is an
+    optimization on top of the existing contract, not a replacement."""
+    _write(
+        tmp_path / "bad.json",
+        json.dumps({"events": [{"type": "connected"}]}),  # missing event_id + timestamp
+    )
+    transport = FixtureDrivenTransport(tmp_path)
+    # No pre_validate_fixture call — straight to place_call.
+    with pytest.raises(MalformedFixtureError):
+        transport.place_call(_qi(), "bad")
+
+
+# ---------------------------------------------------------------------------
 # TOCTOU defense — event_stream consumes place_call's in-memory snapshot, not the
 # file. A fixture that mutates on disk after place_call cannot re-introduce a
 # mid-stream malformed-event failure that the gate is meant to prevent.

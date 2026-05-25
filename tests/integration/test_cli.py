@@ -302,6 +302,43 @@ def test_cli_run_crm_rejects_non_guid_queue_item_id(tmp_path: Path) -> None:
     assert "not a valid Dataverse GUID" in out
 
 
+@pytest.mark.parametrize(
+    "bad_guid",
+    [
+        "22222222-2222-2222-2222-222222222222\n",  # trailing newline (Python `$` matches before \n)
+        "22222222-2222-2222-2222-222222222222 ",  # trailing space
+        "22222222-2222-2222-2222-222222222222extra",  # extra characters
+        "\n22222222-2222-2222-2222-222222222222",  # leading newline
+        "22222222-2222-2222-2222-222222222222\n22222222-2222-2222-2222-222222222222",  # second GUID after newline
+    ],
+)
+def test_cli_run_crm_rejects_guid_with_trailing_or_extra_chars(
+    tmp_path: Path, bad_guid: str
+) -> None:
+    """Copilot PR #3 LOW (security): `_GUID_RE` uses `.fullmatch` (not `.match`)
+    so a trailing newline / whitespace / extra characters cannot slip past the
+    `^…$` anchor. Python's `$` matches before a final `\\n` by default, so
+    `.match()` against an `^…$` pattern would accept `<valid-guid>\\n` and
+    interpolate it into OData URLs/filters."""
+    config_path = _write_config(tmp_path)
+    run = _runner.invoke(
+        app,
+        [
+            "run-crm",
+            "--write",
+            "--queue-item-id",
+            bad_guid,
+            "--transport-fixture",
+            str(_TRANSPORT_FIXTURE),
+            "--config",
+            str(config_path),
+        ],
+    )
+    assert run.exit_code == 2
+    out = _combined_output(run)
+    assert "not a valid Dataverse GUID" in out
+
+
 def test_cli_run_crm_without_write_defaults_to_dry_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

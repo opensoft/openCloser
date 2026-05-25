@@ -156,27 +156,53 @@ class FixtureDrivenTransport:
         # rather than re-reading the file (closes the TOCTOU window between place_call's
         # validation and event_stream's iteration). Consumed (one-shot) by event_stream.
         self._pending: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+        # Map fixture_id → (fixture_path, validated_events). Populated by
+        # `pre_validate_fixture` and consumed (popped) by the next `place_call`
+        # for the same fixture_id. Closes the SECOND TOCTOU window — between
+        # `pre_validate_fixture` (called by the orchestrator BEFORE session insert)
+        # and `place_call` (called AFTER session insert). Without this snapshot,
+        # `place_call` re-reads + re-validates the file, so a fixture that mutates
+        # in the pause window can throw `MalformedFixtureError` AFTER the session
+        # row is already persisted — reintroducing the partial-state failure mode
+        # that pre-validation was added to prevent (SC-006). Codex PR #3 P2.
+        self._prevalidated: dict[str, tuple[Path, list[dict[str, Any]]]] = {}
 
     def pre_validate_fixture(self, fixture_id: str) -> None:
         """FR-019/FR-020 side-effect-free pre-validation hook for the orchestrator.
 
         Resolves and validates the fixture without allocating a call id or stashing
-        any pending state. This is what the orchestrator calls *before* writing any
-        session/decision row so a malformed fixture leaves no DB trail (SC-006),
+        any pending CALL state. This is what the orchestrator calls *before* writing
+        any session/decision row so a malformed fixture leaves no DB trail (SC-006),
         while ``place_call``'s real side effect (call-id allocation, plus — for
         future real transports — actually dialing) stays after session insert per
         the long-standing "session row before call attempt" ordering contract.
-        Idempotent with the validation already inside ``place_call``.
+
+        The validated events are cached against ``fixture_id`` (Codex PR #3 P2)
+        so the subsequent ``place_call`` for the same fixture_id uses the
+        in-memory snapshot — closing the TOCTOU window where a fixture mutating
+        on disk between the two calls could throw after the session row was
+        persisted. The cache entry is popped by ``place_call``; a no-op
+        ``pre_validate_fixture`` second call for the same id re-populates it.
         """
-        validate_fixture(self._resolve_fixture_path(fixture_id))
+        path = self._resolve_fixture_path(fixture_id)
+        events = validate_fixture(path)
+        self._prevalidated[fixture_id] = (path, events)
 
     def place_call(self, queue_item: QueueItem, fixture_id: str) -> str:
         """FR-007 + FR-019: assign a globally-unique mock_provider_call_id and stash
         the validated event list, after structural pre-validation rejects malformed
-        fixtures before any call id is allocated."""
+        fixtures before any call id is allocated.
+
+        Reuses the snapshot from a prior ``pre_validate_fixture`` for this
+        ``fixture_id`` if one exists, otherwise falls back to validating from
+        disk (legacy direct-call path with no orchestrator pre-check)."""
         del queue_item  # unused — the mock transport is queue-item-agnostic
-        fixture_path = self._resolve_fixture_path(fixture_id)
-        events = validate_fixture(fixture_path)  # FR-019/FR-020: raises MalformedFixtureError
+        cached = self._prevalidated.pop(fixture_id, None)
+        if cached is not None:
+            fixture_path, events = cached
+        else:
+            fixture_path = self._resolve_fixture_path(fixture_id)
+            events = validate_fixture(fixture_path)  # FR-019/FR-020: raises MalformedFixtureError
         call_id = ids.new_mock_provider_call_id()
         self._pending[call_id] = (fixture_path.name, events)
         return call_id

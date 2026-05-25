@@ -169,7 +169,10 @@ def test_us6_no_transcript_text_nulls_pointer_and_removes_stale(
     paths = write_session_artifacts(
         artifact_root=tmp_artifact_dir,
         session_id=session_id,
-        # No redaction_layer here — exercising the cached default-on layer too.
+        # No redaction_layer here — exercising the cached no-op fallback layer
+        # (Copilot PR #3 LOW: the writer's silent fallback is now noop, not
+        # default-on; transcript_text=None means the unlink path is what's
+        # under test here, not the redaction behavior).
         **make_artifact_inputs(session_id, transcript_text=None, summary=_SUMMARY),
     )
     assert paths.transcript is None

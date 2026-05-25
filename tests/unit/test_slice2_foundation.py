@@ -220,7 +220,13 @@ def test_load_slice2_config() -> None:
     assert cfg.retry.max_retries == 3
     assert cfg.retry.backoff_seconds == [1.0, 2.0, 4.0]
     assert cfg.redaction.policy == "regex"
-    assert len(cfg.redaction.patterns) == 2
+    # Copilot PR #3 LOW: the checked-in slice2.toml MUST NOT carry an inline
+    # `patterns = [...]` override — the defaults live in
+    # `opencloser.models._BUILTIN_REDACTION_PATTERNS` and the config's
+    # `default_factory` is the single source of truth. Pin the equivalence so
+    # any future TOML drift re-introducing inline patterns fails this test.
+    from opencloser.models import BUILTIN_REDACTION_PATTERNS
+    assert cfg.redaction.patterns == list(BUILTIN_REDACTION_PATTERNS)
 
 
 def test_load_slice2_config_applies_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,3 +275,52 @@ def test_load_dataverse_secrets_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
     secrets = config.load_dataverse_secrets()
     assert secrets.tenant_id == "tenant-x"
     assert secrets.env_url == "https://fake.crm.dynamics.com"
+
+
+# ---------------------------------------------------------------------------
+# Persona-version-mismatch report shape (Copilot PR #3 LOW)
+# ---------------------------------------------------------------------------
+
+
+def test_persona_version_mismatch_exits_failed_to_match_slice1() -> None:
+    """Copilot PR #3 LOW: `run-crm` persona-version mismatch MUST return
+    `exit_status="failed"` (→ exit code 2 per `_EXIT_CODE`), matching Slice 1's
+    `run-one` which also exits 2 on the same condition (see
+    `test_cli_run_one_persona_version_mismatch_exits_2`). The earlier
+    `exit_status="blocked"` (→ exit 1) shape was inconsistent across slices
+    AND conflated this with the readiness-gate block_reasons (eligibility /
+    metadata / conflict_detected / permanent_other) — a persona-version
+    mismatch is an operator/config error before any session work, not one
+    of those."""
+    from types import SimpleNamespace
+
+    from opencloser.slice2.runner import _persona_version_mismatch_report
+
+    persona = SimpleNamespace(version="alf-appointment-setter@0.1.0")
+    slice1_cfg = SimpleNamespace(
+        persona=SimpleNamespace(version="alf-appointment-setter@9.9.9")
+    )
+
+    report = _persona_version_mismatch_report(persona, slice1_cfg)
+    assert report is not None
+    assert report.exit_status == "failed"
+    # `block_reason` is only meaningful for `exit_status="blocked"`; on a
+    # persona-version mismatch it MUST be absent (None) so operators don't
+    # see a misleading discriminator on a `failed` report.
+    assert report.block_reason is None
+    assert "persona version mismatch" in (report.message or "")
+    assert "alf-appointment-setter@9.9.9" in (report.message or "")
+    assert "alf-appointment-setter@0.1.0" in (report.message or "")
+
+
+def test_persona_version_match_returns_none() -> None:
+    """No mismatch → no report; the runner proceeds past the gate."""
+    from types import SimpleNamespace
+
+    from opencloser.slice2.runner import _persona_version_mismatch_report
+
+    persona = SimpleNamespace(version="alf-appointment-setter@0.1.0")
+    slice1_cfg = SimpleNamespace(
+        persona=SimpleNamespace(version="alf-appointment-setter@0.1.0")
+    )
+    assert _persona_version_mismatch_report(persona, slice1_cfg) is None

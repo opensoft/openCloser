@@ -105,5 +105,23 @@ class RedactionLayer:
     @classmethod
     def default(cls) -> RedactionLayer:
         """Default-on layer (FR-028): mirrors the unconfigured ``[redaction]`` section
-        so the implicit default and the config-driven default cannot drift apart."""
+        so the implicit default and the config-driven default cannot drift apart.
+
+        Used by Slice 2 readiness via ``from_config(slice2_config.redaction)`` when
+        the operator hasn't overridden ``[redaction]`` in slice2.toml. NOT used as
+        the writer's silent fallback for callers that don't pass a layer — that
+        path uses :meth:`noop` so a Slice 1 caller doesn't get redaction it
+        didn't ask for (Copilot PR #3 LOW)."""
         return cls.from_config(RedactionPolicyConfig())
+
+    @classmethod
+    def noop(cls) -> RedactionLayer:
+        """No-op layer: leaves transcript bytes unchanged, retention=full.
+
+        This is the writer's silent fallback when a caller omits
+        ``redaction_layer`` — restores the pre-Slice-2 behavior where transcripts
+        were written verbatim (Slice 1 spec deferred redaction to Slice 2).
+        Slice 2 callers MUST pass the configured layer explicitly (the runner's
+        readiness gate builds it via :meth:`from_config`), so this fallback only
+        affects callers that predate the Slice 2 redaction contract."""
+        return cls(policy=NoOpPolicy(), _retention_mode="full")
