@@ -8,6 +8,12 @@ Slice 1 subcommands:
 Slice 2 subcommands (contracts/cli-slice2.md):
 - `discover-crm`         — one-time Dataverse metadata discovery (FR-001/FR-004)
 - `run-crm`              — process exactly one Dataverse queue item (FR-031/FR-032)
+
+Slice 3 subcommands (specs/003-real-call-real-crm/contracts/cli-slice3.md):
+- `run3`                 — process exactly one Dataverse queue item through a
+                           real SignalWire outbound call + Pipecat live runtime,
+                           with rehearsal / readiness as the default mode and
+                           `--real-call` required on every mutating invocation.
 """
 
 from __future__ import annotations
@@ -35,7 +41,8 @@ from opencloser.crm.dataverse.metadata import MetadataError, discover
 from opencloser.crm.dataverse.queue_loader import ExplicitId, NextReady, QueueSelector
 from opencloser.crm.mock import MockWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
-from opencloser.models import DataverseSecrets, QueueItem, RunMode
+from opencloser.models import DataverseSecrets, QueueItem, RunMode, Slice3RunMode
+from opencloser.slice3.runner import Slice3Args, run_slice3
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
 from opencloser.persona.base import ConversationFixture, ConversationTurn
 from opencloser.slice2.resume import ResumeError, resume_session
@@ -732,6 +739,97 @@ def _print_crm_report(report) -> None:
             typer.echo(f"  {w.code}: {w.message}")
     if report.message:
         typer.echo(f"message:               {report.message}")
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — Real Call, Real CRM (`run3` subcommand)
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="run3")
+def run3_command(
+    campaign_id: Annotated[
+        str,
+        typer.Option("--campaign-id", help="Campaign selector (required)."),
+    ],
+    queue_item_id: Annotated[
+        str,
+        typer.Option("--queue-item-id", help="Queue-item selector (required)."),
+    ],
+    real_call: Annotated[
+        bool,
+        typer.Option(
+            "--real-call/--no-real-call",
+            "--write/--no-write",
+            help=(
+                "Real-call / write-enabled mode. REQUIRED on every Dataverse-"
+                "mutating invocation, INCLUDING resume (FR-001, FR-022 per "
+                "Round 2 Q13). Absence runs in rehearsal mode — zero SignalWire "
+                "calls, zero Dataverse mutations."
+            ),
+        ),
+    ] = False,
+    shadow_stt: Annotated[
+        bool | None,
+        typer.Option(
+            "--shadow-stt/--no-shadow-stt",
+            help=(
+                "Toggle the shadow STT lane. Defaults to "
+                "config/slice3.toml [shadow_stt].enabled_default (FR-032)."
+            ),
+        ),
+    ] = None,
+    operator_id: Annotated[
+        str | None,
+        typer.Option(
+            "--operator-id",
+            help=(
+                "Invoking operator identity (Round 1 Q3). Defaults to $USER. "
+                "Captured locally on session + run report; NOT propagated to "
+                "Dataverse (FR-016)."
+            ),
+        ),
+    ] = None,
+    resume: Annotated[
+        str | None,
+        typer.Option(
+            "--resume",
+            help=(
+                "Resume the named session. The same --real-call gate applies "
+                "(Round 2 Q13); original operator identity is preserved on "
+                "the run report (Round 2 Q12)."
+            ),
+        ),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Non-secret Slice 3 config path. Defaults to config/slice3.toml.",
+        ),
+    ] = None,
+) -> None:
+    """Process exactly one Dataverse-owned ALF queue item through Slice 3.
+
+    See specs/003-real-call-real-crm/contracts/cli-slice3.md for the full
+    contract. Default invocation is rehearsal mode (FR-002): no SignalWire dial,
+    no Dataverse mutation. Pass `--real-call` (or `--write`) for the real-call
+    / write-enabled mode that actually places a SignalWire call and writes back
+    to Dynamics (FR-001, FR-020).
+    """
+    import os  # local import: avoid leaking $USER lookup into module import time
+    resolved_operator = operator_id or os.environ.get("USER", "unknown")
+    args = Slice3Args(
+        campaign_id=campaign_id,
+        queue_item_id=queue_item_id,
+        run_mode=Slice3RunMode.REAL_CALL if real_call else Slice3RunMode.REHEARSAL,
+        shadow_stt_enabled=shadow_stt,
+        operator_id=resolved_operator,
+        resume_session_id=resume,
+        config_path=str(config) if config else None,
+    )
+    exit_code = run_slice3(args)
+    raise typer.Exit(code=exit_code)
 
 
 def _build_selector(

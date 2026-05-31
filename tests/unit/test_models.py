@@ -230,8 +230,14 @@ def test_disposition_enum_has_eleven_values() -> None:
     assert "blocked" in {d.value for d in Disposition}
 
 
-def test_human_review_reason_has_nine_values() -> None:
-    assert len(list(HumanReviewReason)) == 9
+def test_human_review_reason_has_ten_values() -> None:
+    # Slice 3 (FR-031, Clarifications Round 2 Q7): the additive
+    # `shadow_stt_discrepancy` reason is the 10th value. The enum remains
+    # append-only per Slice 1 policy — no Slice 1 reason was replaced or
+    # removed. See spec.md §Clarifications Round 2 + plan.md Constitution
+    # Check Principle III.
+    assert len(list(HumanReviewReason)) == 10
+    assert HumanReviewReason.SHADOW_STT_DISCREPANCY.value == "shadow_stt_discrepancy"
 
 
 def test_event_type_has_six_values() -> None:

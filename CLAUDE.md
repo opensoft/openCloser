@@ -2,7 +2,7 @@
 Before changing this repository, read `.specify/memory/constitution.md` when present.
 For feature-specific technologies, project structure, shell commands, and
 other implementation details, read the current plan:
-`specs/002-mock-call-real-crm/plan.md` (Slice 2 — Mock Call, Real CRM).
+`specs/003-real-call-real-crm/plan.md` (Slice 3 — Real Call, Real CRM).
 <!-- SPECKIT END -->
 
 # openCloser Agent Context

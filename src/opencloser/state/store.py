@@ -119,15 +119,55 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 
 def init_schema(conn: sqlite3.Connection, *, now_utc_ms: str) -> None:
-    """Apply schema.sql idempotently and seed the schema_meta row if first run."""
+    """Apply schema.sql idempotently and seed the schema_meta row if first run.
+
+    Also runs the additive Slice 3 column-migration step (``_migrate_sessions_slice3``)
+    for databases created before the Slice 3 column additions on ``sessions``.
+    The migration is idempotent and tolerates fresh installs where the new
+    columns already exist from the ``CREATE TABLE IF NOT EXISTS`` step above.
+    """
     ddl = _SCHEMA_PATH.read_text(encoding="utf-8")
     conn.executescript(ddl)
+    _migrate_sessions_slice3(conn)
     cur = conn.execute("SELECT COUNT(*) AS n FROM schema_meta;")
     if cur.fetchone()["n"] == 0:
         conn.execute(
             "INSERT INTO schema_meta (applied_at, version) VALUES (?, ?);",
             (now_utc_ms, SCHEMA_VERSION),
         )
+
+
+# Slice 3 column additions on ``sessions`` (data-model.md §2.1, §3). Kept as a
+# module-level constant so the migration step and any tests can reference the
+# same source of truth. Each entry is ``(column_name, sqlite_column_decl)``.
+_SLICE3_SESSION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("runtime_identity_json",      "TEXT"),
+    ("operator_identity_current",  "TEXT"),
+    ("operator_identity_original", "TEXT"),
+    ("run_mode",                   "TEXT CHECK (run_mode IN ('rehearsal', 'real_call'))"),
+    ("grace_window_sec",           "INTEGER"),
+    ("shadow_stt_enabled",         "INTEGER CHECK (shadow_stt_enabled IN (0, 1))"),
+    ("finalized_at",               "TEXT"),
+    ("cm_writeback_started_at",    "TEXT"),
+)
+
+
+def _migrate_sessions_slice3(conn: sqlite3.Connection) -> None:
+    """Additively add Slice 3 columns to ``sessions`` if they are missing.
+
+    SQLite has no ``ALTER TABLE ADD COLUMN IF NOT EXISTS``; we inspect
+    ``PRAGMA table_info(sessions)`` and add only the missing columns. Safe to
+    run on every connection — the membership check is O(1) per column on the
+    column-count cardinality we use here.
+
+    No backfill is performed: the new columns are all nullable and Slice 1 /
+    Slice 2 reads ignore them. Slice 3 writes populate them at session creation.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(sessions);")}
+    for column_name, column_decl in _SLICE3_SESSION_COLUMNS:
+        if column_name in existing:
+            continue
+        conn.execute(f"ALTER TABLE sessions ADD COLUMN {column_name} {column_decl};")
 
 
 # ---------------------------------------------------------------------------

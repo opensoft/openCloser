@@ -2,6 +2,17 @@
 
 Pure function: given the extraction and the conversation turns, return the matching
 `HumanReviewReason` (or None if no escalation is warranted).
+
+Slice 3 note (FR-031, Clarifications Round 2 Q7): the additive
+``HumanReviewReason.SHADOW_STT_DISCREPANCY`` entry exists in
+``opencloser.models`` for the shadow STT lane to use, but is NOT emitted from
+this module. Shadow-side discrepancies are detected in
+``opencloser.shadow_stt.discrepancy`` and surfaced to the orchestrator as
+``DiscrepancyEvent`` objects; the orchestrator escalates with
+``shadow_stt_discrepancy`` only when the discrepancy policy classifies the
+event as ``uncertain`` AND the event arrives inside the post-finalization
+grace window per FR-029. This module remains responsible for the Slice 1 +
+Slice 2 keyword-driven safety + uncertainty escalations only.
 """
 
 from __future__ import annotations

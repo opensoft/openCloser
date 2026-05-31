@@ -1,0 +1,52 @@
+{
+  "$schema": "https://opencloser.local/schemas/shadow_stt_discrepancy_policy.v1.json",
+  "_doc": "Shadow STT discrepancy classification policy. Spec: research.md §4. Compared per spec.md FR-030 across 7 logical high-value categories stored as 9 atomic enum values (data-model.md §1.7 storage normalization). Benign matches are silent; uncertain matches escalate the session to `needs_human_review` with reason `shadow_stt_discrepancy` per FR-031 (provided the discrepancy event arrives inside the grace window per FR-029 Round 2 Q7).",
+
+  "benign_rules": {
+    "_doc": "Differences that the policy treats as benign — silent, no escalation.",
+    "case_insensitive_match": {
+      "fields": ["captured_email", "person_reached_name", "person_reached_role"],
+      "rule": "Treat live vs. shadow values as equivalent if they match after lowercasing."
+    },
+    "whitespace_normalization": {
+      "fields": ["captured_email", "person_reached_name", "person_reached_role", "preferred_callback_window"],
+      "rule": "Treat values as equivalent if they match after collapsing whitespace and trimming."
+    },
+    "phonetic_spelling_tolerance": {
+      "fields": ["person_reached_name"],
+      "rule": "Treat names with the same Metaphone/Soundex encoding as equivalent (handles 'Smith' vs 'Smyth')."
+    },
+    "punctuation_in_email": {
+      "fields": ["captured_email"],
+      "rule": "Treat emails as equivalent if they match after stripping surrounding punctuation."
+    }
+  },
+
+  "uncertain_rules": {
+    "_doc": "Differences that the policy treats as uncertain — escalate to `needs_human_review` with reason `shadow_stt_discrepancy` (when the discrepancy event arrives inside the grace window per FR-029).",
+    "semantically_different_email": {
+      "fields": ["captured_email"],
+      "rule": "After benign normalization, two non-empty emails that still differ are uncertain."
+    },
+    "callback_window_more_than_one_day": {
+      "fields": ["preferred_callback_window"],
+      "rule": "Two parsed callback windows whose start times differ by more than 24 hours are uncertain."
+    },
+    "opt_out_vs_interest_disagreement": {
+      "fields": ["opt_out", "interest_level"],
+      "rule": "If one path emits opt_out=true and the other emits interest_level > none, the discrepancy is uncertain."
+    },
+    "disposition_disagreement": {
+      "fields": ["final_disposition"],
+      "rule": "Any final_disposition disagreement (after normalization) is uncertain."
+    },
+    "wrong_number_disagreement": {
+      "fields": ["wrong_number"],
+      "rule": "Any wrong_number boolean disagreement is uncertain."
+    },
+    "callback_intent_disagreement": {
+      "fields": ["callback_intent"],
+      "rule": "Any callback_intent disagreement is uncertain unless one side is null AND the call was clearly non-connected."
+    }
+  }
+}

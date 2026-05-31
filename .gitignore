@@ -57,3 +57,5 @@ htmlcov/
 
 # OS
 Thumbs.db
+.claude/dashboard.md
+.claude/speckit-history.md

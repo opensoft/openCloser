@@ -1,0 +1,160 @@
+# Contract: CRM Write-Back — Slice 3 Additions (Real Provider Call ID + DNC-First Ordering + Field-Level Variants)
+
+**Slice 3** · **FR-020 – FR-024** (+ Round 2 Q8 four-op preservation, Q14 DNC-first) · [plan.md](../plan.md) · [research.md §14](../research.md)
+
+The Slice 2 `DataverseWriteBackAdapter` is reused unchanged. Slice 3 introduces only
+ADDITIVE behaviors:
+
+1. The Phone Call activity payload now carries the **real provider call ID** (from the
+   SignalWire transport per FR-006) and optionally the connected-call timestamps
+   (`answered_at`, `completed_at`) from SignalWire status callbacks.
+2. The four-operation count is preserved (Round 2 Q8). DNC / opt-out / blocked-status /
+   dial-blocked writes are FIELD-LEVEL variants of the existing `queue_status_update`
+   emission operation; they are NOT new operations.
+3. The DNC / opt-out field write MUST be attempted FIRST in the write-back sequence on
+   `do_not_call` outcomes (Round 2 Q14). Idempotency-key stamping prevents duplicate DNC
+   writes on resume.
+
+The Slice 2 idempotency-key stamping (FR-021), bounded retry (FR-022: initial + 3 retries,
+1s / 2s / 4s default backoff, `Retry-After` ≤ 30s), and resume coordinator (FR-022) are
+reused verbatim.
+
+## Python contract (extends Slice 2 `WriteBackAdapter`)
+
+```python
+from typing import Protocol
+from opencloser.models import (
+    NormalizedResult, WriteBackOperation, PhoneCallActivity, QueueStatusUpdate,
+    Task, IdempotencyKey, ProviderCallId, ConnectedCallTimestamps,
+)
+
+class WriteBackAdapter(Protocol):
+    """Slice 2 contract; Slice 3 additions noted below."""
+
+    def emit_phone_call_activity(
+        self,
+        result: NormalizedResult,
+        idempotency_key: IdempotencyKey,
+        *,
+        provider_call_id: ProviderCallId,                            # Slice 3: real SID
+        connected_call_timestamps: ConnectedCallTimestamps | None,   # Slice 3: optional
+    ) -> None:
+        """Pre-query by idempotency key (Slice 2). Skip create if found."""
+
+    def emit_queue_status_update(
+        self,
+        result: NormalizedResult,
+        variant: "QueueStatusUpdateVariant",                          # Slice 3: variant tag
+    ) -> None:
+        """Field-level variants per Round 2 Q8 — four-operation count preserved."""
+
+    def emit_task(self, result: NormalizedResult, idempotency_key: IdempotencyKey) -> None: ...
+
+    def assemble_writeback(
+        self,
+        result: NormalizedResult,
+    ) -> list["WriteBackStep"]:
+        """Return the ordered write-back step sequence. On `do_not_call`, the
+        first step MUST be `QueueStatusUpdateVariant.DNC` per Round 2 Q14."""
+
+
+class QueueStatusUpdateVariant(str, Enum):
+    NORMAL = "queue_status_update.normal"
+    DNC = "queue_status_update.dnc"
+    BLOCKED = "queue_status_update.blocked"
+    DIAL_BLOCKED = "queue_status_update.dial_blocked"
+```
+
+## Required behaviors
+
+### DNC-first ordering on `do_not_call` (Round 2 Q14)
+
+When `NormalizedResult.disposition == 'do_not_call'`, `assemble_writeback` MUST return
+steps in this order:
+
+1. `QueueStatusUpdateVariant.DNC` — writes the DNC / opt-out fields and the queue-status
+   field. **MUST be first.**
+2. Phone Call activity emission (idempotency-key stamped).
+3. Task emission — but `do_not_call` MUST NOT create a callback or review Task (FR-024).
+   So this step is effectively a no-op for `do_not_call`.
+
+The bounded retry budget (FR-022) applies per-step. If step 1 succeeds and step 2 fails
+within budget, the contact is already protected — the resume coordinator will pick up at
+step 2 on re-invocation.
+
+### Per-disposition step ordering (other dispositions)
+
+Unchanged from Slice 2:
+
+| Disposition | Step order |
+|---|---|
+| `interested_callback_requested` | phone_call_activity → queue_status_update.normal → task (callback) |
+| `interested_email_captured` | phone_call_activity → queue_status_update.normal → task (follow-up with email) |
+| `not_interested` | phone_call_activity → queue_status_update.normal (no task) |
+| `call_back_later` | phone_call_activity → queue_status_update.normal → task (callback) |
+| `wrong_number` | phone_call_activity → queue_status_update.normal (no task) |
+| `no_answer` | phone_call_activity → queue_status_update.normal (no task) |
+| `voicemail` | phone_call_activity → queue_status_update.normal (no task) |
+| **`do_not_call`** | **queue_status_update.dnc → phone_call_activity → (no task)** |
+| `needs_human_review` | phone_call_activity → queue_status_update.normal → task (review) |
+| `failed` | phone_call_activity (if call connected; else skip) → queue_status_update.normal (no task) |
+| `blocked` | queue_status_update.blocked only (no phone_call_activity, no task, no attempt increment) |
+
+### Slice 3 Phone Call activity payload additions
+
+```text
+phone_call_activity {
+  ...                              # Slice 2 fields unchanged
+  provider_call_id: ProviderCallId  # NEW (Slice 3): SignalWire SID; replaces mock
+  connected_call_timestamps: {     # NEW (Slice 3): optional
+    answered_at:  ISO8601 | null
+    completed_at: ISO8601 | null
+  } | null
+}
+```
+
+No Dataverse field is added for operator identity (Round 1 Q3 / Round 2 Q12: operator
+identity is local-only and MUST NOT appear in Dataverse). No Dataverse field is added for
+rejected-by-authentication callback counts (that count lives in the local run report only).
+
+### Idempotency on resume (Round 2 Q14 + Round 2 Q6)
+
+- DNC writes use the same Slice 2 idempotency-key stamping. A resume invocation that
+  re-runs the DNC step finds the existing write via the pre-query and skips.
+- A resume invocation on a session that previously received `answered` but no terminal
+  event finalizes the session as `failed` / `live_call_abandonment` immediately (Round 2
+  Q6) and then proceeds through this write-back contract with the resume coordinator.
+
+### Real-call flag still required on resume (Round 2 Q13)
+
+The adapter MUST refuse to perform any write when `Session.run_mode != 'real_call'`. A
+rehearsal-mode resume invocation surfaces what would have been written in the run report
+and exits without mutation.
+
+## What MUST NOT change (preserved from Slice 2)
+
+- The four-operation count: `phone_call_activity`, `queue_status_update`, `task`, `assembly`.
+- The Dataverse metadata two-phase verification (one-time discovery + lightweight live
+  verification before each write-enabled run).
+- The mapping artifact (`config/dataverse_mapping.json`).
+- The high-confidence value preservation rule (existing Dataverse field values are not
+  overwritten unless the feature explicitly requires it).
+- The owner / team mapping for callback and review Tasks.
+- The bounded retry budget (FR-022).
+- The local audit retention floor (≥ 90 days).
+
+## Contract test summary (`tests/contract/test_crm_writeback_slice3.py`)
+
+| Test | Assertion |
+|---|---|
+| `test_phone_call_activity_carries_real_provider_call_id` | `emit_phone_call_activity` payload contains the SignalWire SID, not a mock ID |
+| `test_phone_call_activity_carries_connected_timestamps` | When SignalWire status callbacks supply `answered_at` / `completed_at`, the payload includes them |
+| `test_dnc_first_on_do_not_call` | `assemble_writeback({disposition: do_not_call})[0]` is `QueueStatusUpdateVariant.DNC`; no callback or review Task is emitted |
+| `test_dnc_first_partial_failure_protects_contact` | DNC step succeeds + Phone Call activity step fails within retry budget → resume completes Phone Call activity without duplicate DNC write |
+| `test_four_operation_count_preserved` | `WriteBackAdapter` exposes exactly 4 emit-methods: phone_call_activity, queue_status_update, task, assembly |
+| `test_queue_status_update_variants` | All 4 variants (NORMAL / DNC / BLOCKED / DIAL_BLOCKED) use the same Slice 2 `emit_queue_status_update` method with the variant tag |
+| `test_blocked_eligibility_writes_blocked_variant_only` | Disposition `blocked` triggers `QueueStatusUpdateVariant.BLOCKED` only; no Phone Call activity; no Task; no attempt increment |
+| `test_dial_blocked_provider_4xx_writes_dial_blocked_variant` | `ProviderRejectedDialError` (FR-012) triggers `QueueStatusUpdateVariant.DIAL_BLOCKED`; no Phone Call activity; no attempt consumed |
+| `test_idempotency_key_stamping_preserved` | Both Phone Call activity and Task creates pre-query by idempotency key; duplicate calls find the existing write and skip |
+| `test_resume_in_rehearsal_mode_does_not_mutate` | Resume invocation without `--real-call` performs 0 Dataverse writes; run report surfaces the planned writes |
+| `test_operator_identity_not_in_dataverse` | Inspecting any emitted Dataverse payload contains 0 operator identity strings (FR-016) |

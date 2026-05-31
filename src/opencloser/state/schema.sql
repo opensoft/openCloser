@@ -37,7 +37,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     blocked_reason          TEXT,
     mock_provider_call_id   TEXT UNIQUE,
     started_at              TEXT NOT NULL,
-    ended_at                TEXT
+    ended_at                TEXT,
+    -- Slice 3 additions (data-model.md §2.1, §3). All nullable for backwards
+    -- compatibility with Slice 1 / Slice 2 reads. The `mock_provider_call_id`
+    -- column above remains the SignalWire-assigned call SID under the Slice 3
+    -- rename `provider_call_id` (data-model.md §1.1) — no schema-level rename
+    -- so that pre-Slice-3 session reads remain interpretable.
+    runtime_identity_json       TEXT,
+    operator_identity_current   TEXT,
+    operator_identity_original  TEXT,
+    run_mode                    TEXT CHECK (run_mode IN ('rehearsal', 'real_call')),
+    grace_window_sec            INTEGER,
+    shadow_stt_enabled          INTEGER CHECK (shadow_stt_enabled IN (0, 1)),
+    finalized_at                TEXT,
+    cm_writeback_started_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_queue_item ON sessions(queue_item_id);
@@ -186,6 +199,62 @@ CREATE TABLE IF NOT EXISTS writeback_progress (
                                CHECK (run_status IN ('in_progress', 'completed', 'resume_needed', 'blocked')),
     last_error                 TEXT,
     updated_at                 TEXT NOT NULL
+);
+
+-- Slice 3 — Real Call, Real CRM (data-model.md §1.4, §1.7, §1.8, §3).
+-- Three new audit-grade tables added by Slice 3. All are session-scoped where
+-- a session exists; `rejected_auth_callbacks.session_id` is nullable because a
+-- forged callback may not be associatable with any known session.
+
+CREATE TABLE IF NOT EXISTS rejected_auth_callbacks (
+    -- Distinct audit log for SignalWire callbacks that fail HMAC-SHA256
+    -- signature verification (FR-008 + Round 2 Q9). MUST NOT contain the
+    -- verification secret. MUST NOT contain the callback body content
+    -- (defense in depth against reflected-payload leakage). The run report
+    -- surfaces `rejected_auth_callbacks_count` per session.
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at          TEXT NOT NULL,
+    session_id           TEXT,
+    source_metadata_json TEXT NOT NULL,
+    http_status          INTEGER NOT NULL CHECK (http_status = 401)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejected_auth_session
+    ON rejected_auth_callbacks(session_id);
+
+CREATE TABLE IF NOT EXISTS shadow_stt_discrepancies (
+    -- Shadow STT discrepancy records per FR-030 + FR-031. 9 atomic enum
+    -- values reflect data-model.md §1.7 storage normalization (7 spec
+    -- categories split into 9 atoms for storage clarity).
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    field               TEXT NOT NULL CHECK (field IN (
+                            'opt_out', 'wrong_number', 'captured_email',
+                            'callback_intent', 'preferred_callback_window',
+                            'person_reached_name', 'person_reached_role',
+                            'interest_level', 'final_disposition'
+                        )),
+    live_value          TEXT,
+    shadow_value        TEXT,
+    classification      TEXT NOT NULL CHECK (classification IN ('benign', 'uncertain')),
+    review_task_reason  TEXT,
+    recorded_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_disc_session
+    ON shadow_stt_discrepancies(session_id);
+
+CREATE TABLE IF NOT EXISTS shadow_lane_truncated_events (
+    -- At most one row per session: the shadow lane was still producing output
+    -- AFTER the orchestrator's post-finalization grace window elapsed
+    -- (FR-029 + Round 2 Q7). Audit-only by construction — MUST NOT mutate the
+    -- finalized disposition and MUST NOT emit a new CRM write-back payload.
+    session_id                 TEXT PRIMARY KEY NOT NULL
+                               REFERENCES sessions(session_id) ON DELETE CASCADE,
+    finalized_at               TEXT NOT NULL,
+    grace_window_ended_at      TEXT NOT NULL,
+    late_output_summary_json   TEXT NOT NULL,
+    would_have_classified_as   TEXT CHECK (would_have_classified_as IN ('benign', 'uncertain'))
 );
 
 CREATE TABLE IF NOT EXISTS schema_meta (

@@ -147,3 +147,106 @@ def test_no_dataverse_vendor_reference_in_boundary_module(
         f"{module.relative_to(_SRC)} contains forbidden {description} "
         f"(pattern {label!r}): {matches[:5]}" + (" ... [truncated]" if len(matches) > 5 else "")
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — SignalWire vendor-leak boundary check (T013 Q9 source-file scan)
+# ---------------------------------------------------------------------------
+#
+# Per spec FR-005, FR-018, SC-015 + ``contracts/signalwire-transport.md``,
+# SignalWire-specific webhook shapes, intermediate status names, and carrier
+# failure subtypes MUST NOT leak past the SignalWire transport boundary
+# (``src/opencloser/transport/signalwire/``). This static-scan complements
+# the runtime check in ``test_signalwire_transport.py::
+# test_no_signalwire_specifics_leak`` (T013).
+
+# Modules forbidden from carrying SignalWire-specific literals. Wider than
+# ``_MODULES_UNDER_TEST`` above because Slice 3 adds the Dataverse adapter,
+# Pipecat runtime, shadow-STT lane, and slice3 runner as no-leak zones.
+_SIGNALWIRE_BOUNDARY_MODULES: tuple[Path, ...] = (
+    *_MODULES_UNDER_TEST,  # reuse every Dataverse-no-leak module
+    # The Dataverse adapter MAY carry Dataverse refs but MUST NOT carry
+    # SignalWire intermediate state names.
+    _SRC / "crm" / "dataverse" / "adapter.py",
+    # Pipecat runtime + shadow STT + slice3 runner share the no-leak rule
+    # (their vendor-specific dependencies are different vendors; SignalWire
+    # belongs only inside ``transport/signalwire/``).
+    _SRC / "runtime" / "base.py",
+    _SRC / "shadow_stt" / "base.py",
+    _SRC / "slice3" / "runner.py",
+)
+
+# SignalWire-specific literals that MUST NOT appear in the boundary modules
+# above. Each entry is (pattern, label, description). The patterns
+# deliberately use word boundaries / quoted-string guards to avoid matching
+# unrelated English text (e.g. "in progress" prose in a docstring).
+_SIGNALWIRE_FORBIDDEN_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    # SignalWire intermediate call-status strings (FR-005). Each appears as a
+    # quoted literal on the SignalWire wire format. The orchestrator /
+    # eligibility / persona / Dataverse adapter MUST consume only normalized
+    # event_type values (connected / no_answer / voicemail / failed /
+    # completed / callback_requested).
+    (re.compile(r"""["']ringing["']"""), "signalwire-ringing", "SignalWire intermediate state"),
+    (re.compile(r"""["']in_progress["']"""), "signalwire-in_progress", "SignalWire intermediate state"),
+    (re.compile(r"""["']in-progress["']"""), "signalwire-in-progress", "SignalWire intermediate state"),
+    (re.compile(r"""["']answered["']"""), "signalwire-answered", "SignalWire intermediate state"),
+    # `busy` and `canceled`/`cancelled` are SignalWire carrier failure subtypes
+    # the transport normalizes into `no_answer` / `failed`.
+    (re.compile(r"""["']busy["']"""), "signalwire-busy", "SignalWire carrier-failure subtype"),
+    (re.compile(r"""["']canceled["']"""), "signalwire-canceled", "SignalWire carrier-failure subtype"),
+    (re.compile(r"""["']cancelled["']"""), "signalwire-cancelled", "SignalWire carrier-failure subtype"),
+    # SignalWire dial-plan and webhook header markers.
+    (re.compile(r"\bSWML\b"), "signalwire-swml", "SignalWire SWML dial-plan marker"),
+    (re.compile(r"\bTwiML\b"), "signalwire-twiml", "SignalWire/Twilio dial-plan marker"),
+    (re.compile(r"\bX-SignalWire-"), "signalwire-header", "SignalWire webhook header"),
+    # Direct imports from the SignalWire SDK or the in-repo SignalWire
+    # adapter package. Belt-and-suspenders against `test_imports.py` —
+    # only `transport/signalwire/*` may import the SDK.
+    (
+        re.compile(r"^\s*from\s+signalwire(\.|\s+import)", re.MULTILINE),
+        "import-signalwire-sdk",
+        "`from signalwire` import (SDK should live behind transport/signalwire only)",
+    ),
+    (
+        re.compile(r"^\s*import\s+signalwire\b", re.MULTILINE),
+        "import-signalwire-sdk-module",
+        "`import signalwire` import",
+    ),
+    (
+        re.compile(r"^\s*from\s+opencloser\.transport\.signalwire", re.MULTILINE),
+        "import-opencloser-transport-signalwire",
+        "boundary module importing the SignalWire adapter package",
+    ),
+)
+
+
+def test_all_signalwire_boundary_modules_exist() -> None:
+    """Guard the SignalWire-no-leak module list against silent drift."""
+    missing = [m for m in _SIGNALWIRE_BOUNDARY_MODULES if not m.exists()]
+    assert not missing, f"expected SignalWire-boundary module(s) not found: {missing}"
+
+
+@pytest.mark.parametrize(
+    "module",
+    _SIGNALWIRE_BOUNDARY_MODULES,
+    ids=lambda p: str(p.relative_to(_SRC)),
+)
+@pytest.mark.parametrize(
+    ("pattern", "label", "description"),
+    _SIGNALWIRE_FORBIDDEN_PATTERNS,
+    ids=lambda v: v if isinstance(v, str) else "pat",
+)
+def test_no_signalwire_vendor_reference_in_boundary_module(
+    module: Path, pattern: re.Pattern[str], label: str, description: str
+) -> None:
+    """SC-015 / FR-005 / FR-018 — boundary modules contain ZERO matches for
+    SignalWire-specific webhook shapes, intermediate status names, carrier
+    failure subtypes, or SDK imports. A match means SignalWire detail has
+    leaked past the transport boundary; the fix is to move the reference
+    into ``src/opencloser/transport/signalwire/``."""
+    text = module.read_text(encoding="utf-8")
+    matches = pattern.findall(text)
+    assert not matches, (
+        f"{module.relative_to(_SRC)} contains forbidden {description} "
+        f"(pattern {label!r}): {matches[:5]}" + (" ... [truncated]" if len(matches) > 5 else "")
+    )

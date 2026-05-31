@@ -43,7 +43,14 @@ class Disposition(StrEnum):
 
 
 class HumanReviewReason(StrEnum):
-    """FR-035 escalation reason codes (9 values, append-only per Slice 1 policy)."""
+    """FR-035 escalation reason codes (10 values, append-only per Slice 1 policy).
+
+    ``shadow_stt_discrepancy`` is the additive Slice 3 entry (FR-031, Clarifications
+    Round 2 Q7): emitted by the shadow STT lane (not by ``persona/escalation.py``'s
+    keyword detection) when the discrepancy policy classifies a high-value-field
+    divergence as ``uncertain`` AND the discrepancy event arrives inside the
+    post-finalization grace window per FR-029.
+    """
 
     UNCERTAIN_ROLE = "uncertain_role"
     UNCERTAIN_INTENT = "uncertain_intent"
@@ -54,6 +61,7 @@ class HumanReviewReason(StrEnum):
     NON_CLINICAL_TOPIC_ESCALATION = "non_clinical_topic_escalation"
     OUTSIDE_ALLOWED_CLAIMS = "outside_allowed_claims"
     SCRIPT_TRUNCATED = "script_truncated"
+    SHADOW_STT_DISCREPANCY = "shadow_stt_discrepancy"
 
 
 class RoleConfidence(StrEnum):
@@ -225,7 +233,14 @@ _PAYLOAD_KEY_TYPES: dict[str, type] = {
 
 
 class MockCallEvent(BaseModel):
-    """FR-006 + Clarifications Round 2 Q15 — one transport-emitted event."""
+    """FR-006 + Clarifications Round 2 Q15 — one transport-emitted event.
+
+    The three boolean delivery-state flags (``is_duplicate``, ``out_of_order``,
+    ``late_after_finalization``) are set by the Slice 3 SignalWire transport
+    adapter to mark how a provider callback related to other callbacks for the
+    same session (FR-007, FR-021, FR-027). Slice 1 / Slice 2 mock-transport
+    code leaves them at their defaults (``False``).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -234,6 +249,9 @@ class MockCallEvent(BaseModel):
     event_type: EventType
     received_at: UtcMs
     payload: dict[str, Any] = Field(default_factory=dict)
+    is_duplicate: bool = False
+    out_of_order: bool = False
+    late_after_finalization: bool = False
 
     @model_validator(mode="after")
     def _allowlist_payload_keys(self) -> MockCallEvent:
@@ -839,3 +857,257 @@ class DataverseSecrets(BaseModel):
     client_id: str
     client_secret: str
     env_url: str
+
+
+# ---------------------------------------------------------------------------
+# Slice 3 — Real Call, Real CRM — entities (data-model.md §1, §2)
+# ---------------------------------------------------------------------------
+#
+# Slice 1 / Slice 2 renames applied at the Slice 3 boundary per the SC-008
+# forward-compatibility review:
+#   - ``mock_provider_call_id`` is read as ``provider_call_id`` for Slice 3
+#     surfaces; the SQLite column name is preserved so pre-Slice-3 sessions
+#     stay readable for audit (data-model.md §2.1).
+#   - ``MockCallEvent`` is the Slice 1 type; Slice 3 surfaces it as
+#     ``CallEvent`` (alias re-export below).
+#   - ``fixture_id`` is replaced by ``dial_plan`` at the SignalWire transport
+#     boundary; Slice 1 / Slice 2 fixture-replay debugging still uses
+#     ``fixture_id`` internally.
+
+
+class Slice3RunMode(StrEnum):
+    """Slice 3 CLI run-mode (spec.md FR-001 / FR-002 + Clarifications Round 1 Q2).
+
+    Distinct from the Slice 2 ``RunMode`` (``DRY_RUN`` / ``WRITE_ENABLED``) which
+    governs the mock-call / real-CRM mutation gate. Slice 3's two modes govern
+    BOTH the SignalWire dial gate AND the Dataverse-mutation gate per FR-001
+    (every Dataverse-mutating invocation including resume requires explicit opt-in
+    per Round 2 Q13).
+    """
+
+    REHEARSAL = "rehearsal"
+    REAL_CALL = "real_call"
+
+
+class QueueStatusUpdateVariant(StrEnum):
+    """Field-level variants of the existing queue-status update emission
+    operation per Clarifications Round 2 Q8 (preserves the FR-020 four-op count).
+
+    ``DNC`` MUST be emitted FIRST in the write-back sequence on ``do_not_call``
+    outcomes per FR-024 + Clarifications Round 2 Q14.
+    """
+
+    NORMAL = "queue_status_update.normal"
+    DNC = "queue_status_update.dnc"
+    BLOCKED = "queue_status_update.blocked"
+    DIAL_BLOCKED = "queue_status_update.dial_blocked"
+
+
+class TelephonyReadinessCheckName(StrEnum):
+    """The 9 readiness checks enumerated in FR-009 + research §1.9 (data-model.md §1.9)."""
+
+    SIGNALWIRE_CREDENTIALS = "signalwire_credentials"
+    SOURCE_CALLER_ID_AUTHORIZED = "source_caller_id_authorized"
+    DESTINATION_PHONE_E164 = "destination_phone_e164"
+    STATUS_CALLBACK_URL_CONFIGURED = "status_callback_url_configured"
+    MEDIA_CALLBACK_URL_CONFIGURED = "media_callback_url_configured"
+    CAMPAIGN_PERSONA_RUNTIME_MAPPING = "campaign_persona_runtime_mapping"
+    DATAVERSE_METADATA_VERIFIED = "dataverse_metadata_verified"
+    TASK_OWNER_MAPPING_RESOLVED = "task_owner_mapping_resolved"
+    ELIGIBILITY = "eligibility"
+
+
+class TelephonyReadinessResult(StrEnum):
+    """Per-check pass/fail result (FR-009, FR-036)."""
+
+    PASS = "pass"
+    FAIL = "fail"
+
+
+class ShadowSTTDiscrepancyField(StrEnum):
+    """9 atomic enum values reflecting data-model.md §1.7 storage normalization
+    of the 7 spec-level high-value categories from FR-030. Matches the SQLite
+    CHECK constraint in schema.sql.
+    """
+
+    OPT_OUT = "opt_out"
+    WRONG_NUMBER = "wrong_number"
+    CAPTURED_EMAIL = "captured_email"
+    CALLBACK_INTENT = "callback_intent"
+    PREFERRED_CALLBACK_WINDOW = "preferred_callback_window"
+    PERSON_REACHED_NAME = "person_reached_name"
+    PERSON_REACHED_ROLE = "person_reached_role"
+    INTEREST_LEVEL = "interest_level"
+    FINAL_DISPOSITION = "final_disposition"
+
+
+class ShadowSTTDiscrepancyClassification(StrEnum):
+    """Discrepancy policy classification (research.md §4)."""
+
+    BENIGN = "benign"
+    UNCERTAIN = "uncertain"
+
+
+# Type aliases — names the Slice 3 boundary uses while preserving Slice 1 / 2
+# implementation. These are intentionally identity aliases so the orchestrator
+# can use Slice-3 vocabulary without breaking Slice-1 / Slice-2 tests.
+ProviderCallId = str
+DialPlan = str  # Replaces Slice 1 ``fixture_id`` at the SignalWire boundary.
+
+
+class RealtimeProviderSession(BaseModel):
+    """Runtime + model identity recorded on every Slice 3 session for audit (FR-016).
+
+    MUST NOT contain credentials (FR-035). Surfaced in the run report
+    (FR-036, research §9).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_name: str = "pipecat"
+    runtime_version: str
+    provider_name: str
+    model_name: str
+    model_version: str
+
+
+class RejectedAuthCallback(BaseModel):
+    """Distinct audit-log row for SignalWire callbacks that fail HMAC-SHA256
+    signature verification (FR-008 + Clarifications Round 2 Q9).
+
+    MUST NOT contain the verification secret. MUST NOT contain the callback
+    body content (defense in depth against reflected-payload leakage).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    received_at: str
+    session_id: str | None = None
+    source_metadata: dict[str, str] = Field(default_factory=dict)
+    http_status: Literal[401] = 401
+
+
+class ShadowSTTDiscrepancyRecord(BaseModel):
+    """One row per detected divergence on a configured high-value field (FR-030)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    field: ShadowSTTDiscrepancyField
+    live_value: str | None = None  # redacted per FR-033 + Round 2 Q10/Q11
+    shadow_value: str | None = None
+    classification: ShadowSTTDiscrepancyClassification
+    review_task_reason: HumanReviewReason | None = None
+    recorded_at: str
+
+
+class ShadowLaneTruncatedEvent(BaseModel):
+    """Audit-only record for shadow lane output that arrived AFTER the
+    post-finalization grace window elapsed (FR-029 + Clarifications Round 2 Q7).
+
+    By construction this MUST NOT mutate the finalized disposition and MUST
+    NOT emit a new CRM write-back payload.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    finalized_at: str
+    grace_window_ended_at: str
+    late_output_summary: dict[str, Any] = Field(default_factory=dict)
+    would_have_classified_as: ShadowSTTDiscrepancyClassification | None = None
+
+
+class TelephonyReadinessCheckResult(BaseModel):
+    """Single per-check entry in the Telephony Readiness Report (data-model.md §1.9)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    check_name: TelephonyReadinessCheckName
+    result: TelephonyReadinessResult
+    detail: str = ""
+    checked_at: str
+
+
+class TelephonyReadinessReport(BaseModel):
+    """The per-session readiness summary written to
+    ``artifacts/<session_id>/telephony_readiness.json`` and surfaced in the
+    run report's ``telephony_readiness_summary`` field per FR-036."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    started_at: str
+    checks: list[TelephonyReadinessCheckResult] = Field(default_factory=list)
+
+    @property
+    def all_pass(self) -> bool:
+        return all(c.result is TelephonyReadinessResult.PASS for c in self.checks)
+
+
+class WriteBackOperationStatus(BaseModel):
+    """One entry in the run report's ``per_writeback_operation_status`` array.
+
+    Order reflects the actual emission sequence — on ``do_not_call`` outcomes
+    the DNC variant MUST appear FIRST per Clarifications Round 2 Q14.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: str  # e.g. "phone_call_activity", "queue_status_update.dnc", "task"
+    status: Literal["planned", "completed", "resume-needed", "blocked"]
+
+
+class OperatorIdentity(BaseModel):
+    """Operator identity recorded on session + run report (FR-016 + Clarifications
+    Round 1 Q3 + Round 2 Q12). MUST NOT be propagated into Dataverse."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current: str
+    original: str | None = None
+
+
+class ShadowSTTRunSummary(BaseModel):
+    """Run-report ``shadow_stt`` sub-object (research.md §9)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    discrepancy_summary: str = ""
+    lane_truncated: bool = False
+
+
+class RunReport(BaseModel):
+    """The Slice 3 per-session run report (FR-036, research.md §9).
+
+    Written to ``artifacts/<session_id>/run_report.json`` on every invocation
+    (rehearsal AND real-call). All fields are populated; ``real_provider_call_id``
+    is ``None`` in rehearsal mode and on real-call runs that exited before dial.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    run_mode: Slice3RunMode
+    operator_identity: OperatorIdentity
+    real_provider_call_id: ProviderCallId | None = None
+    persona_version: str
+    runtime_identity: RealtimeProviderSession | None = None
+    final_disposition: Disposition | None = None
+    human_review_reason: HumanReviewReason | None = None
+    blocked_reason: str | None = None
+    telephony_readiness_summary: list[TelephonyReadinessCheckResult] = Field(default_factory=list)
+    per_writeback_operation_status: list[WriteBackOperationStatus] = Field(default_factory=list)
+    shadow_stt: ShadowSTTRunSummary
+    callbacks_audit_row_count: int = 0
+    conflicting_callbacks_audit_row_count: int = 0
+    rejected_auth_callbacks_count: int = 0
+    started_at: str
+    ended_at: str | None = None
+
+
+# Backwards-compatible alias for the Slice 1 ``MockCallEvent`` name at the
+# Slice 3 boundary (data-model.md §1.2). The Slice 1 implementation remains
+# the canonical type; Slice 3 surfaces import ``CallEvent`` instead.
+CallEvent = MockCallEvent  # type: ignore[has-type]  # MockCallEvent defined above

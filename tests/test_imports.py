@@ -103,6 +103,45 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.redaction",
         "opencloser.slice2",  # intra-boundary submodules
     },
+    # ---- Slice 3 boundaries (specs/003-real-call-real-crm/plan.md Project Structure) ----
+    "runtime": {
+        # Pipecat-based real-time audio runtime adapter. Imports the Slice 1
+        # persona types verbatim per FR-018 (PersonaOutput / SessionContext) so
+        # the Slice 1 persona-conceptual contract is preserved. SignalWire-
+        # specific / Pipecat-specific / real-time-AI-provider-specific shapes
+        # MUST stay inside this boundary (Constitution Principle III, SC-015).
+        "opencloser.models",
+        "opencloser.persona",
+        "opencloser.runtime",  # intra-boundary submodules
+    },
+    "shadow_stt": {
+        # Non-blocking secondary transcript lane (FR-028 — FR-032). Foundational
+        # Protocols only depend on the models module; the concrete asyncio.Task
+        # implementation in lane.py is wired by slice3/runner.py (US6).
+        "opencloser.models",
+        "opencloser.shadow_stt",  # intra-boundary submodules
+    },
+    "slice3": {
+        # The Slice 3 CLI-coordination layer wires every Slice 1 / Slice 2 /
+        # Slice 3 boundary together (specs/003-real-call-real-crm/contracts/
+        # cli-slice3.md §Dependencies allowed) without modifying the
+        # underlying orchestrator or persona modules. Mirrors slice2's
+        # composition role and adds the Slice 3 boundaries (runtime,
+        # shadow_stt).
+        "opencloser.models",
+        "opencloser.state",
+        "opencloser.artifacts",
+        "opencloser.eligibility",
+        "opencloser.transport",
+        "opencloser.persona",
+        "opencloser.crm",
+        "opencloser.core",
+        "opencloser.redaction",
+        "opencloser.runtime",
+        "opencloser.shadow_stt",
+        "opencloser.slice2",
+        "opencloser.slice3",  # intra-boundary submodules
+    },
 }
 
 

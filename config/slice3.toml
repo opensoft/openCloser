@@ -1,0 +1,104 @@
+# Slice 3 — Real Call, Real CRM — deployment configuration
+#
+# Non-secret configuration only. Secrets (API tokens, signing secrets, OAuth
+# client secrets) MUST come from environment variables per:
+#   - openCloser Constitution §Architecture Constraints
+#   - spec.md FR-035
+#   - research.md §11
+#
+# Required env vars (see research.md §11 for the full list):
+#   SIGNALWIRE_PROJECT_ID, SIGNALWIRE_API_TOKEN, SIGNALWIRE_SIGNING_SECRET
+#   SLICE3_REALTIME_PROVIDER (or "disabled"), SLICE3_REALTIME_API_KEY
+#   SLICE3_SHADOW_STT_PROVIDER (or "disabled"), SLICE3_SHADOW_STT_API_KEY
+#   DATAVERSE_TENANT_ID, DATAVERSE_CLIENT_ID, DATAVERSE_CLIENT_SECRET,
+#   DATAVERSE_ENV_URL  (reused from Slice 2)
+
+[signalwire]
+# Source caller-ID number authorized for outbound dialing. MUST be E.164
+# and MUST be authorized in the SignalWire dashboard for outbound calls
+# (FR-009 telephony readiness check (b)). The placeholder below is invalid
+# on purpose — replace at deploy time.
+source_caller_id = "+15555550100"
+
+# Status + media callback URL templates. `{session_id}` is interpolated at
+# dial time so the SignalWire callback receiver can associate inbound
+# webhooks with the originating session. URLs MUST be reachable from
+# SignalWire's network (FR-009 check (d)).
+status_callback_url_template = "https://your-callback.example.com/sw/status/{session_id}"
+media_callback_url_template  = "https://your-callback.example.com/sw/media/{session_id}"
+
+[realtime_ai]
+# Configured real-time AI model provider identity (FR-016: persona version
+# + runtime/model identity recorded on every session). Credentials live in
+# env vars and MUST NOT appear here.
+#
+# Provider names like "openai-realtime", "google-realtime" are illustrative;
+# deployment picks the actual supported provider.
+provider_name = "openai-realtime"
+model_name    = "gpt-4o-realtime-preview"
+model_version = "2024-12-17"
+
+[shadow_stt]
+# Whether the shadow STT lane is enabled by default. CLI flags
+# `--shadow-stt` / `--no-shadow-stt` override this on a per-invocation basis.
+# When false (or env var SLICE3_SHADOW_STT_PROVIDER unset / "disabled"), the
+# Slice 3 demonstrable loop MUST still complete (FR-032).
+enabled_default = true
+
+# Path to the discrepancy policy file (research.md §4). The policy splits
+# rules into `benign_rules` (silent, no escalation) and `uncertain_rules`
+# (escalate `needs_human_review` with reason `shadow_stt_discrepancy`).
+discrepancy_policy_path = "config/shadow_stt_discrepancy_policy.json"
+
+[timeouts]
+# All three timeouts are independently deployment-configurable per
+# spec §Deferred to Implementation Plan and research.md §7.
+
+# Live-call abandonment timeout (FR-026): a call placed and acknowledged by
+# SignalWire that does not receive a normalized terminal event within this
+# many seconds is finalized as `failed` / `live_call_abandonment`.
+abandonment_sec = 90
+
+# Live-runtime silence-after-connection timeout (FR-013 / Round 1 Q4):
+# AFTER `connected`, no extraction event from the live model for this many
+# seconds triggers `needs_human_review` / `script_truncated`.
+silence_after_connection_sec = 30
+
+# Post-finalization grace window (FR-029 / Round 2 Q7): the orchestrator
+# finalizes the session immediately on terminal event but holds the CRM
+# write-back for this many seconds so a late shadow-STT discrepancy MAY
+# participate in the disposition. 0 → write back immediately; any positive
+# value gives the shadow lane that window to participate.
+grace_window_sec = 3
+
+[retention]
+# Transcript retention mode (FR-033). Supported modes:
+#   - "full_with_redaction" — full transcript file written, redacted per the
+#     default-on policy (also covers session-result summary + shadow STT
+#     transcript + shadow STT discrepancy records per Round 2 Q10).
+#   - "summary_only" — no full transcript file; session-result still carries
+#     the redacted summary.
+#   - "pointer_only" — only a machine-readable pointer is persisted; pointer
+#     metadata is NOT redacted (must remain machine-readable per Round 2 Q10).
+mode = "full_with_redaction"
+
+[redaction]
+# Default-on policy that runs BEFORE any transcript-derived artifact is
+# written to disk. Covers transcript + session-result summary + shadow STT
+# transcript + shadow STT discrepancy records per FR-033 + Round 2 Q10.
+# Round 2 Q11: when the persona emits `phi_collection_risk`, a PHI tag-and-
+# redact pass runs in addition to the default policy.
+policy = "default"
+
+[performance]
+# CI defaults for the performance / latency assertions whose numeric targets
+# are explicitly deferred at the spec level (spec §Deferred to Implementation
+# Plan → "Performance and latency targets"). These values are deployment
+# configuration — production deployments will tune them per environment.
+#
+# SC-013 shadow-lane no-observable-slowdown tolerance: the maximum allowed
+# p95 turn-latency delta between a `--shadow-stt` paired run and a
+# `--no-shadow-stt` paired run before T069 fails. Pinned so contract /
+# integration tests have a concrete pass/fail threshold; tighten in
+# production deployments once empirical data is available.
+shadow_lane_p95_latency_tolerance_ms = 50
