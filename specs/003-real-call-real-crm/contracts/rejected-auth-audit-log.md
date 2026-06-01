@@ -43,7 +43,10 @@ class RejectedAuthCallbackLog(Protocol):
    - `received_at` (ISO8601)
    - `session_id` (nullable; some forged callbacks may not match any known session)
    - `source_metadata` (a JSON object with provider-supplied source identifiers /
-     IP-level metadata where available)
+     IP-level metadata where available) — restricted to an ALLOW-LIST of non-caller-controlled
+     fields (provider source identifier(s) + remote IP / transport metadata only) and bounded
+     at ≤ 1 KB serialized / ≤ 16 keys (Round 3), so a forged callback cannot stuff arbitrary
+     payload into the audit log
    - `http_status` (always 401)
 
 3. **No secret leakage** (FR-035, Round 2 Q9): the log MUST NOT contain:
@@ -53,7 +56,20 @@ class RejectedAuthCallbackLog(Protocol):
    - Any other credential string.
 
 4. **Defense in depth — no body content**: even if the body would not contain a secret,
-   storing it risks reflected-payload leakage. The body is explicitly excluded.
+   storing it risks reflected-payload leakage. The body is explicitly excluded. On a
+   verification failure the ASGI receiver MUST drop the request body buffer without persisting
+   it anywhere (Round 3).
+
+4b. **Append one row per delivery — no dedup** (Round 4 R4-Q27): the rejected-auth audit log
+    appends exactly one row per forged delivery; every forged delivery is recorded and there is
+    NO deduplication. Each attempt is independently security-relevant, so even repeated forged
+    deliveries (including null-`session_id` duplicates) are each recorded as their own row.
+
+4a. **Unassociated-rejection retention** (Round 3): a null-`session_id` rejection is written
+    under `artifacts/_unassociated/rejected_auth_callbacks.jsonl`, which MUST honor the same
+    ≥ 90-day local-artifact retention floor as session-scoped artifacts. Its count is surfaced
+    as a deployment-level `rejected_auth_unassociated_count` in operator tooling (the per-session
+    run report's `rejected_auth_callbacks_count` covers only session-scoped rejections).
 
 5. **Run-report integration** (FR-036): the run report MUST surface
    `rejected_auth_callbacks_count` per session so operators see attempted forgeries.
@@ -64,6 +80,12 @@ class RejectedAuthCallbackLog(Protocol):
 7. **On-disk file**: `artifacts/<session_id>/rejected_auth_callbacks.jsonl` (one JSON
    object per line). When `session_id` is null (unassociatable callback), the file may
    live at `artifacts/_unassociated/rejected_auth_callbacks.jsonl`.
+
+8. **Unassociatable rule** (Round 4 R4-Q19): a callback is "unassociatable" when its
+   `{session_id}` URL path segment matches no known session row (or the segment is absent).
+   An unassociatable callback resolves to a null `session_id` and its rejection row is written
+   under `artifacts/_unassociated/rejected_auth_callbacks.jsonl`. This is the sole definition
+   of how a rejection becomes null-session.
 
 ## File format
 
@@ -101,3 +123,18 @@ is the source of truth for human inspection.
 | `test_count_for_session_matches_jsonl` | `count_for_session(sid)` matches the line count of `artifacts/<sid>/rejected_auth_callbacks.jsonl` |
 | `test_run_report_surfaces_count` | After N rejected-auth callbacks for a session, `run_report.json` shows `rejected_auth_callbacks_count = N` |
 | `test_no_secrets_in_artifact_files` | grep for any `SIGNALWIRE_SIGNING_SECRET` substring across all `artifacts/**/rejected_auth_callbacks.jsonl` files returns 0 matches (SC-018) |
+| `test_source_metadata_allow_list_and_size_bound` | A callback carrying extra / oversized metadata is stored with only allow-listed keys, ≤ 16 keys, ≤ 1 KB serialized (Round 3) |
+| `test_body_buffer_dropped_on_failure` | After a verification failure, the request body is not present in any persisted store or in memory beyond the request scope (Round 3) |
+| `test_unassociated_retention_floor` | `artifacts/_unassociated/rejected_auth_callbacks.jsonl` is subject to the same ≥ 90-day retention floor; operator tooling reports `rejected_auth_unassociated_count` (Round 3) |
+| `test_append_one_row_per_delivery_no_dedup` | N forged deliveries (including repeated null-`session_id` deliveries) append N rows; no dedup collapses repeated attempts (Round 4 R4-Q27) |
+| `test_unassociatable_rule_defined` | A callback whose `{session_id}` path segment matches no known session row (or is absent) resolves to null `session_id` and lands under `artifacts/_unassociated/` (Round 4 R4-Q19) |
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+Propagated from spec §"Session 2026-06-01 (Round 4 — checklist residual closure)":
+- R4-Q27: the rejected-auth audit log appends one row per delivery with NO dedup; every forged
+  delivery — including null-`session_id` duplicates — is each recorded. Stated in Required
+  behaviors; added `test_append_one_row_per_delivery_no_dedup`.
+- R4-Q19: defined the unassociatable rule — a callback whose `{session_id}` path segment
+  matches no known session row (or is absent) → null `session_id` → `artifacts/_unassociated/`.
+  Added `test_unassociatable_rule_defined`.

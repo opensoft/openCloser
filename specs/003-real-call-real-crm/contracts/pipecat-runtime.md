@@ -48,6 +48,11 @@ class PersonaRuntime(Protocol):
 
         Raises:
             RealtimeProviderError: provider-side failure (Round 1 Q4 (a)).
+                Carries `transient: bool` (Round 4 R4-Q5). A transient
+                PRE-connection error is retried within the connect budget;
+                a terminal pre-connection error finalizes per FR-013.
+                POST-connection, ANY RealtimeProviderError is a degradation
+                trigger regardless of `transient`.
             PipecatRuntimeError: runtime crash / unrecoverable adapter
                 failure (Round 1 Q4 (b)).
             SilenceAfterConnectionTimeout: configurable silence /
@@ -71,7 +76,8 @@ class RealtimeAIProvider(Protocol):
     @property
     def identity(self) -> dict[str, str]:
         """Returns {provider_name, model_name, model_version} for audit
-        (FR-016). MUST NOT include credentials (FR-035)."""
+        (FR-016). MUST NOT include credentials (FR-035) NOR provider-account
+        identifiers (account / org / project id) (Round 4 R4-Q16)."""
 ```
 
 ## Required behaviors
@@ -110,15 +116,35 @@ class RealtimeAIProvider(Protocol):
    - (c) `SilenceAfterConnectionTimeout` — the deployment-configurable silence-after-connection
      / no-extraction-event timeout elapsed.
 
+   **Distinct run-report reason codes** (Round 4 R4-Q13): the three FR-013 triggers MUST map
+   to DISTINCT run-report reason codes so the report distinguishes which trigger fired:
+   - (a) `RealtimeProviderError` → `provider_error`
+   - (b) `PipecatRuntimeError` → `runtime_crash`
+   - (c) `SilenceAfterConnectionTimeout` → `silence_timeout`
+
+   **`RealtimeProviderError.transient`** (Round 4 R4-Q5): `RealtimeProviderError` carries a
+   `transient: bool`. A transient PRE-connection provider error is retried within the connect
+   budget (it is NOT immediately a degradation trigger); a terminal pre-connection error
+   finalizes per the mapping below. POST-connection, ANY provider error is a degradation
+   trigger regardless of `transient`.
+
    Disposition mapping:
    - Pre-connected (triggers (a) and (b) only): finalize as `failed` with a runtime-failure
-     reason; no false connected-call Phone Call activity.
+     reason (the matching distinct reason code above); no false connected-call Phone Call
+     activity.
    - Post-connected (any of (a) / (b) / (c)): finalize as `needs_human_review` with reason
-     `script_truncated`.
+     `script_truncated`; the distinct trigger reason code is still recorded in the run report.
 
 6. **Runtime/model identity recorded** (FR-016): every session MUST record
    `{runtime_name, runtime_version, provider_name, model_name, model_version}`. Credentials
-   MUST NOT be recorded (FR-035).
+   MUST NOT be recorded (FR-035). Provider-ACCOUNT identifiers (SignalWire project id, the
+   real-time provider account / org id) are ALSO EXCLUDED (Round 4 R4-Q16): only the provider
+   NAME plus `model_name` / `model_version` are recorded, never account/org identifiers.
+
+7. **Runtime identity preserved on resume** (FR-016 per Round 4 R4-Q12): on a resume
+   invocation, `runtime_identity` is PRESERVED from the original session and is NOT
+   re-derived — the live runtime does not re-run on resume (there is no new call), exactly as
+   operator-identity `original` is preserved. The resuming invocation MUST NOT overwrite it.
 
 ## What MUST NOT leak past this boundary
 
@@ -141,5 +167,24 @@ class RealtimeAIProvider(Protocol):
 | `test_provider_error_post_connected_yields_needs_review` | `RealtimeProviderError` raised after `connected` → finalize as `needs_human_review` / `script_truncated` |
 | `test_runtime_crash_post_connected_yields_needs_review` | `PipecatRuntimeError` after `connected` → finalize as `needs_human_review` / `script_truncated` |
 | `test_silence_timeout_yields_needs_review` | `SilenceAfterConnectionTimeout` after `connected` → finalize as `needs_human_review` / `script_truncated` |
-| `test_runtime_identity_recorded_no_credentials` | Session record contains `{runtime_name, version, provider_name, model_name, model_version}`; contains 0 credential strings |
+| `test_runtime_identity_recorded_no_credentials` | Session record contains `{runtime_name, version, provider_name, model_name, model_version}`; contains 0 credential strings AND 0 provider-account identifiers (SignalWire project id, real-time provider account / org id) (Round 4 R4-Q16) |
+| `test_degradation_reason_codes_distinct` | The three FR-013 triggers map to distinct run-report reason codes: `RealtimeProviderError` → `provider_error`, `PipecatRuntimeError` → `runtime_crash`, `SilenceAfterConnectionTimeout` → `silence_timeout` (Round 4 R4-Q13) |
 | `test_no_pipecat_specifics_leak` | The `PersonaOutput` consumed by the orchestrator contains 0 Pipecat type names or provider streaming protocol fields (SC-015) |
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+Propagated from spec.md "Session 2026-06-01 (Round 4)":
+
+- **R4-Q13**: the three FR-013 triggers map to distinct run-report reason codes
+  `provider_error` / `runtime_crash` / `silence_timeout`. Captured in Required behaviors #5
+  (degradation mapping) and the new `test_degradation_reason_codes_distinct`.
+- **R4-Q5**: `RealtimeProviderError` carries `transient: bool`; transient pre-connection
+  errors are retried within the connect budget, but post-connection ANY provider error is a
+  degradation trigger regardless of `transient`. Captured in the `run()` docstring and
+  Required behaviors #5.
+- **R4-Q16**: recorded runtime/model identity excludes provider-account identifiers (only
+  provider name + `model_name` / `model_version`). Captured in the `identity` property
+  docstring, Required behaviors #6, and the extended
+  `test_runtime_identity_recorded_no_credentials` assertion.
+- **R4-Q12**: `runtime_identity` is preserved (not re-derived) on resume. Captured in
+  Required behaviors #7.

@@ -103,10 +103,12 @@ class ShadowSTTLane(Protocol):
    `shadow_value` fields, before either is written to disk. Transcript pointer metadata
    is excluded (must remain machine-readable).
 
-8. **PHI tag-and-redact** (FR-015 / FR-033 per Round 2 Q11): when the persona emits
+8. **PHI tag-and-redact** (FR-015 / FR-033 per Round 2 Q11, Round 3): when the persona emits
    `phi_collection_risk` for a caller-volunteered PHI utterance, the redaction layer's
    PHI pass MUST tag and redact the PHI-bearing utterance in the shadow STT transcript and
-   the shadow STT discrepancy records before write.
+   the shadow STT discrepancy records before write, using the distinct `[PHI-REDACTED]` marker
+   (Round 3). Redaction is fail-closed: if the pass cannot complete, the shadow artifacts MUST
+   NOT be written unredacted and the session finalizes with `redaction_failed`.
 
 9. **Toggle** (FR-032): the lane MUST be deployment-configurable as enabled or disabled.
    When disabled, the Slice 3 demonstrable loop MUST still complete without it (no
@@ -116,7 +118,22 @@ class ShadowSTTLane(Protocol):
 
 10. **Lane-failure behavior** (FR-029): if the shadow lane crashes or times out mid-call,
     the live call MUST continue unaffected; no discrepancy events are emitted for the
-    missing-shadow case; the run report MUST record the shadow-lane failure for audit.
+    missing-shadow case; the run report MUST record the shadow-lane failure for audit as the
+    `shadow_stt.lane_failed` signal. This is DISTINCT from `shadow_stt.lane_truncated` (Round 3):
+    `lane_failed` = the lane produced NO usable result (crash / timeout); `lane_truncated` =
+    the lane produced output but only AFTER the grace window. The two are reported
+    independently; a single run MAY set neither, either, or — in principle — both.
+    When `shadow_stt.lane_failed` is set, the run report MUST carry an accompanying
+    `failure_detail {failure_type, at}` object alongside it (Round 4 R4-Q14): `failure_type`
+    names the failure class (e.g. crash / timeout) and `at` records when in the call it
+    occurred. `failure_detail` is audit-only and never mutates the finalized disposition.
+
+11. **Structured discrepancy summary** (FR-036 per Round 4 R4-Q15): `shadow_stt.discrepancy_summary`
+    is a STRUCTURED object, NOT a free-form string. Its defined shape is:
+    `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}` —
+    `fields_compared` / `discrepancies` / `uncertain` are counts and `per_field` carries one
+    `{field, classification}` entry per compared high-value field (`classification` ∈
+    `benign` / `uncertain`). Consumers MUST be able to parse it as structured data.
 
 ## What MUST NOT leak past this boundary
 
@@ -124,6 +141,14 @@ class ShadowSTTLane(Protocol):
 - The discrepancy policy's internal rule structure (the orchestrator sees only `benign` /
   `uncertain`).
 - Credentials.
+
+### Out of scope (Round 4 R4-Q45)
+
+- **Shadow-lane disclosure-text-drift detection** is OUT OF SCOPE for Slice 3. The shadow
+  lane does NOT compare or police the persona's disclosure wording for drift; the canonical
+  disclosure is already fixed by Slice 1 persona policy, and the `phi_collection_risk`
+  escalation + tag-and-redact is the compliance control. This is a declared exclusion, not
+  an oversight.
 
 ## Contract test summary (`tests/contract/test_shadow_stt_lane.py`)
 
@@ -138,7 +163,23 @@ class ShadowSTTLane(Protocol):
 | `test_late_shadow_output_yields_truncated_event` | Shadow emits a discrepancy AFTER the grace window → `ShadowLaneTruncatedEvent` recorded; disposition unchanged; no new CRM payload |
 | `test_disabled_lane_completes_demonstrable_loop` | With shadow disabled, the Slice 3 loop completes; run report records `shadow_stt.enabled = false` |
 | `test_lane_failure_does_not_abort_live_call` | Shadow lane raises mid-call → live call still finalizes normally; run report records shadow-lane failure |
+| `test_lane_failed_distinct_from_truncated` | A crashed/timed-out lane sets `shadow_stt.lane_failed = true` and `lane_truncated = false`; a late-but-present lane sets `lane_truncated = true` and `lane_failed = false` (Round 3) |
 | `test_retention_parity_with_live_transcript` | Shadow transcript and discrepancy records honor the same retention mode as the live transcript |
 | `test_default_on_redaction_covers_shadow_artifacts` | Sensitive content fixtures appear `[REDACTED]` in `shadow_transcript.txt` and in `shadow_discrepancies.jsonl` `live_value` / `shadow_value` |
 | `test_phi_volunteered_redacts_shadow_artifacts` | When persona emits `phi_collection_risk`, the PHI utterance is tagged and redacted in the shadow artifacts before write |
-| `test_run_report_states_shadow_enabled_flag` | Run report always contains `shadow_stt.enabled` (true or false) and, when true, `shadow_stt.discrepancy_summary` and `shadow_stt.lane_truncated` |
+| `test_run_report_states_shadow_enabled_flag` | Run report always contains `shadow_stt.enabled` (true or false) and, when true, `shadow_stt.discrepancy_summary` (structured object, Round 4 R4-Q15), `shadow_stt.lane_truncated`, and `shadow_stt.lane_failed`; when `lane_failed` is true, a `failure_detail {failure_type, at}` object accompanies it (Round 4 R4-Q14) |
+| `test_discrepancy_summary_is_structured` | `shadow_stt.discrepancy_summary` is a structured object `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}` with integer counts and a per-field classification list — NOT a free-form string (Round 4 R4-Q15) |
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+Propagated from spec.md "Session 2026-06-01 (Round 4)":
+
+- **R4-Q15**: `shadow_stt.discrepancy_summary` is a STRUCTURED object
+  `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}`, not a
+  free-form string. Captured in Required behaviors #11, the run-report test row, and the new
+  `test_discrepancy_summary_is_structured`.
+- **R4-Q14**: the `shadow_stt.lane_failed` run-report signal is accompanied by a
+  `failure_detail {failure_type, at}` object. Captured in Required behaviors #10 and the
+  run-report test row.
+- **R4-Q45**: shadow-lane disclosure-text-drift detection is OUT OF SCOPE (declared
+  exclusion under "What MUST NOT leak past this boundary").

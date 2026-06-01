@@ -54,7 +54,7 @@ Dataverse adapter (FR-005, FR-013, FR-018, SC-015).
 | CRM auth | **OAuth2 client-credentials** (Microsoft Entra ID) — Slice 2 adapter reused unchanged | Slice 2 plan |
 | Mapping artifact | **`config/dataverse_mapping.json`** — Slice 2 artifact reused unchanged | Slice 2 plan |
 | Non-secret config | **`config/slice3.toml`** (stdlib `tomllib`) — extends the Slice 1 / Slice 2 TOML pattern | [research.md §Configuration](./research.md#11-configuration-surface) |
-| State store | **SQLite** (existing) — extended with `signalwire_callbacks`, `rejected_auth_callbacks`, `shadow_stt_discrepancies`, `shadow_lane_truncated_events` tables | [data-model.md](./data-model.md) |
+| State store | **SQLite** (existing) — extended with five new tables (`rejected_auth_callbacks`, `shadow_stt_discrepancies`, `shadow_lane_truncated_events`, plus the Round 4 `call_events` + `callbacks_audit` DDL) + nine net-new `sessions` columns (incl. the Round 3 `operator_identity_chain_json`); `(session_id, provider_event_id)` dedup is now schema-enforced via a UNIQUE constraint on `call_events`, while `callbacks_audit` is deliberately append-only (no uniqueness) and is also mirrored to the receipt log `callbacks_audit.jsonl` (R4-Q25) | [data-model.md §3](./data-model.md) |
 | Persona | **Existing ALF appointment-setter** (Slice 1) — extraction schema, allowed claims, disposition precedence, escalation reason enumeration all reused; **additive** `shadow_stt_discrepancy` reason; clarified disclosure-acknowledgment behavior (no explicit caller ack required) and PHI-volunteered escalation + redaction (Round 2 Q11) | spec FR-014 – FR-016 |
 | Testing | **pytest** + contract tests against SignalWire / Pipecat / shadow STT fakes + fixture-replay through the SignalWire transport boundary + recorded-audio playback through the Pipecat runtime + Slice 1 / Slice 2 integration suites still pass | [research.md §Testing](./research.md#12-testing-strategy) |
 | Lint / format | **ruff** — unchanged | Slice 1 / Slice 2 plans |
@@ -79,15 +79,50 @@ timeout, post-finalization grace window) are pinned in [research.md §Timeouts](
 
 **Constraints**: No PHI collection (Constitution §V; spec FR-014, FR-015; caller-volunteered
 PHI triggers `phi_collection_risk` + tag-and-redact per FR-015 / FR-033). No secrets in logs
-or artifacts (FR-035, SC-018). Default-on redaction covers full transcript + session-result
-summary + shadow STT transcript + shadow STT discrepancy records (FR-033, Round 2 Q10);
-transcript pointer metadata excluded so pointers stay machine-readable. SignalWire callback
-authentication is mandatory; rejected callbacks recorded in a distinct audit log with no
-secret / no body (FR-008, Round 2 Q9). Operator identity captured locally only; not propagated
-to Dataverse (FR-016, FR-036, Round 1 Q3 + Round 2 Q12). No batch, scheduler, multi-worker
-locking, distributed job queue, or generalized workflow engine (constitution §II; spec FR-003).
-Concurrent CLI invocation on the same queue item is blocked by reusing Slice 2 queue-claim
-semantics (FR-003, Round 1 Q5).
+or artifacts (FR-035, SC-018) — and per Round 4 (R4-Q17) the no-secrets guarantee EXTENDS to
+exception messages and stack traces: the global exception handler MUST pass any error text
+through the redaction layer before it is logged, written to stderr, or written to the run
+report. Secrets (incl. the SignalWire callback signing secret) are loaded from the
+environment ONLY, at module init — never from disk or CLI argv (FR-035, R4-Q20). Default-on
+redaction covers full transcript + session-result summary + shadow STT transcript + shadow STT
+discrepancy records (FR-033, Round 2 Q10); transcript pointer metadata excluded so pointers
+stay machine-readable. SignalWire callback authentication is mandatory; rejected callbacks
+recorded in a distinct audit log with no secret / no body (FR-008, Round 2 Q9). Operator
+identity captured locally only; not propagated to Dataverse (FR-016, FR-036, Round 1 Q3 +
+Round 2 Q12). No batch, scheduler, multi-worker locking, distributed job queue, or generalized
+workflow engine (constitution §II; spec FR-003). Concurrent CLI invocation on the same queue
+item is blocked by reusing Slice 2 queue-claim semantics (FR-003, Round 1 Q5).
+
+**Telephony readiness (Round 4 additions to FR-009)**: The FR-009 hard pre-dial readiness
+check now also verifies (R4-Q1 / R4-Q23 / R4-Q34): real-time AI provider credentials present
+(`realtime_ai_credentials`); shadow-STT provider credentials present when shadow STT is
+explicitly enabled via `--shadow-stt` (`shadow_stt_credentials` — when shadow is only
+default-on-from-config, a missing key disables the lane with a run-report warning instead of
+failing the run); the SignalWire callback signing secret present and loadable (fail-closed —
+if signature verification is unavailable the run refuses to start in real-call mode, no
+unauthenticated-callback fallback); the status/media callback URL templates carry ONLY the
+supported `{session_id}` placeholder (any other placeholder is a readiness failure); and the
+Slice 2 Dataverse metadata verification is extended to confirm Dynamics accepts the
+`shadow_stt_discrepancy` review-task reason value (option-set membership). Any of these failing
+exits before dial (exit 4), consumes no attempt, and is operator-visible.
+
+**Runtime-failure reason codes (Round 4, FR-013)**: The three FR-013 degradation triggers are
+recorded in the run report as DISTINCT failure-reason codes — `provider_error` (a),
+`runtime_crash` (b), `silence_timeout` (c) (R4-Q13) — so observability can tell them apart.
+`RealtimeProviderError` carries a `transient: bool` flag (R4-Q5): a transient pre-connection
+provider error is retried within the connect budget and a terminal one finalizes immediately,
+but once the call has connected ANY provider error is a degradation trigger regardless of
+`transient`.
+
+**Audit retention floor (Round 4, R4-Q33)**: The ≥ 90-day local-artifact retention floor
+applies to pointer records and the `artifacts/_unassociated/` tree as well as session-scoped
+artifacts; deployment config cannot lower the audit floor below 90 days (if retention config
+sets a shorter window, the 90-day floor still wins for audit artifacts).
+
+**Rollback posture (Round 4, R4-Q31)**: Slice 3 is FORWARD-ONLY. The additive SQLite columns
+and the new tables are backward-compatible (Slice 2 reads ignore them), so there is NO
+automated Slice 3 → Slice 2 downgrade path. The documented rollback is manual: restore a
+pre-migration DB snapshot. An already-written-back Dynamics record is never auto-rolled-back.
 
 **Unknowns**: None blocking. The deployment-configurable provider choices (real-time AI
 provider, shadow STT provider, timeout defaults) are intentionally **not** spec-level
@@ -128,7 +163,8 @@ materialised:
   [pipecat-runtime.md](./contracts/pipecat-runtime.md),
   [shadow-stt-lane.md](./contracts/shadow-stt-lane.md)).
 - **IV. Audit / idempotency**: `Session` row carries `provider_call_id`, `runtime_identity`,
-  `operator_identity_{current,original}`, `run_mode`, `finalized_at`; `(session_id,
+  `operator_identity_{current,original,chain}` (the full ordered resume chain added Round 3),
+  `run_mode`, `grace_window_sec`, `finalized_at`; `(session_id,
   provider_event_id)` dedup key on `CallEvent` + `CallbacksAuditLog`; distinct
   `RejectedAuthCallbackLog` (Round 2 Q9); `ShadowLaneTruncatedEvent` audit-only by
   construction ([data-model.md §1, §7](./data-model.md)).
@@ -142,6 +178,34 @@ materialised:
 
 No post-design violations. Complexity Tracking remains empty. Plan is ready for
 `/speckit-tasks`.
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+The Round 4 spec amendments (spec §"Session 2026-06-01 (Round 4 — checklist residual
+closure)" + the inline-amended FRs) are propagated into this plan as follows. No
+constitution principle changes; all five still pass.
+
+- **Rollback posture (R4-Q31)** — added a "Rollback posture" note to Technical Context /
+  Constraints: Slice 3 is FORWARD-ONLY (additive columns + new tables are
+  backward-compatible), no automated Slice 3 → Slice 2 downgrade; documented manual rollback
+  is restoring a pre-migration DB snapshot; an already-written-back Dynamics record is never
+  auto-rolled-back.
+- **Telephony readiness (R4-Q1 / R4-Q23 / R4-Q34)** — FR-009 readiness in Constraints now also
+  checks real-time AI provider creds, shadow-STT creds (when `--shadow-stt`), signing-secret
+  presence (fail-closed when signature verification is unavailable), the `{session_id}`-only
+  callback placeholder, and that Dynamics accepts the `shadow_stt_discrepancy` review-task
+  reason value.
+- **Runtime-failure reason codes (R4-Q13 / R4-Q5)** — FR-013's three triggers are recorded as
+  distinct reason codes `provider_error` / `runtime_crash` / `silence_timeout`;
+  `RealtimeProviderError` carries a `transient` flag.
+- **Security (R4-Q17 / R4-Q20)** — no-secrets now extends to exception messages / stack traces
+  (global handler redacts pre-write); secrets are env-only at init (never disk/argv).
+- **Audit retention floor (R4-Q33)** — the ≥ 90-day floor applies to pointer records and
+  `_unassociated/`; config cannot lower it.
+- **State store / DDL (R4-Q25)** — the State-store row now reflects that `call_events` +
+  `callbacks_audit` have DDL in data-model §3 (five new tables total), with
+  `(session_id, provider_event_id)` dedup now schema-enforced via a UNIQUE constraint on
+  `call_events`; the phantom `signalwire_callbacks` name is not reintroduced.
 
 ## Project Structure
 

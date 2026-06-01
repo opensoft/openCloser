@@ -65,6 +65,19 @@ class CallTransport(Protocol):
    - Counted in the run report.
    - NOT logged with the verification secret, NOT logged with the callback body content.
 
+   **Fail-closed "where supported" (FR-008, Round 4 R4-Q23)**: if a deployment cannot supply
+   callback signature verification, the run REFUSES to start in real-call mode (fail-closed)
+   with a named readiness failure. There is NO unauthenticated-callback fallback — an
+   unverifiable callback path is never accepted.
+
+   **Signing secret source (Round 4 R4-Q20)**: the signing secret is loaded from the
+   ENVIRONMENT only, at signature-module init. Loading the secret from disk or from argv is
+   forbidden (reinforces FR-035).
+
+   **Authentication scope boundary (Round 4 R4-Q24)**: Slice 3 authenticates ONLY SignalWire
+   status / media callbacks. No other inbound integration callback exists in Slice 3 scope;
+   signature verification is scoped to the SignalWire callback receiver and nothing else.
+
 2. **Real-dial E.164 validation** (FR-010): before placing a call, validate the destination
    phone against E.164 / SignalWire-acceptable format. Failure MUST raise
    `RealDialPhoneValidationError` before any dial attempt, MUST NOT consume an attempt,
@@ -116,3 +129,15 @@ class CallTransport(Protocol):
 | `test_e164_validation_blocks_before_dial` | Non-E.164 destination raises `RealDialPhoneValidationError` before `Client.calls.create` is called |
 | `test_provider_4xx_does_not_consume_attempt` | SignalWire 4xx on dial raises `ProviderRejectedDialError`; no attempt_count increment; no Phone Call activity emitted |
 | `test_no_signalwire_specifics_leak` | Inspecting the `CallEvent` stream consumed by the orchestrator contains 0 SignalWire intermediate state names or webhook shape fields (SC-015) |
+| `test_signature_unsupported_fails_closed` | A deployment that cannot supply callback signature verification refuses to start in real-call mode with a named readiness failure; no unauthenticated-callback fallback path is exercised (Round 4 R4-Q23) |
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+Propagated from spec §"Session 2026-06-01 (Round 4 — checklist residual closure)":
+- R4-Q23: FR-008 "where supported" resolved fail-closed — if signature verification is
+  unavailable, the real-call run refuses to start with a named readiness failure and there is
+  NO unauthenticated-callback fallback. Added `test_signature_unsupported_fails_closed`.
+- R4-Q20: the signing secret is loaded from the environment ONLY at signature-module init,
+  never from disk or argv.
+- R4-Q24: Slice 3 authenticates ONLY SignalWire status / media callbacks (boundary scope
+  stated explicitly).

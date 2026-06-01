@@ -82,6 +82,33 @@ The bounded retry budget (FR-022) applies per-step. If step 1 succeeds and step 
 within budget, the contact is already protected — the resume coordinator will pick up at
 step 2 on re-invocation.
 
+#### DNC-first write exhaustion (Round 4 R4-Q7)
+
+If the DNC / opt-out write (step 1) ITSELF exhausts its retry budget — i.e. the
+first, contact-protecting write never lands — the run MUST:
+
+1. Halt the remaining write-back (do NOT proceed to the Phone Call activity / Task steps).
+2. Finalize the run with failure reason `dnc_write_failed`.
+3. Emit a PROMINENT operator alert: the contact may be unprotected (the DNC / opt-out field
+   was not written), so this is treated as higher-severity than an ordinary write-back
+   exhaustion.
+4. On resume, the write-back retries DNC-first (the same DNC-first ordering applies on
+   re-invocation), so a subsequent successful attempt protects the contact before any other
+   write proceeds.
+
+This is distinct from the resume-needed posture of R4-Q6 (which never overwrites the persona
+disposition): a DNC-first exhaustion sets the failure reason `dnc_write_failed` precisely
+because the contact-protecting write is the one that failed.
+
+#### Field-update dedup reads the ledger (Round 4 R4-Q26)
+
+The DNC / queue-status field-update dedup MUST read the local `writeback_progress` ledger to
+decide whether a field update has already been applied — NOT the live Dataverse field value.
+Reading the ledger (rather than the current Dataverse value) makes resume deterministic: it
+cannot diverge across re-invocations even if an external actor or a prior partial write
+changed the live field, and a successful prior write recorded in the ledger is never
+re-applied.
+
 ### Per-disposition step ordering (other dispositions)
 
 Unchanged from Slice 2:
@@ -125,6 +152,16 @@ rejected-by-authentication callback counts (that count lives in the local run re
   event finalizes the session as `failed` / `live_call_abandonment` immediately (Round 2
   Q6) and then proceeds through this write-back contract with the resume coordinator.
 
+### Write-back exhaustion never overwrites the disposition (Round 4 R4-Q6)
+
+An exhausted write-back retry budget MUST mark the unfinished operations `resume-needed` and
+MUST NEVER overwrite the persona's final disposition with `failed`. A successful retry keeps
+the persona disposition; an exhausted budget leaves the persona disposition intact and the
+unfinished operations are picked up on the next resume invocation. (Exception: a DNC-FIRST
+write exhaustion finalizes the failure reason `dnc_write_failed` per R4-Q7 because the
+contact-protecting write is the one that failed — this is a run-level failure reason, not an
+overwrite of the persona disposition.)
+
 ### Real-call flag still required on resume (Round 2 Q13)
 
 The adapter MUST refuse to perform any write when `Session.run_mode != 'real_call'`. A
@@ -151,6 +188,8 @@ and exits without mutation.
 | `test_phone_call_activity_carries_connected_timestamps` | When SignalWire status callbacks supply `answered_at` / `completed_at`, the payload includes them |
 | `test_dnc_first_on_do_not_call` | `assemble_writeback({disposition: do_not_call})[0]` is `QueueStatusUpdateVariant.DNC`; no callback or review Task is emitted |
 | `test_dnc_first_partial_failure_protects_contact` | DNC step succeeds + Phone Call activity step fails within retry budget → resume completes Phone Call activity without duplicate DNC write |
+| `test_dnc_write_exhaustion_halts_and_alerts` | DNC-first write (step 1) itself exhausts its retry budget → remaining write-back is halted (no Phone Call activity / Task attempted), the run finalizes with failure reason `dnc_write_failed`, a prominent operator alert is emitted, and resume retries DNC-first (Round 4 R4-Q7) |
+| `test_field_update_dedup_reads_ledger` | DNC / queue-status field-update dedup reads the `writeback_progress` ledger (not the live Dataverse field value); a write recorded in the ledger is skipped on resume even if the live Dataverse field was changed externally, so resume is deterministic (Round 4 R4-Q26) |
 | `test_four_operation_count_preserved` | `WriteBackAdapter` exposes exactly 4 emit-methods: phone_call_activity, queue_status_update, task, assembly |
 | `test_queue_status_update_variants` | All 4 variants (NORMAL / DNC / BLOCKED / DIAL_BLOCKED) use the same Slice 2 `emit_queue_status_update` method with the variant tag |
 | `test_blocked_eligibility_writes_blocked_variant_only` | Disposition `blocked` triggers `QueueStatusUpdateVariant.BLOCKED` only; no Phone Call activity; no Task; no attempt increment |
@@ -158,3 +197,18 @@ and exits without mutation.
 | `test_idempotency_key_stamping_preserved` | Both Phone Call activity and Task creates pre-query by idempotency key; duplicate calls find the existing write and skip |
 | `test_resume_in_rehearsal_mode_does_not_mutate` | Resume invocation without `--real-call` performs 0 Dataverse writes; run report surfaces the planned writes |
 | `test_operator_identity_not_in_dataverse` | Inspecting any emitted Dataverse payload contains 0 operator identity strings (FR-016) |
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+Propagated from spec.md "Session 2026-06-01 (Round 4)":
+
+- **R4-Q7**: a DNC-first write that itself exhausts its retry budget halts the remaining
+  write-back, finalizes failure reason `dnc_write_failed`, emits a prominent operator alert
+  (contact may be unprotected), and resumes DNC-first. Captured under "DNC-first write
+  exhaustion" and the new `test_dnc_write_exhaustion_halts_and_alerts`.
+- **R4-Q26**: the DNC / queue-status field-update dedup reads the `writeback_progress`
+  ledger (not the live Dataverse field value) so resume is deterministic. Captured under
+  "Field-update dedup reads the ledger" and the new `test_field_update_dedup_reads_ledger`.
+- **R4-Q6**: an exhausted write-back retry budget marks operations `resume-needed` and NEVER
+  overwrites the persona disposition with `failed`. Captured under "Write-back exhaustion
+  never overwrites the disposition".

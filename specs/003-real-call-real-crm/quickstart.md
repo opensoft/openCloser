@@ -13,11 +13,42 @@ stamping, bounded retry, and resume coordinator are already in place from prior 
 
 ## 1. One-time setup
 
+### 1.0 Cold-start checklist (R4-Q35)
+
+Before the first Slice 3 invocation on a fresh checkout, complete the cold-start steps below
+in order. Each is required for a real-call run; rehearsal mode (§2) exercises the same
+readiness gates without dialing.
+
+1. **Install provider clients** — `uv sync` (see §1.1) installs the `signalwire` and
+   `pipecat-ai` extras alongside the runtime + dev deps; no separate provider-client install
+   step is needed.
+2. **Place the shadow-STT discrepancy-policy file** — drop the policy JSON at
+   `config/shadow_stt_discrepancy_policy.json` (the `[shadow_stt].discrepancy_policy_path`
+   value in §1.3). When shadow STT is enabled, a missing or malformed policy file is a
+   readiness failure (exit `4`, FR-009 / R4-Q2) — it is never silently treated as
+   all-benign or all-uncertain.
+3. **Initialize / migrate the SQLite store** — run the Slice 3 migration to add the additive
+   columns and the three new tables (`CallEvent`, `CallbacksAuditLog`, plus the Slice 3
+   session columns); Slice 3 is forward-only (R4-Q31):
+
+   ```bash
+   opencloser db-migrate            # applies the additive Slice 3 schema (backward-compatible)
+   ```
+
+4. **Provision the FastAPI callback receiver** — real-call mode binds a port via `uvicorn` to
+   receive SignalWire status/media callbacks. The callback-URL templates in §1.3 must be
+   reachable from the SignalWire side over TLS (HTTPS); terminate TLS at your ingress and
+   forward to the receiver. Signature verification (FR-008) runs on every callback, so the
+   ingress must preserve the SignalWire signature header.
+5. **Verify Slice 2 prerequisites** — confirm the Dataverse mapping artifact exists and live
+   verification passes (see §1.4). The Slice 2 Dataverse adapter, mapping artifact,
+   idempotency-key stamping, bounded retry, and resume coordinator must already be in place.
+
 ### 1.1 Install / build
 
 ```bash
 # from the openCloser repo root
-uv sync                           # installs runtime + dev deps incl. signalwire, pipecat-ai
+uv sync                           # installs runtime + dev deps incl. signalwire, pipecat-ai extras
 pytest                            # confirms the Slice 1 / Slice 2 / Slice 3 test suites pass
 ```
 
@@ -46,10 +77,17 @@ export DATAVERSE_ENV_URL="https://<org>.crm.dynamics.com"
 
 ### 1.3 Configure non-secret deployment options
 
+**Configuration precedence (Round 3)**: for any overlapping non-secret setting the order is
+**CLI flag > environment variable > `config/slice3.toml` > built-in default**. The three
+timeouts below are the documented defaults; a set `SLICE3_ABANDONMENT_TIMEOUT_SEC` /
+`SLICE3_SILENCE_AFTER_CONNECTION_TIMEOUT_SEC` / `SLICE3_GRACE_WINDOW_SEC` env var overrides
+the corresponding `[timeouts]` value. Secrets (§1.2) are env-var-only and have no TOML surface.
+
 Edit `config/slice3.toml`:
 
 ```toml
 [signalwire]
+transport = "real"                           # "real" (default) or "fixture"; "fixture" is debug-only (R4-Q4)
 source_caller_id = "+15555550100"           # E.164; must be authorized for outbound dialing
 status_callback_url_template = "https://your-callback.example.com/sw/status/{session_id}"
 media_callback_url_template  = "https://your-callback.example.com/sw/media/{session_id}"
@@ -59,6 +97,7 @@ media_callback_url_template  = "https://your-callback.example.com/sw/media/{sess
 provider_name = "openai-realtime"
 model_name    = "gpt-4o-realtime-preview"
 model_version = "2024-12-17"
+disclosure_pause_ms = 1500                    # FR-015 / R4-Q10: pause after the disclosure; absence of opt-out within it = implicit acknowledgment
 
 [shadow_stt]
 enabled_default = true                       # CLI --shadow-stt / --no-shadow-stt overrides
@@ -77,6 +116,9 @@ mode = "full_with_redaction"                 # or "summary_only" or "pointer_onl
 # Default-on per FR-033 / Round 2 Q10; covers transcript + summary + shadow transcript +
 # shadow discrepancy records; pointer metadata excluded
 policy = "default"
+# Setting policy = "disabled" turns default-on redaction entirely off — permitted ONLY via
+# this explicit value, and it emits a PROMINENT startup + run-report warning (R4-Q18).
+# Redaction is never silently off.
 ```
 
 ### 1.4 Verify Slice 2 prerequisites are still healthy
@@ -91,6 +133,12 @@ opencloser dataverse-verify       # confirms mapping artifact + live verificatio
 
 For a real-call demo, ALWAYS start with a rehearsal run against the same queue item. This
 verifies readiness without placing any call or mutating Dynamics.
+
+**Non-interactive / CI invocation (R4-Q38)**: every input is supplied via flags or
+`config/slice3.toml` — the CLI never prompts interactively, so both rehearsal and real-call
+runs are safe to drive from CI or a non-interactive shell. The rehearsal-resume disclosure
+("what would have been written") surfaces in `run_report.json`, not in stdout-dependent
+prompts.
 
 ```bash
 opencloser run3 \
@@ -116,9 +164,16 @@ artifacts/sess_2026-05-25T...Z_a7f8/
 | Exit code | Meaning |
 |---|---|
 | `0` | Readiness checks passed; planned write-back artifacts produced; no dial; no mutation |
+| `1` | Unexpected error — an uncaught exception mapped after redaction-safe logging; check stderr (R4-Q9) |
+| `2` | Bad usage — the operator message names the offending / missing argument (R4-Q9) |
 | `3` | Concurrent-claim block (someone else is running against this queue item) |
 | `4` | Telephony readiness failure — `telephony_readiness.json` names the failing check |
 | `7` | Dataverse-unreachable-at-start (Slice 2 metadata-verification gate failed) |
+
+Exit `2` (bad usage) also covers resume-selector misuse (R4-Q39): `--resume` against an
+unknown session id exits `2` with a named message, and `--resume` combined with
+`--campaign-id` / `--queue-item-id` validates the selectors against the resumed session —
+the resume session id wins, and a selector mismatch exits `2`.
 
 ### What to inspect
 
@@ -193,11 +248,19 @@ Same as §2 plus:
 
 `run_report.json` is the single canonical place to understand what happened. Key fields:
 
+The example below is a resume run (Q44): `operator_identity.original` is non-null and the
+report carries the human-readable "resumed by X, original operator Y" string.
+
 ```json
 {
   "session_id": "sess_2026-05-25T14:00:00Z_a7f8",
   "run_mode": "real_call",
-  "operator_identity": {"current": "alice@medx.example", "original": null},
+  "operator_identity": {
+    "current": "bob@medx.example",
+    "original": "alice@medx.example",
+    "chain": ["alice@medx.example", "bob@medx.example"],
+    "resumed_by_summary": "resumed by bob@medx.example, original operator alice@medx.example"
+  },
   "real_provider_call_id": "CA1234abcdef...",
   "persona_version": "alf_appointment_setter@1.0.0",
   "runtime_identity": {
@@ -208,6 +271,15 @@ Same as §2 plus:
     "model_version": "2024-12-17"
   },
   "final_disposition": "interested_callback_requested",
+  "redaction_applied": true,
+  "no_phi_no_clinical_reminder": "Slice 3 collects no PHI and makes no clinical claims; review artifacts confirm this.",
+  "grace_window_sec": 3,
+  "abandonment_timeout_sec": 90,
+  "config_identity": {
+    "redaction_policy_version": "redaction@1.0.0+sha256:ab12...",
+    "retention_policy_version": "retention@1.0.0+sha256:cd34...",
+    "disclosure_policy_version": "disclosure@1.0.0+sha256:ef56..."
+  },
   "telephony_readiness_summary": [
     {"check": "signalwire_credentials", "result": "pass", "detail": "..."},
     {"check": "source_caller_id_authorized", "result": "pass", "detail": "..."},
@@ -220,8 +292,18 @@ Same as §2 plus:
   ],
   "shadow_stt": {
     "enabled": true,
-    "discrepancy_summary": "0 discrepancies",
-    "lane_truncated": false
+    "discrepancy_summary": {
+      "fields_compared": 7,
+      "discrepancies": 0,
+      "uncertain": 0,
+      "per_field": [
+        {"field": "captured_email", "classification": "match"},
+        {"field": "final_disposition", "classification": "match"}
+      ]
+    },
+    "lane_truncated": false,
+    "lane_failed": false,
+    "failure_detail": null
   },
   "callbacks_audit_row_count": 5,
   "conflicting_callbacks_audit_row_count": 0,
@@ -231,11 +313,31 @@ Same as §2 plus:
 }
 ```
 
+Field notes:
+- `redaction_applied` (R4-Q40) — positive `true|false` indicator that the redaction passes ran.
+- `no_phi_no_clinical_reminder` (R4-Q40) — static operator reminder line, always present.
+- `abandonment_timeout_sec` (R4-Q14) — the live-call abandonment timeout in effect; on an
+  abandonment outcome the report additionally records the elapsed condition.
+- `shadow_stt.failure_detail` (R4-Q14) — `{failure_type, at}` when `shadow_stt.lane_failed`
+  is `true`, else `null`; reported independently of `lane_truncated` (late-but-present output).
+- `shadow_stt.discrepancy_summary` (R4-Q15) — structured
+  `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}`, not a
+  free-form string.
+- `config_identity` (R4-Q46) — version/hash of the redaction, retention, and disclosure
+  policies so policy changes are themselves auditable.
+
 On a `do_not_call` outcome, `per_writeback_operation_status[0].operation` is
 `queue_status_update.dnc` (Round 2 Q14 DNC-first ordering).
 
-On a resume re-invocation by a different operator, `operator_identity.original` is the
-original operator's identifier and `operator_identity.current` is the resuming operator's.
+On a resume re-invocation by a different operator (as shown in the example above),
+`operator_identity.original` is the original operator's identifier (never null on a resume)
+and `operator_identity.current` is the resuming operator's; `operator_identity.resumed_by_summary`
+carries the human-readable "resumed by X, original operator Y" string (R4-Q44).
+When a session is resumed more than once, `operator_identity.chain` lists every operator in
+order (e.g., `["alice", "bob", "carol"]`) so no intermediate resumer is lost. On a resume
+run, each `telephony_readiness_summary` entry shows `result: "skipped (resume)"` because
+resume never re-dials. `grace_window_sec` shows the FR-029 grace window that applied (set it
+to `0` in config to force immediate write-back).
 
 ---
 
@@ -262,6 +364,15 @@ The resume coordinator (reused from Slice 2):
 
 If `--real-call` is omitted on resume, the resume runs in rehearsal mode and surfaces what
 WOULD have been written — no mutation occurs.
+
+Resume-selector rules (R4-Q39):
+- `--resume` against an unknown session id exits `2` with a named message.
+- `--resume` combined with `--campaign-id` / `--queue-item-id` validates the selectors for
+  consistency with the resumed session — the resume session id wins, and a selector mismatch
+  exits `2`.
+
+A resume that finalizes a previously-abandoned session (received `answered` but no terminal
+event) exits `6` (live-call abandonment), not `0` (R4-Q8).
 
 The resuming operator's identity is recorded on the run report alongside the original
 operator's (Round 2 Q12).
@@ -321,6 +432,15 @@ Map each artifact to the FR / SC it satisfies (the demo-evidence checklist in
 | `task_owner_mapping_resolved` | Callback or review Task owner/team not set | Configure the owner/team in the mapping artifact |
 | `eligibility` | Slice 1 eligibility rule blocks (DNC, attempt cap, call window, etc.) | This is the expected blocked-status outcome; no remediation needed |
 
+### Non-readiness exit codes (R4-Q9)
+
+These exits are not tied to a specific readiness check:
+
+| Exit code | Meaning | Remedy |
+|---|---|---|
+| `1` | Unexpected error — an uncaught exception mapped after redaction-safe logging | Check stderr for the redacted error detail; if it recurs, capture stderr + `run_report.json` and file a bug |
+| `2` | Bad usage — the operator message names the offending / missing argument | Fix the named argument and re-run; for resume, see the resume-selector rules in §5 (unknown session id or selector mismatch both exit `2`) |
+
 ---
 
 ## 9. Cross-references
@@ -339,3 +459,35 @@ Map each artifact to the FR / SC it satisfies (the demo-evidence checklist in
 - **Slice 1 / Slice 2 prerequisites**:
   - `specs/001-mock-call-mock-crm/plan.md`
   - `specs/002-mock-call-real-crm/plan.md`
+
+---
+
+## Round 4 — Checklist-Residual Alignment (2026-06-01)
+
+This quickstart was updated to propagate the spec's Round 4 (checklist residual closure)
+decisions. Changes:
+
+- **§1.0 (new) cold-start checklist (R4-Q35)** — documents provider-client install (covered
+  by `uv sync` extras), shadow-policy file placement at
+  `config/shadow_stt_discrepancy_policy.json`, the SQLite migration/init command
+  (`opencloser db-migrate`), the FastAPI callback-receiver ingress/TLS expectations (real-call
+  mode binds a `uvicorn` port for SignalWire callbacks over HTTPS), and the Slice 2
+  prerequisite list (mapping + verify).
+- **§1.3 [signalwire] (R4-Q4)** — added `transport = "real"` with a note that `"fixture"` is
+  debug-only.
+- **§1.3 [redaction] (R4-Q18)** — noted that `policy = "disabled"` emits a prominent startup +
+  run-report warning; redaction is never silently off.
+- **§2 (R4-Q38)** — noted non-interactive / CI invocation is supported (all inputs via
+  flags/config; no interactive prompts).
+- **§2/§8 exit codes (R4-Q9/Q39)** — added exit `1` (unexpected error — check stderr) and
+  exit `2` (bad usage — names the offending/missing arg) to the exit-code table and added
+  remedy rows in §8; documented `--resume` against an unknown session id → exit `2`, and
+  `--resume` combined with `--campaign-id` / `--queue-item-id` (resume session id wins;
+  selector mismatch → exit `2`).
+- **§4 run-report example (R4-Q40/Q14/Q15/Q46)** — added `redaction_applied`, a static
+  `no_phi_no_clinical_reminder` line, `abandonment_timeout_sec`, `shadow_stt.failure_detail`,
+  a structured `shadow_stt.discrepancy_summary`, and a `config_identity` block.
+- **§4/§5 resume identity (R4-Q44)** — the example now shows a non-null
+  `operator_identity.original` and the human-readable "resumed by X, original operator Y"
+  string.
+- **§5 (R4-Q8)** — noted a resume that finalizes a previously-abandoned session exits `6`.
