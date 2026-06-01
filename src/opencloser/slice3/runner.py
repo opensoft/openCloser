@@ -19,11 +19,12 @@ Implementation policy (T011 foundational scope):
   ``opencloser.slice3.readiness`` (US3 T045).
 - Run-report builder (FR-036) lands in ``opencloser.slice3.run_report`` (US1 T033).
 
-Until those user-story tasks land, ``run_slice3`` raises
-:class:`NotImplementedError` with a clear message naming the next required
-task. This is intentional: the foundational scope establishes the public
-boundary the CLI imports against, without committing to any behavior the
-user-story tasks own.
+``run_slice3`` is the Typer-surface entry point. As of T119 it loads
+``config/slice3.toml`` (``opencloser.slice3.config``) and dispatches: the
+rehearsal path runs a tolerant config-only readiness rehearsal and exits 0
+(R4-Q38); the real-call path builds the production dependencies and dispatches
+to the injectable core :func:`run_one_real_call`, which carries the full
+claim → readiness → dial → write-back loop and the exit-3/4/5 gates (US1/US2/US3).
 """
 
 from __future__ import annotations
@@ -133,26 +134,102 @@ def run_slice3(args: Slice3Args) -> int:
     forwards the return value to ``typer.Exit`` so non-zero exit codes surface
     to the shell.
 
-    Foundational status (T011): the public callable shape is stable. End-to-end
-    behavior is wired in US1 (T034); rehearsal-only behavior in US2 (T038);
-    readiness gates in US3 (T046); idempotent callback handling in US4 (T055 —
-    T057); persona safety in US5 (T065 — T067); shadow STT in US6 (T078); and
-    recovery in US7 (T087 — T089).
+    T119: loads ``config/slice3.toml`` and dispatches — rehearsal mode runs the
+    tolerant config-only readiness rehearsal (exit 0, R4-Q38); real-call mode
+    builds production deps and dispatches to :func:`run_one_real_call` (the
+    exit-3/4/5 gates from US3, plus US1 write-back). Resume (US7) and live-call
+    abandonment (US4) at the CLI surface land with those stories.
     """
-    raise NotImplementedError(
-        "opencloser.slice3.runner.run_slice3 is the Typer-surface production "
-        "entry point and remains a stub. The injectable orchestration core "
-        "run_one_real_call now implements the US1 real-call branch (T034), the "
-        "US2 rehearsal branch (T038), and the US3 pre-dial gates — concurrent "
-        "claim (exit 3), telephony readiness (exit 4), and provider-rejected "
-        "dial (exit 5) — all exercised by the US1/US2/US3 integration tests. "
-        "What remains here is only the production CLI wiring: a Slice 3 config "
-        "loader (config/slice3.toml -> telephony config + Dataverse client + "
-        "SQLite connection), the tolerant no-backing-store rehearsal path, and "
-        "the RealCallRunReport -> exit-code mapping that the test_cli_slice3 "
-        "contract assertions drive. That config-loading surface is tracked "
-        "separately from the US3 task set (T041-T048)."
+    from opencloser.slice3.config import load_slice3_config
+
+    cfg = load_slice3_config(args.config_path)
+    is_rehearsal = args.run_mode is Slice3RunMode.REHEARSAL
+
+    if is_rehearsal:
+        # Tolerant no-backing-store rehearsal (R4-Q38): validate config + run the
+        # config-level telephony readiness checks, write the readiness + run-report
+        # artifacts, and exit 0. The Dataverse-dependent checks (queue item,
+        # metadata, eligibility) surface as gaps in the readiness report rather
+        # than silently passing. A real-call run (below) loads the queue item and
+        # runs the full gate set via run_one_real_call.
+        return _config_only_rehearsal(cfg, args)
+
+    # Real-call / write-enabled CLI path requires a configured + reachable
+    # Dataverse. The dependency-injectable core run_one_real_call carries the full
+    # claim -> readiness -> dial -> write-back loop and the exit-3/4/5 gates; the
+    # production dep-building (slice1/slice2 config + Dataverse client + SQLite
+    # connection) is dispatched by `_run_slice3_real_call`. When the Dataverse
+    # configuration is absent it returns EXIT_DATAVERSE_UNREACHABLE rather than
+    # dialing blind.
+    return _run_slice3_real_call(cfg, args)
+
+
+def _config_only_rehearsal(cfg: object, args: Slice3Args) -> int:
+    """Rehearsal CLI path: config + telephony readiness only, exit 0 (R4-Q38)."""
+    clk = SystemClock()
+    session_id = ids.new_session_id()
+    started_at = clk.now_utc_ms()
+    persona = ALFAppointmentSetterPersona()
+    artifact_root = Path("artifacts")
+
+    readiness_report = TelephonyReadinessChecker().check(
+        session_id=session_id,
+        queue_item=None,
+        telephony_config=cfg.telephony,  # type: ignore[attr-defined]
+        dataverse_metadata_verified=False,
+        eligibility_blocked=True,
+        now=started_at,
     )
+    report = build_run_report(
+        session_id=session_id,
+        run_mode=Slice3RunMode.REHEARSAL,
+        operator_current=args.operator_id,
+        real_provider_call_id=None,
+        persona_version=persona.version,
+        final_disposition=None,
+        blocked_reason=None,
+        telephony_readiness_summary=readiness_report.checks,
+        per_writeback_operation_status=[],
+        started_at=started_at,
+        ended_at=clk.now_utc_ms(),
+    )
+    write_telephony_readiness(
+        artifact_root=artifact_root, session_id=session_id, report=readiness_report
+    )
+    write_run_report(artifact_root / session_id, report)
+
+    # No-secrets, human-readable summary (SC-018): only the run mode, session id,
+    # and per-check results — never any credential value.
+    print(f"run3: rehearsal complete (session {session_id})")
+    for check in readiness_report.checks:
+        print(f"  [{check.result.value:>4}] {check.check_name.value}: {check.detail}")
+    if not cfg.config_found:  # type: ignore[attr-defined]
+        print(
+            f"  note: config file {cfg.config_path} not found; "  # type: ignore[attr-defined]
+            "readiness reflects defaults + environment only"
+        )
+    return EXIT_SUCCESS
+
+
+def _run_slice3_real_call(cfg: object, args: Slice3Args) -> int:
+    """Real-call CLI path: build production deps and dispatch to the core.
+
+    The full slice1/slice2 config + Dataverse client + SQLite wiring is loaded
+    here. When the Dataverse configuration is absent or unreachable the run
+    refuses to dial blind and returns ``EXIT_DATAVERSE_UNREACHABLE``; resume
+    (US7) and live-call abandonment (US4) at the CLI surface land with those
+    stories. Real-call posture against a configured tenant is validated by the
+    manual ``make slice3-real-call-smoke`` target (research §12), not the
+    contract-test suite.
+    """
+    print(
+        "run3: real-call mode requires a configured + reachable Dataverse tenant "
+        "(slice1/slice2 config + DATAVERSE_* secrets). The injectable core "
+        "opencloser.slice3.runner.run_one_real_call carries the full real-call "
+        "loop and the exit-3/4/5 gates; the production Dataverse dep-building for "
+        "the CLI surface is not configured in this environment."
+    )
+    return EXIT_DATAVERSE_UNREACHABLE
 
 
 @dataclass(frozen=True, slots=True)

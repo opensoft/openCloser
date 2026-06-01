@@ -71,12 +71,15 @@ class TelephonyReadinessChecker:
         self,
         *,
         session_id: str,
-        queue_item: QueueItem,
+        queue_item: QueueItem | None,
         telephony_config: Slice3TelephonyConfig,
         dataverse_metadata_verified: bool,
         eligibility_blocked: bool,
         now: str,
     ) -> TelephonyReadinessReport:
+        # ``queue_item`` is None only on the config-only rehearsal path (no
+        # Dataverse item loaded); the destination-phone check then fails with an
+        # explanatory detail rather than dereferencing a missing item.
         cfg = telephony_config
         checks: list[TelephonyReadinessCheckResult] = []
 
@@ -106,9 +109,14 @@ class TelephonyReadinessChecker:
         )
         add(
             _CheckName.DESTINATION_PHONE_E164,
-            is_e164(queue_item.phone_number),
+            queue_item is not None and is_e164(queue_item.phone_number),
             "destination phone passes E.164 validation",
-            f"destination phone {queue_item.phone_number!r} is missing, blank, or not E.164 (FR-010)",
+            (
+                "no Dataverse queue item loaded (config-only rehearsal)"
+                if queue_item is None
+                else f"destination phone {queue_item.phone_number!r} is missing, blank, "
+                "or not E.164 (FR-010)"
+            ),
         )
         add(
             _CheckName.STATUS_CALLBACK_URL_CONFIGURED,
