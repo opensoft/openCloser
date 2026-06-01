@@ -109,7 +109,6 @@ omit = [
     # T014 TDD red). Same rationale — implementation bodies land in T030 /
     # T032 / T064 / T065 / T066 / T067.
     "src/opencloser/runtime/pipecat/runtime.py",
-    "src/opencloser/artifacts/rejected_auth_log.py",
     # T029 (2026-06-01): pipeline.py is production Pipecat FrameProcessor wiring;
     # `process_frame` delivery needs Pipecat's live pipeline setup (not available
     # in unit tests). The pure translation helpers + assembly are unit-tested in

@@ -347,7 +347,7 @@ def test_blocked_eligibility_writes_blocked_variant_only(
         persona_version="alf-appointment-setter@0.1.0",
         final_disposition=Disposition.BLOCKED,
         summary="Blocked by eligibility.",
-        blocked_reason="rule_d_dnc_pass",
+        blocked_reason=["d"],  # NormalizedResult.blocked_reason is list[RuleCode] (rule d = DNC)
         started_at=_NOW,
         ended_at=_NOW,
     )

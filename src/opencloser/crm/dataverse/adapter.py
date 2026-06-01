@@ -39,14 +39,17 @@ from opencloser.models import (
     CrmWriteStatus,
     DataQualityWarning,
     Disposition,
+    NormalizedResult,
     PhoneCallActivityPayload,
     QueueBaseline,
     QueueStatusUpdatePayload,
+    QueueStatusUpdateVariant,
     RunStatus,
     TaskOwnersConfig,
     TaskPayload,
     WriteBack,
     WriteBackProgress,
+    WriteBackStep,
 )
 from opencloser.state import store
 
@@ -138,6 +141,15 @@ class _PendingFailure:
         self.dataverse_record_id = dataverse_record_id
 
 
+# Dispositions that warrant a follow-up Task in the assembled write-back
+# (callback / email follow-up / human review). DNC and blocked never get a Task.
+_TASK_WARRANTING_DISPOSITIONS: frozenset[Disposition] = frozenset({
+    Disposition.INTERESTED_CALLBACK_REQUESTED,
+    Disposition.INTERESTED_EMAIL_CAPTURED,
+    Disposition.NEEDS_HUMAN_REVIEW,
+})
+
+
 class DataverseWriteBackAdapter:
     """Dataverse implementation of the Slice 1 `WriteBackAdapter` protocol."""
 
@@ -187,7 +199,17 @@ class DataverseWriteBackAdapter:
 
     # ----- public protocol surface -----------------------------------------
 
-    def emit_phone_call_activity(self, payload: PhoneCallActivityPayload) -> None:
+    def emit_phone_call_activity(
+        self,
+        payload: PhoneCallActivityPayload,
+        *,
+        provider_call_id: str | None = None,
+        connected_call_timestamps: dict[str, str] | None = None,
+    ) -> None:
+        # Slice 3 (T031, FR-006 / FR-020): the real SignalWire SID and the
+        # SignalWire-supplied connected-call timestamps are threaded into the
+        # Phone Call activity body when present. Both default to None so the
+        # Slice 1/2 mock-call callers are unaffected.
         entity_key = "phone_call_activity"
         idempotency_field = self._t.logical_name("phone_call.idempotency_key")
         if self._dry_run:
@@ -200,7 +222,12 @@ class DataverseWriteBackAdapter:
             # "still runs `verify` and surfaces gaps").
             self._entity_set(entity_key)
             self._primary_id(entity_key)
-            self._phone_call_body(payload, idempotency_field)
+            self._phone_call_body(
+                payload,
+                idempotency_field,
+                provider_call_id=provider_call_id,
+                connected_call_timestamps=connected_call_timestamps,
+            )
             self._aggregate(payload.session_id).phone_call_activity = payload
             return
         try:
@@ -208,7 +235,12 @@ class DataverseWriteBackAdapter:
                 entity_key=entity_key,
                 idempotency_field=idempotency_field,
                 idempotency_value=payload.session_id,
-                body=self._phone_call_body(payload, idempotency_field),
+                body=self._phone_call_body(
+                    payload,
+                    idempotency_field,
+                    provider_call_id=provider_call_id,
+                    connected_call_timestamps=connected_call_timestamps,
+                ),
             )
         except (DataverseError, DataverseWriteBackError, MappingError) as exc:
             self._record_failure(
@@ -227,7 +259,18 @@ class DataverseWriteBackAdapter:
         self._mark_progress(payload.session_id, phone_call_activity_done=True)
         self._aggregate(payload.session_id).phone_call_activity = payload
 
-    def emit_queue_status_update(self, payload: QueueStatusUpdatePayload) -> None:
+    def emit_queue_status_update(
+        self,
+        payload: QueueStatusUpdatePayload,
+        *,
+        variant: QueueStatusUpdateVariant = QueueStatusUpdateVariant.NORMAL,
+    ) -> None:
+        # Slice 3 (T031, Round 2 Q8): the four queue-status variants (NORMAL /
+        # DNC / BLOCKED / DIAL_BLOCKED) flow through this single emit method as
+        # field-level variants — preserving the FR-020 four-operation count. The
+        # concrete field set is still driven by ``payload.new_status``; ``variant``
+        # tags the operation for the run report's per_writeback_operation_status.
+        self._last_queue_variant = variant
         # PATCH is keyed by the queue row's primary id directly; the FR-024 idempotency
         # signal lives in the `last_session_id` column rather than a synthetic key
         # column. A row whose `last_session_id` already equals this session has been
@@ -488,18 +531,76 @@ class DataverseWriteBackAdapter:
                 ),
             )
 
+    # ----- write-back orchestration (Slice 3, T031) ------------------------
+
+    def assemble_writeback(self, result: NormalizedResult) -> list[WriteBackStep]:
+        """Plan the ordered write-back steps for a normalized result (FR-020).
+
+        DNC-first ordering (Round 2 Q14): on ``do_not_call`` the DNC queue-status
+        variant is emitted FIRST so a partial failure can never leave the contact
+        callable. ``blocked`` writes only the BLOCKED variant (no call placed →
+        no Phone Call activity, no Task). The four-operation count is preserved:
+        the queue-status variants are field-level under the single queue
+        operation, never new emit methods (Round 2 Q8).
+        """
+        disposition = result.final_disposition
+
+        if disposition is Disposition.BLOCKED:
+            return [
+                WriteBackStep(
+                    operation=QueueStatusUpdateVariant.BLOCKED.value,
+                    variant=QueueStatusUpdateVariant.BLOCKED,
+                )
+            ]
+
+        if disposition is Disposition.DO_NOT_CALL:
+            steps = [
+                WriteBackStep(
+                    operation=QueueStatusUpdateVariant.DNC.value,
+                    variant=QueueStatusUpdateVariant.DNC,
+                )
+            ]
+            # A connected real call still records the Phone Call activity AFTER
+            # the protective DNC write. No callback / review Task on DNC (FR-024).
+            if result.mock_provider_call_id:
+                steps.append(WriteBackStep(operation="phone_call_activity"))
+            return steps
+
+        # Normal + terminal dispositions: Phone Call activity, the standard
+        # queue-status update, and a Task when the disposition warrants one.
+        steps = [
+            WriteBackStep(operation="phone_call_activity"),
+            WriteBackStep(
+                operation=QueueStatusUpdateVariant.NORMAL.value,
+                variant=QueueStatusUpdateVariant.NORMAL,
+            ),
+        ]
+        if disposition in _TASK_WARRANTING_DISPOSITIONS:
+            steps.append(WriteBackStep(operation="task"))
+        return steps
+
     # ----- payload translation ---------------------------------------------
 
     def _phone_call_body(
-        self, payload: PhoneCallActivityPayload, idempotency_field: str
+        self,
+        payload: PhoneCallActivityPayload,
+        idempotency_field: str,
+        *,
+        provider_call_id: str | None = None,
+        connected_call_timestamps: dict[str, str] | None = None,
     ) -> dict[str, object]:
-        return {
+        timestamps = connected_call_timestamps or {}
+        body: dict[str, object] = {
             "subject": (payload.summary or f"Mock call — {payload.final_disposition.value}")[:200],
             "description": payload.summary,
-            "actualstart": payload.started_at,
-            "actualend": payload.ended_at,
+            "actualstart": timestamps.get("answered_at") or payload.started_at,
+            "actualend": timestamps.get("completed_at") or payload.ended_at,
             idempotency_field: payload.session_id,
         }
+        if provider_call_id is not None:
+            # Real SignalWire SID on the Phone Call activity (FR-006 / FR-020).
+            body["medx_providercallid"] = provider_call_id
+        return body
 
     def _queue_status_body(self, payload: QueueStatusUpdatePayload) -> dict[str, object]:
         approved = self._t.approved_update_logical_names()

@@ -1058,6 +1058,21 @@ class WriteBackOperationStatus(BaseModel):
     status: Literal["planned", "completed", "resume-needed", "blocked"]
 
 
+class WriteBackStep(BaseModel):
+    """One planned step in the Slice 3 write-back sequence (T031, contracts/
+    crm-writeback-dnc-first.md). ``assemble_writeback(result)`` returns these in
+    emission order — on ``do_not_call`` the ``DNC`` variant MUST be FIRST (FR-024
+    + Clarifications Round 2 Q14). ``variant`` is set for queue-status-update
+    steps (field-level variants of the single queue operation per Round 2 Q8);
+    ``operation`` carries the coarse operation label (e.g. ``"phone_call_activity"``,
+    ``"task"``, or the queue variant value)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: str
+    variant: QueueStatusUpdateVariant | None = None
+
+
 class OperatorIdentity(BaseModel):
     """Operator identity recorded on session + run report (FR-016 + Clarifications
     Round 1 Q3 + Round 2 Q12). MUST NOT be propagated into Dataverse."""
