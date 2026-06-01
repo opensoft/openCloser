@@ -1,0 +1,6 @@
+{
+  "fixture_id": "connected_no_terminal",
+  "events": [
+    { "event_id": "evt_connected_aband", "type": "connected", "timestamp": "2026-05-19T17:00:01.000Z", "payload": {} }
+  ]
+}

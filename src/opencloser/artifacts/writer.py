@@ -80,6 +80,8 @@ _DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
 _PLANNED_WRITEBACK_FILENAME = "planned_writeback.json"
 _ACTUAL_WRITEBACK_FILENAME = "actual_writeback.json"
 _TELEPHONY_READINESS_FILENAME = "telephony_readiness.json"
+_CALLBACKS_AUDIT_FILENAME = "callbacks_audit.jsonl"
+_CONFLICTING_CALLBACKS_AUDIT_FILENAME = "conflicting_callbacks_audit.jsonl"
 
 # Cached so repeated calls without an explicit layer don't re-compile a noop on
 # every session write. Copilot PR #3 LOW: this was previously
@@ -270,6 +272,43 @@ def write_planned_writeback(
     return path
 
 
+def write_callbacks_audit(
+    *, artifact_root: str | Path, session_id: str, rows: list[dict[str, Any]]
+) -> Path | None:
+    """Write the Slice 3 ``callbacks_audit.jsonl`` (data-model §1.3, FR-007/FR-021).
+
+    One JSON object per line recording EVERY SignalWire callback received for the
+    session — including duplicates and out-of-order deliveries — keyed by
+    ``(session_id, provider_event_id)``. Returns ``None`` (writes nothing) when no
+    callback was received (e.g. a blocked-before-dial run). US4 (T055).
+    """
+    if not rows:
+        return None
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _CALLBACKS_AUDIT_FILENAME
+    _write_jsonl_atomic(path, rows)
+    return path
+
+
+def write_conflicting_callbacks_audit(
+    *, artifact_root: str | Path, session_id: str, rows: list[dict[str, Any]]
+) -> Path | None:
+    """Write the Slice 3 ``conflicting_callbacks_audit.jsonl`` (data-model §1.5, FR-027).
+
+    Records the late-after-finalization callbacks that arrived once the session
+    was already finalized — the disposition is NOT changed; the callback is
+    recorded for audit. Returns ``None`` when no late callback occurred. US4 (T055).
+    """
+    if not rows:
+        return None
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _CONFLICTING_CALLBACKS_AUDIT_FILENAME
+    _write_jsonl_atomic(path, rows)
+    return path
+
+
 def write_telephony_readiness(
     *, artifact_root: str | Path, session_id: str, report: BaseModel
 ) -> Path:
@@ -317,6 +356,12 @@ def _write_json_atomic(path: Path, model: BaseModel) -> None:
     payload = model.model_dump(mode="json")
     serialized = json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False)
     _write_bytes_atomic(path, (serialized + "\n").encode("utf-8"))
+
+
+def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write rows as JSONL (one compact JSON object per line) via tempfile + os.replace."""
+    lines = [json.dumps(row, sort_keys=True, ensure_ascii=False) for row in rows]
+    _write_bytes_atomic(path, ("\n".join(lines) + "\n").encode("utf-8"))
 
 
 def _write_text_atomic(path: Path, text: str) -> None:

@@ -37,6 +37,8 @@ from typing import Final
 
 from opencloser.artifacts.writer import (
     write_actual_writeback,
+    write_callbacks_audit,
+    write_conflicting_callbacks_audit,
     write_planned_writeback,
     write_session_artifacts,
     write_telephony_readiness,
@@ -95,6 +97,18 @@ _TERMINAL_EVENT_DISPOSITION: Final[dict[str, Disposition]] = {
     "voicemail": Disposition.VOICEMAIL,
     "failed": Disposition.FAILED,
 }
+
+# Normalized event types that finalize a call (US4 callback idempotency).
+_TERMINAL_TYPES: Final[frozenset[str]] = frozenset(
+    {"completed", "no_answer", "voicemail", "failed"}
+)
+# A connection-stage event precedes any terminal event; a lower rank arriving
+# after a higher one is out-of-order delivery (mirrors the SignalWire normalizer).
+_CONNECTION_RANK: Final[int] = 1
+_TERMINAL_RANK: Final[int] = 2
+
+# Failure reason recorded on a live-call abandonment finalization (FR-026).
+_ABANDONMENT_REASON: Final[str] = "live_call_abandonment"
 
 # Slice 3 CLI exit codes (contracts/cli-slice3.md §"Exit codes"). Owned here so
 # the CLI surface and the runner surface cannot drift apart.
@@ -430,15 +444,26 @@ def run_one_real_call(
     transcript_text: str | None = None
     connected = False
     connected_call_timestamps: dict[str, str] | None = None
+    callbacks_audit: list[dict] = []
+    conflicting_callbacks: list[dict] = []
+    abandonment = False
 
     if decision.outcome == "block":
         disposition = Disposition.BLOCKED
     else:
-        events = _read_transport_events(transport_fixture)
-        connected = any(e.get("type") == "connected" for e in events)
+        # US4: de-duplicate by provider_event_id, detect out-of-order + a second
+        # terminal arriving after finalization, and record EVERY callback in the
+        # audit log. Only the fresh (non-duplicate, non-conflicting) events drive
+        # the disposition, so duplicates and conflicting-late callbacks are no-ops
+        # for state / attempt / write-back (FR-007, FR-021, FR-027).
+        callbacks_audit, conflicting_callbacks, fresh = _process_callbacks(
+            _read_transport_events(transport_fixture), session_id=session_id, now=started_at
+        )
+        connected = any(e.get("type") == "connected" for e in fresh)
+        has_terminal = any(e.get("type") in _TERMINAL_TYPES for e in fresh)
         conversation = (
             _load_conversation_fixture(conversation_fixture)
-            if connected and conversation_fixture is not None
+            if connected and has_terminal and conversation_fixture is not None
             else None
         )
         if connected and conversation is not None:
@@ -456,15 +481,25 @@ def run_one_real_call(
             disposition = persona_output.final_disposition
             transcript_text = _format_transcript(conversation.turns)
             connected_call_timestamps = {
-                "answered_at": _event_ts(events, "connected", started_at),
-                "completed_at": _event_ts(events, "completed", clk.now_utc_ms()),
+                "answered_at": _event_ts(fresh, "connected", started_at),
+                "completed_at": _event_ts(fresh, "completed", clk.now_utc_ms()),
             }
+        elif connected and not has_terminal:
+            # FR-026: a call answered / connected but with no normalized terminal
+            # event is a live-call abandonment — finalize as `failed` with reason
+            # `live_call_abandonment`. No false connected-call Phone Call activity.
+            connected = False
+            abandonment = True
+            disposition = Disposition.FAILED
         else:
             # No connected conversation: terminal disposition straight from the
             # call-event stream (no persona interaction). Never a connected-call
             # Phone Call activity.
             connected = False
-            disposition = _terminal_disposition(events)
+            disposition = _terminal_disposition(fresh)
+        # Backfill the disposition that the conflicting-late callbacks did NOT change.
+        for row in conflicting_callbacks:
+            row["finalized_disposition"] = disposition.value
 
     ended_at = clk.now_utc_ms()
     persona_version = persona_output.persona_version if persona_output else persona.version
@@ -565,10 +600,12 @@ def run_one_real_call(
         blocked_reason=(
             ",".join(decision.failing_rules)
             if disposition is Disposition.BLOCKED and decision.failing_rules
-            else None
+            else (_ABANDONMENT_REASON if abandonment else None)
         ),
         per_writeback_operation_status=per_writeback,
         telephony_readiness_summary=telephony_summary,
+        callbacks_audit_row_count=len(callbacks_audit),
+        conflicting_callbacks_audit_row_count=len(conflicting_callbacks),
         started_at=started_at,
         ended_at=ended_at,
     )
@@ -577,6 +614,16 @@ def run_one_real_call(
         artifact_root=slice1_config.artifacts.dir,
         session_id=session_id,
         report=readiness_report,
+    )
+    write_callbacks_audit(
+        artifact_root=slice1_config.artifacts.dir,
+        session_id=session_id,
+        rows=callbacks_audit,
+    )
+    write_conflicting_callbacks_audit(
+        artifact_root=slice1_config.artifacts.dir,
+        session_id=session_id,
+        rows=conflicting_callbacks,
     )
     writeback = adapter.build_writeback(session_id)
     paths = write_session_artifacts(
@@ -611,14 +658,16 @@ def run_one_real_call(
     write_run_report(paths.session_dir, report)
 
     if is_rehearsal:
-        exit_status = "rehearsed"
+        exit_status, exit_code = "rehearsed", EXIT_SUCCESS
+    elif abandonment:
+        exit_status, exit_code = "live_call_abandonment", EXIT_LIVE_CALL_ABANDONMENT
     elif disposition is Disposition.BLOCKED:
-        exit_status = "blocked"
+        exit_status, exit_code = "blocked", EXIT_SUCCESS
     else:
-        exit_status = "completed"
+        exit_status, exit_code = "completed", EXIT_SUCCESS
     return RealCallRunReport(
         exit_status=exit_status,
-        exit_code=EXIT_SUCCESS,
+        exit_code=exit_code,
         session_id=session_id,
         final_disposition=disposition,
         artifact_dir=paths.session_dir,
@@ -631,6 +680,70 @@ def run_one_real_call(
 # ---------------------------------------------------------------------------
 # T034 helpers
 # ---------------------------------------------------------------------------
+
+
+def _process_callbacks(
+    events: list[dict], *, session_id: str, now: str
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Classify the call-event stream for idempotent handling (US4).
+
+    Returns ``(callbacks_audit, conflicting, fresh)``:
+
+    - ``callbacks_audit`` — one record per received callback (incl. duplicates),
+      each flagged ``is_duplicate`` / ``is_out_of_order`` /
+      ``is_late_after_finalization`` (data-model §1.3, FR-007 / FR-021).
+    - ``conflicting`` — late-after-finalization callbacks (a SECOND terminal event
+      arriving once the session is already finalized); recorded for audit, never
+      changing the disposition (data-model §1.5, FR-027).
+    - ``fresh`` — the de-duplicated events that drive the disposition. A duplicate
+      ``provider_event_id`` is a no-op; a late connection event is kept (it is the
+      connection that logically preceded the terminal, merely delivered late) so
+      out-of-order delivery still yields a coherent disposition (FR-005).
+    """
+    seen: set[str] = set()
+    max_rank = 0
+    finalized = False
+    audit: list[dict] = []
+    conflicting: list[dict] = []
+    fresh: list[dict] = []
+    for ev in events:
+        etype = str(ev.get("type"))
+        eid = str(ev.get("event_id", ""))
+        is_terminal = etype in _TERMINAL_TYPES
+        is_duplicate = eid in seen
+        seen.add(eid)
+        rank = _TERMINAL_RANK if is_terminal else _CONNECTION_RANK
+        is_out_of_order = rank < max_rank
+        max_rank = max(max_rank, rank)
+        audit.append(
+            {
+                "session_id": session_id,
+                "provider_event_id": eid,
+                "callback_type": "status",
+                "received_at": now,
+                "normalized_event_type": etype,
+                "is_duplicate": is_duplicate,
+                "is_out_of_order": is_out_of_order,
+                "is_late_after_finalization": finalized,
+            }
+        )
+        if is_duplicate:
+            continue
+        if finalized and is_terminal:
+            conflicting.append(
+                {
+                    "session_id": session_id,
+                    "provider_event_id": eid,
+                    "received_at": now,
+                    "would_have_been": etype,
+                    "finalized_disposition": None,
+                }
+            )
+            continue
+        fresh.append(ev)
+        if is_terminal and not finalized:
+            finalized = True
+    return audit, conflicting, fresh
 
 
 def _read_transport_events(transport_fixture: Path) -> list[dict]:

@@ -607,11 +607,7 @@ def _install_conflict_mutator(fake, *, mutation: dict[str, object]):
 
     def predicate(request, logical: str) -> bool:
         sel = request.url.params.get("$select", "")
-        return (
-            logical == "medx_callqueueitem"
-            and "medx_callstatus" in sel
-            and "medx_notes" in sel
-        )
+        return logical == "medx_callqueueitem" and "medx_callstatus" in sel and "medx_notes" in sel
 
     def callback(fake_) -> None:
         fake_._records["medx_callqueueitem"][0].update(mutation)
@@ -775,8 +771,7 @@ def test_t045_conflict_on_human_adding_preserve_field_value(
         changes for entity, _id, changes in fake.patched if entity == "medx_callqueueitem"
     ]
     assert queue_patches == [], (
-        f"queue PATCH must NOT issue when a None→value conflict is detected; "
-        f"got {queue_patches}"
+        f"queue PATCH must NOT issue when a None→value conflict is detected; got {queue_patches}"
     )
 
 
@@ -798,9 +793,7 @@ def test_t045_conflict_on_last_session_id_change(
     assert report.exit_status == "blocked"
     assert "conflict_detected" in (report.message or "")
     assert "medx_lastsessionid" in (report.message or "")
-    queue_patches = [
-        c for e, _id, c in fake.patched if e == "medx_callqueueitem"
-    ]
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
     assert queue_patches == []
 
 
@@ -820,11 +813,7 @@ def test_t045_deleted_row_yields_conflict_not_failed(
     # GET sees no rows; the deleted-row branch raises CrmConflictError.
     def predicate(request, logical: str) -> bool:
         sel = request.url.params.get("$select", "")
-        return (
-            logical == "medx_callqueueitem"
-            and "medx_callstatus" in sel
-            and "medx_notes" in sel
-        )
+        return logical == "medx_callqueueitem" and "medx_callstatus" in sel and "medx_notes" in sel
 
     def callback(fake_) -> None:
         fake_._records["medx_callqueueitem"].clear()
@@ -946,6 +935,7 @@ def test_us4_natural_transient_exhaust_yields_resume_needed(
     fake._handle = original_handle
 
     from opencloser.slice2.resume import ResumeError, resume_session
+
     with pytest.raises(ResumeError, match=r"writeback\.json missing"):
         resume_session(
             session_id=report.session_id,
@@ -994,9 +984,7 @@ def test_resume_snapshot_failure_re_raises_to_blocked(
     cfg = _slice2_config_shared(mapping_path=_MAPPING_FIXTURE)
     cfg = cfg.model_copy(
         update={
-            "retry": RetryConfig(
-                max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0
-            )
+            "retry": RetryConfig(max_retries=0, backoff_seconds=[1.0], retry_after_cap_seconds=30.0)
         }
     )
 
@@ -1011,14 +999,11 @@ def test_resume_snapshot_failure_re_raises_to_blocked(
 
     # The snapshot failure must propagate; permanent 401 → blocked.
     assert result.exit_status == "blocked", (
-        f"snapshot 401 must surface as blocked, not silently bypass conflict-stop; "
-        f"got: {result}"
+        f"snapshot 401 must surface as blocked, not silently bypass conflict-stop; got: {result}"
     )
     # And the resume's PATCH must NOT have been issued (snapshot failure
     # short-circuits before the replay).
-    queue_patches = [
-        c for e, _id, c in fake.patched if e == "medx_callqueueitem"
-    ]
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
     # Only the initial successful run's PATCH should be present.
     assert len(queue_patches) == 1
 
@@ -1065,9 +1050,7 @@ def test_resume_snapshot_queue_load_error_routes_to_blocked(
 
     import unittest.mock
 
-    with unittest.mock.patch.object(
-        ql_mod.DataverseQueueLoader, "load_with_baseline", _boom
-    ):
+    with unittest.mock.patch.object(ql_mod.DataverseQueueLoader, "load_with_baseline", _boom):
         result = _invoke_resume(
             session_id=report.session_id,
             conn=tmp_state_db,
@@ -1130,8 +1113,6 @@ def test_resume_snapshot_row_deleted_yields_conflict_detected(
     assert "__row_deleted__" in (result.message or "")
 
     # No PATCH on the (now-absent) queue row.
-    queue_patches = [
-        c for e, _id, c in fake.patched if e == "medx_callqueueitem"
-    ]
+    queue_patches = [c for e, _id, c in fake.patched if e == "medx_callqueueitem"]
     # Only the initial successful run's PATCH should be present.
     assert len(queue_patches) == 1

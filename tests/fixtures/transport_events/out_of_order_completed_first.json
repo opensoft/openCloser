@@ -1,0 +1,7 @@
+{
+  "fixture_id": "out_of_order_completed_first",
+  "events": [
+    { "event_id": "evt_completed_ooo", "type": "completed", "timestamp": "2026-05-19T17:00:45.000Z", "payload": {} },
+    { "event_id": "evt_connected_ooo", "type": "connected", "timestamp": "2026-05-19T17:00:01.000Z", "payload": {} }
+  ]
+}

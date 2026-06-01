@@ -112,6 +112,22 @@ def find_planned_writeback(artifact_dir: Path) -> dict | None:
     return json.loads(latest.read_text(encoding="utf-8"))
 
 
+def find_jsonl(artifact_dir: Path, filename: str) -> list[dict]:
+    """Parse a per-session JSONL audit log under ``artifact_dir`` (one object/line).
+
+    Returns ``[]`` if the file was not written (e.g. no callback received).
+    """
+    candidates = list(artifact_dir.rglob(filename))
+    if not candidates:
+        return []
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return [
+        json.loads(line)
+        for line in latest.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def find_telephony_readiness(artifact_dir: Path) -> dict | None:
     """Locate and parse ``telephony_readiness.json`` under ``artifact_dir`` (FR-009).
 
