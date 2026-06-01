@@ -29,6 +29,10 @@ Design decisions (recorded in
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import hashlib
+import hmac
 import json
 import sqlite3
 from pathlib import Path
@@ -67,13 +71,10 @@ _SIGNALWIRE_INTERMEDIATE_STATES: frozenset[str] = frozenset({
 })
 
 
-def _build_callback_headers(*, signature: str = "deadbeef", event_id: str = "EV-1") -> dict[str, str]:
-    """Build a minimal SignalWire-shaped callback header set."""
-    return {
-        "X-SignalWire-Signature": signature,
-        "X-SignalWire-Event-Id": event_id,
-        "Content-Type": "application/json",
-    }
+# Matches the ``signing_secret`` conftest fixture the ``signalwire_transport`` is
+# constructed with — so normal-path callbacks carry a VALID HMAC and survive the
+# mandatory signature verification (FR-008). Forged-callback tests override it.
+_SIGNING_SECRET = "T013-FAKE-SIGNING-SECRET-not-a-real-key"
 
 
 def _build_callback_body(*, call_status: str, provider_call_id: str = "CA-1") -> bytes:
@@ -84,6 +85,30 @@ def _build_callback_body(*, call_status: str, provider_call_id: str = "CA-1") ->
         "AccountSid": "AC-fake",
     }
     return json.dumps(payload).encode("utf-8")
+
+
+def _valid_signature(body: bytes) -> str:
+    """The base64 HMAC-SHA256 of ``body`` under the test signing secret."""
+    digest = hmac.new(_SIGNING_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _build_callback_headers(
+    *,
+    call_status: str = "completed",
+    provider_call_id: str = "CA-1",
+    event_id: str = "EV-1",
+    signature: str | None = None,
+) -> dict[str, str]:
+    """Build SignalWire-shaped headers whose signature is a VALID HMAC over the
+    matching ``_build_callback_body(call_status, provider_call_id)`` — unless an
+    explicit ``signature`` overrides it (forged-callback tests)."""
+    body = _build_callback_body(call_status=call_status, provider_call_id=provider_call_id)
+    return {
+        "X-SignalWire-Signature": signature if signature is not None else _valid_signature(body),
+        "X-SignalWire-Event-Id": event_id,
+        "Content-Type": "application/json",
+    }
 
 
 def _open_state_db() -> sqlite3.Connection:
@@ -140,7 +165,9 @@ async def test_event_stream_normalizes_intermediate_states(
     for idx, status in enumerate(["ringing", "in_progress", "answered", "completed"]):
         await signalwire_transport.ingest_callback(
             session_id=valid_session_id,
-            headers=_build_callback_headers(event_id=f"EV-{idx}"),
+            headers=_build_callback_headers(
+                call_status=status, provider_call_id=provider_call_id, event_id=f"EV-{idx}"
+            ),
             body=_build_callback_body(call_status=status, provider_call_id=provider_call_id),
         )
 
@@ -172,7 +199,9 @@ async def test_event_stream_dedups_duplicate_callbacks(
     for _ in range(2):
         await signalwire_transport.ingest_callback(
             session_id=valid_session_id,
-            headers=_build_callback_headers(event_id=duplicated_event_id),
+            headers=_build_callback_headers(
+                call_status="completed", provider_call_id=provider_call_id, event_id=duplicated_event_id
+            ),
             body=_build_callback_body(call_status="completed", provider_call_id=provider_call_id),
         )
 
@@ -203,13 +232,17 @@ async def test_event_stream_marks_out_of_order(
     # 1. completed arrives first
     await signalwire_transport.ingest_callback(
         session_id=valid_session_id,
-        headers=_build_callback_headers(event_id="EV-COMPLETED-FIRST"),
+        headers=_build_callback_headers(
+            call_status="completed", provider_call_id=provider_call_id, event_id="EV-COMPLETED-FIRST"
+        ),
         body=_build_callback_body(call_status="completed", provider_call_id=provider_call_id),
     )
     # 2. answered arrives after — out of order
     await signalwire_transport.ingest_callback(
         session_id=valid_session_id,
-        headers=_build_callback_headers(event_id="EV-ANSWERED-LATE"),
+        headers=_build_callback_headers(
+            call_status="answered", provider_call_id=provider_call_id, event_id="EV-ANSWERED-LATE"
+        ),
         body=_build_callback_body(call_status="answered", provider_call_id=provider_call_id),
     )
 
@@ -239,7 +272,9 @@ async def test_event_stream_marks_late_after_finalization(
     # Drive a terminal event and finalize.
     await signalwire_transport.ingest_callback(
         session_id=valid_session_id,
-        headers=_build_callback_headers(event_id="EV-COMPLETED"),
+        headers=_build_callback_headers(
+            call_status="completed", provider_call_id=provider_call_id, event_id="EV-COMPLETED"
+        ),
         body=_build_callback_body(call_status="completed", provider_call_id=provider_call_id),
     )
     async for _ in signalwire_transport.event_stream(provider_call_id):
@@ -248,7 +283,9 @@ async def test_event_stream_marks_late_after_finalization(
     # Now a stray callback arrives after finalization.
     await signalwire_transport.ingest_callback(
         session_id=valid_session_id,
-        headers=_build_callback_headers(event_id="EV-LATE"),
+        headers=_build_callback_headers(
+            call_status="failed", provider_call_id=provider_call_id, event_id="EV-LATE"
+        ),
         body=_build_callback_body(call_status="failed", provider_call_id=provider_call_id),
     )
 
@@ -313,7 +350,7 @@ async def test_signature_verification_does_not_log_secret_or_body(
     Round 2 Q9)."""
     forged_body = _build_callback_body(call_status="completed")
     sensitive_marker = "T013-SECRET-MARKER-must-not-appear-in-audit"
-    try:
+    with contextlib.suppress(SignatureVerificationError):
         await signalwire_transport.ingest_callback(
             session_id=valid_session_id,
             headers={
@@ -322,8 +359,6 @@ async def test_signature_verification_does_not_log_secret_or_body(
             },
             body=forged_body,
         )
-    except SignatureVerificationError:
-        pass
 
     with _open_state_db() as conn:
         # The expected column set per FR-008 Round 2 Q9.
@@ -422,7 +457,9 @@ async def test_no_signalwire_specifics_leak(
     for status in ["ringing", "in_progress", "answered", "completed"]:
         await signalwire_transport.ingest_callback(
             session_id=valid_session_id,
-            headers=_build_callback_headers(event_id=f"EV-{status}"),
+            headers=_build_callback_headers(
+                call_status=status, provider_call_id=provider_call_id, event_id=f"EV-{status}"
+            ),
             body=_build_callback_body(call_status=status, provider_call_id=provider_call_id),
         )
 

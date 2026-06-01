@@ -61,6 +61,12 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.models",
         "opencloser.core",
         "opencloser.transport",  # intra-boundary submodules
+        # Slice 3: the SignalWire transport appends to the rejected-auth audit
+        # surface on a failed-signature callback — explicitly sanctioned by
+        # contracts/signalwire-transport.md §5 ("MUST NOT write ... other than
+        # appending to the callbacks audit surface ... and the
+        # rejected_auth_callbacks table"). Narrowly scoped to that one writer.
+        "opencloser.artifacts.rejected_auth_log",
     },
     "persona": {
         "opencloser.models",

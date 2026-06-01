@@ -29,8 +29,12 @@ green when T032 lands the writers.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from datetime import datetime
+from pathlib import Path
 
+from opencloser.artifacts.rejected_auth_log import RejectedAuthCallbackLog
 from opencloser.core.clock import Clock, SystemClock
 from opencloser.models import CallEvent, DialPlan, ProviderCallId, QueueItem
 from opencloser.transport.signalwire.callbacks import (
@@ -39,6 +43,15 @@ from opencloser.transport.signalwire.callbacks import (
     parse_callback,
 )
 from opencloser.transport.signalwire.dial import SignalWireClient, place_outbound_call
+from opencloser.transport.signalwire.errors import SignatureVerificationError
+from opencloser.transport.signalwire.signature import verify_signature
+
+_CONFLICTING_LOG_NAME = "conflicting_callbacks_audit.jsonl"
+
+
+def _event_id_header(headers: dict[str, str]) -> str:
+    """Extract the SignalWire event id header (case-insensitive); ``""`` if absent."""
+    return headers.get("X-SignalWire-Event-Id") or headers.get("x-signalwire-event-id") or ""
 
 
 class SignalWireTransport:
@@ -55,15 +68,26 @@ class SignalWireTransport:
         source_caller_id: str,
         signing_secret: str,
         clock: Clock | None = None,
+        artifacts_root: Path | None = None,
+        db_path: Path | None = None,
+        rejected_auth_log: RejectedAuthCallbackLog | None = None,
     ) -> None:
         self._client = client
         self._source_caller_id = source_caller_id
         self._signing_secret = signing_secret
         self._clock = clock or SystemClock()
+        # Audit surfaces (FR-008 / FR-027). Default to the app's cwd-relative
+        # artifacts dir + state DB; injectable for tests / alternate deployments.
+        self._artifacts_root = Path(artifacts_root) if artifacts_root is not None else Path("artifacts")
+        self._db_path = Path(db_path) if db_path is not None else Path("state.db")
+        self._rejected_auth_log = rejected_auth_log or RejectedAuthCallbackLog(
+            artifacts_root=self._artifacts_root,
+            db_path=self._db_path,
+        )
         # Per-provider-call state, keyed by ``provider_call_id`` (the SignalWire SID).
         self._normalizers: dict[str, SignalWireCallbackNormalizer] = {}
         self._buffers: dict[str, list[CallEvent]] = {}
-        # Late-after-finalization events awaiting the T032 conflicting-events writer.
+        # Late-after-finalization events recorded to the conflicting-events log.
         self._late_events: dict[str, list[CallEvent]] = {}
 
     async def place_call(
@@ -111,13 +135,27 @@ class SignalWireTransport:
     ) -> None:
         """Test / receiver entrypoint for an inbound SignalWire callback.
 
-        Parses + normalizes the callback and buffers the emitted ``CallEvent``.
-
-        Signature verification (FR-008) and the rejected-auth audit write are
-        wired in T032; this method performs normalization only. A callback that
-        normalizes to a pre-connection intermediate (or unrecognized) state is
-        absorbed without emission.
+        Verifies the HMAC-SHA256 signature (FR-008) BEFORE any hand-off; a failed
+        signature is recorded in the rejected-auth audit log and re-raised as
+        ``SignatureVerificationError`` (HTTP 401). A verified callback is then
+        normalized and buffered; a pre-connection intermediate (or unrecognized)
+        state is absorbed without emission, and a late-after-finalization callback
+        is routed to the conflicting-events audit log (FR-027).
         """
+        # FR-008: every inbound callback MUST be HMAC-verified before hand-off.
+        try:
+            verify_signature(headers=headers, body=body, signing_secret=self._signing_secret)
+        except SignatureVerificationError:
+            # Record the rejection (no secret, no body — only safe source metadata)
+            # and re-raise so the receiver returns HTTP 401.
+            self._rejected_auth_log.record(
+                received_at=self._now_dt(),
+                session_id=session_id,
+                source_metadata={"sw_source": _event_id_header(headers)},
+                http_status=401,
+            )
+            raise
+
         parsed = parse_callback(headers, body)
         provider_call_id = parsed.provider_call_id
         normalizer = self._normalizers.get(provider_call_id)
@@ -129,7 +167,25 @@ class SignalWireTransport:
         if event is None:
             return
         if event.late_after_finalization:
-            # Routed to ``conflicting_callbacks_audit.jsonl`` by the T032 writer.
+            # Late-after-finalization callback → conflicting-events audit log (FR-027).
             self._late_events.setdefault(provider_call_id, []).append(event)
+            self._append_conflicting_log(session_id, event)
             return
         self._buffers.setdefault(provider_call_id, []).append(event)
+
+    def _now_dt(self) -> datetime:
+        """Current time as a ``datetime`` derived from the injected clock."""
+        return datetime.fromisoformat(self._clock.now_utc_ms().replace("Z", "+00:00"))
+
+    def _append_conflicting_log(self, session_id: str, event: CallEvent) -> None:
+        """Append a late-after-finalization callback to the conflicting-events log (FR-027)."""
+        log_dir = self._artifacts_root / session_id
+        log_dir.mkdir(parents=True, exist_ok=True)
+        row = {
+            "provider_event_id": event.event_id,
+            "event_type": event.event_type.value,
+            "received_at": event.received_at,
+            "late_after_finalization": True,
+        }
+        with (log_dir / _CONFLICTING_LOG_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")

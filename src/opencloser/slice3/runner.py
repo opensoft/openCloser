@@ -28,18 +28,61 @@ user-story tasks own.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from opencloser.artifacts.writer import write_session_artifacts
+from opencloser.core import ids
+from opencloser.core.clock import SystemClock
+from opencloser.core.orchestrator import (
+    _NEW_STATUS_MAP,
+    _build_callback_task,
+    _build_review_task,
+    _format_transcript,
+    _to_exported_decision,
+)
+from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter
+from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
     Disposition,
+    NormalizedResult,
+    PhoneCallActivityPayload,
+    QueueStatusUpdatePayload,
     RunReport,
+    Session,
+    SessionState,
     Slice2Config,
     Slice3RunMode,
     SliceConfig,
+    TaskPayload,
+    WriteBackOperationStatus,
 )
+from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
+from opencloser.persona.base import SessionContext
+from opencloser.runtime.pipecat.identity import build_runtime_identity
+from opencloser.runtime.pipecat.provider import select_realtime_provider
+from opencloser.slice2.runner import (
+    CrmRunReport,
+    _load_conversation_fixture,
+    _load_dataverse_queue_item,
+    _stage_queue_item,
+    _verify_readiness,
+)
+from opencloser.slice3.run_report import build_run_report, write_run_report
+from opencloser.state import store
+
+# Dispositions that reached a connected live conversation and so warrant a
+# Phone Call activity carrying the SignalWire-supplied connected-call
+# timestamps. Terminal (non-connected) outcomes still update the queue row but
+# MUST NOT record a false connected-call activity (SC-006, FR-006).
+_TERMINAL_EVENT_DISPOSITION: Final[dict[str, Disposition]] = {
+    "no_answer": Disposition.NO_ANSWER,
+    "voicemail": Disposition.VOICEMAIL,
+    "failed": Disposition.FAILED,
+}
 
 # Slice 3 CLI exit codes (contracts/cli-slice3.md §"Exit codes"). Owned here so
 # the CLI surface and the runner surface cannot drift apart.
@@ -148,15 +191,407 @@ def run_one_real_call(
     per FR-001 / FR-002), ``operator_id`` + ``resume_session_id`` (operator
     identity preservation per Round 2 Q12), and ``campaign_id``.
 
-    Foundational status (T011): this is a stub. The real-call orchestration —
-    claim -> readiness -> dial (T026) -> bridge audio (T030) -> deterministic
-    disposition -> CRM write-back (T031) -> artifacts (T032) -> run report
-    (T033) -> :class:`RealCallRunReport` — lands in **US1 task T034**.
+    T034 implementation. The dependency-injectable core reuses the Slice 2
+    readiness + queue-load helpers, drives the deterministic Slice 1 persona over
+    the connected conversation (the live-model path never sets the disposition —
+    FR-014), and assembles the Slice 3 write-back via
+    :meth:`DataverseWriteBackAdapter.assemble_writeback` so ``do_not_call``
+    finalizes DNC-first (Round 2 Q14). In this injectable seam the SignalWire
+    dial is fixture-driven (the call-event transcript comes from
+    ``transport_fixture`` and the provider call id is allocated locally); the
+    production CLI path (:func:`run_slice3`) substitutes the real T026 transport.
     """
-    raise NotImplementedError(
-        "opencloser.slice3.runner.run_one_real_call is a Phase-2 foundational "
-        "stub. The end-to-end real-call orchestration (claim -> readiness -> "
-        "dial -> bridge audio -> deterministic disposition -> CRM write-back -> "
-        "artifacts -> run report) lands in US1 task T034 "
-        "(see specs/003-real-call-real-crm/tasks.md)."
+    clk = clock or SystemClock()
+    persona = ALFAppointmentSetterPersona()
+
+    # ----- readiness + queue load (reuse the Slice 2 write-enabled gates) -----
+    readiness = _verify_readiness(slice2_config, dataverse_client, clk, dry_run=False)
+    if isinstance(readiness, CrmRunReport):
+        return _blocked_before_call(readiness, run_mode=run_mode, operator_id=operator_id)
+    translator = readiness.translator
+    redaction_layer = readiness.redaction_layer
+
+    loaded = _load_dataverse_queue_item(
+        selector=selector,
+        client=dataverse_client,
+        translator=translator,
+        slice2_config=slice2_config,
+        metadata_report=readiness.metadata_report,
+        clk=clk,
+    )
+    if isinstance(loaded, CrmRunReport):
+        return _blocked_before_call(loaded, run_mode=run_mode, operator_id=operator_id)
+    queue_item, _queue_baseline = loaded
+    _stage_queue_item(conn, queue_item)
+
+    # ----- eligibility gate (Slice 1 six rules, unchanged) -------------------
+    decision = BuiltinEligibilityEvaluator().evaluate(queue_item, slice1_config, clk)
+
+    session_id = ids.new_session_id()
+    started_at = clk.now_utc_ms()
+    # Provider call id (the SignalWire SID in production). Allocated locally in
+    # this fixture-driven seam; surfaced as ``real_provider_call_id`` on the run
+    # report and stamped onto the Phone Call activity (FR-006 / FR-020).
+    provider_call_id = ids.new_mock_provider_call_id()
+
+    # ----- live call + deterministic disposition -----------------------------
+    persona_output = None
+    transcript_text: str | None = None
+    connected = False
+    connected_call_timestamps: dict[str, str] | None = None
+
+    if decision.outcome == "block":
+        disposition = Disposition.BLOCKED
+    else:
+        events = _read_transport_events(transport_fixture)
+        connected = any(e.get("type") == "connected" for e in events)
+        conversation = (
+            _load_conversation_fixture(conversation_fixture)
+            if connected and conversation_fixture is not None
+            else None
+        )
+        if connected and conversation is not None:
+            persona_output = persona.run(
+                SessionContext(
+                    session_id=session_id,
+                    queue_item=queue_item,
+                    mock_provider_call_id=provider_call_id,
+                    started_at=started_at,
+                    config=slice1_config,
+                    clock=clk,
+                ),
+                conversation,
+            )
+            disposition = persona_output.final_disposition
+            transcript_text = _format_transcript(conversation.turns)
+            connected_call_timestamps = {
+                "answered_at": _event_ts(events, "connected", started_at),
+                "completed_at": _event_ts(events, "completed", clk.now_utc_ms()),
+            }
+        else:
+            # No connected conversation: terminal disposition straight from the
+            # call-event stream (no persona interaction). Never a connected-call
+            # Phone Call activity.
+            connected = False
+            disposition = _terminal_disposition(events)
+
+    ended_at = clk.now_utc_ms()
+    persona_version = persona_output.persona_version if persona_output else persona.version
+
+    normalized = _build_normalized(
+        session_id=session_id,
+        queue_item_id=queue_item.queue_item_id,
+        provider_call_id=provider_call_id,
+        persona_version=persona_version,
+        disposition=disposition,
+        persona_output=persona_output,
+        connected=connected,
+        blocked_reason=(decision.failing_rules if disposition is Disposition.BLOCKED else None),
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+    # ----- persist the finalized session locally -----------------------------
+    session = Session(
+        session_id=session_id,
+        queue_item_id=queue_item.queue_item_id,
+        persona_version=persona_version if persona_output else None,
+        state=SessionState.FINALIZED,
+        final_disposition=disposition,
+        blocked_reason=decision.failing_rules if disposition is Disposition.BLOCKED else None,
+        mock_provider_call_id=provider_call_id,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    with store.transaction(conn):
+        store.insert_session(conn, session)
+        store.insert_normalized_result(conn, normalized)
+        store.update_queue_item_status(
+            conn,
+            queue_item.queue_item_id,
+            last_decision_at=ended_at,
+            callable_status=_NEW_STATUS_MAP.get(disposition, queue_item.callable_status),
+            dnc_flag=True if disposition is Disposition.DO_NOT_CALL else None,
+        )
+        if decision.outcome != "block":
+            store.increment_attempt_count(conn, queue_item.queue_item_id)
+
+    # ----- Slice 3 write-back (DNC-first via assemble_writeback) -------------
+    adapter = DataverseWriteBackAdapter(
+        conn=conn,
+        client=dataverse_client,
+        translator=translator,
+        task_owners=slice2_config.task_owners,
+        now_utc_ms=clk.now_utc_ms,
+        dry_run=False,
+    )
+    task_payload = _build_task_payload(
+        disposition=disposition,
+        session=session,
+        queue_item=queue_item,
+        normalized=normalized,
+        persona_output=persona_output,
+        ended_at=ended_at,
+    )
+    per_writeback = _emit_writeback(
+        adapter,
+        steps=adapter.assemble_writeback(normalized),
+        conn=conn,
+        session_id=session_id,
+        queue_item=queue_item,
+        disposition=disposition,
+        persona_version=persona_version,
+        provider_call_id=provider_call_id,
+        connected=connected,
+        connected_call_timestamps=connected_call_timestamps,
+        summary=normalized.summary or f"Final disposition: {disposition.value}",
+        started_at=started_at,
+        ended_at=ended_at,
+        task_payload=task_payload,
+    )
+
+    # ----- artifacts + run report --------------------------------------------
+    runtime_identity = _safe_runtime_identity()
+    report = build_run_report(
+        session_id=session_id,
+        run_mode=run_mode,
+        operator_current=operator_id,
+        operator_original=None,
+        real_provider_call_id=provider_call_id if decision.outcome != "block" else None,
+        persona_version=persona_version,
+        runtime_identity=runtime_identity if connected else None,
+        final_disposition=disposition,
+        human_review_reason=(persona_output.human_review_reason if persona_output else None),
+        blocked_reason=(
+            ",".join(decision.failing_rules)
+            if disposition is Disposition.BLOCKED and decision.failing_rules
+            else None
+        ),
+        per_writeback_operation_status=per_writeback,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+    writeback = adapter.build_writeback(session_id)
+    paths = write_session_artifacts(
+        artifact_root=slice1_config.artifacts.dir,
+        session_id=session_id,
+        normalized_result=normalized,
+        writeback=writeback,
+        eligibility_decision=_to_exported_decision(
+            decision.model_copy(update={"session_id": session_id})
+        ),
+        task=task_payload,
+        transcript_text=transcript_text,
+        conflicting_events=None,
+        redaction_layer=redaction_layer,
+    )
+    write_run_report(paths.session_dir, report)
+
+    return RealCallRunReport(
+        exit_status="blocked" if disposition is Disposition.BLOCKED else "completed",
+        exit_code=EXIT_SUCCESS,
+        session_id=session_id,
+        final_disposition=disposition,
+        artifact_dir=paths.session_dir,
+        queue_item_id=queue_item.queue_item_id,
+        run_mode=run_mode,
+        run_report=report,
+    )
+
+
+# ---------------------------------------------------------------------------
+# T034 helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_transport_events(transport_fixture: Path) -> list[dict]:
+    """Parse the fixture-driven call-event stream (Slice 1 transport-event shape)."""
+    raw = json.loads(Path(transport_fixture).read_text(encoding="utf-8"))
+    events = raw.get("events", [])
+    return [e for e in events if isinstance(e, dict)]
+
+
+def _event_ts(events: list[dict], event_type: str, fallback: str) -> str:
+    for event in events:
+        if event.get("type") == event_type and event.get("timestamp"):
+            return str(event["timestamp"])
+    return fallback
+
+
+def _terminal_disposition(events: list[dict]) -> Disposition:
+    for event in events:
+        mapped = _TERMINAL_EVENT_DISPOSITION.get(str(event.get("type")))
+        if mapped is not None:
+            return mapped
+    return Disposition.FAILED
+
+
+def _build_normalized(
+    *,
+    session_id: str,
+    queue_item_id: str,
+    provider_call_id: str,
+    persona_version: str,
+    disposition: Disposition,
+    persona_output,
+    connected: bool,
+    blocked_reason,
+    started_at: str,
+    ended_at: str,
+) -> NormalizedResult:
+    if persona_output is not None:
+        ex = persona_output.extraction
+        return NormalizedResult(
+            session_id=session_id,
+            queue_item_id=queue_item_id,
+            mock_provider_call_id=provider_call_id,
+            persona_version=persona_version,
+            final_disposition=disposition,
+            summary=(persona_output.summary or None) and persona_output.summary[:200],
+            transcript_pointer="transcript.txt",
+            captured_email=ex.captured_email,
+            captured_email_unverified=ex.captured_email_unverified,
+            callback_requested=ex.callback_requested,
+            preferred_callback_window=ex.preferred_callback_window,
+            human_review_reason=persona_output.human_review_reason,
+            blocked_reason=None,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+    summary = (
+        f"Blocked by eligibility: {','.join(blocked_reason)}."
+        if disposition is Disposition.BLOCKED and blocked_reason
+        else f"Disposition: {disposition.value}; no persona interaction."
+    )
+    return NormalizedResult(
+        session_id=session_id,
+        queue_item_id=queue_item_id,
+        mock_provider_call_id=provider_call_id,
+        persona_version=persona_version,
+        final_disposition=disposition,
+        summary=summary[:200],
+        transcript_pointer=None,
+        callback_requested=False,
+        blocked_reason=blocked_reason,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+def _build_task_payload(
+    *,
+    disposition: Disposition,
+    session: Session,
+    queue_item,
+    normalized: NormalizedResult,
+    persona_output,
+    ended_at: str,
+) -> TaskPayload | None:
+    if disposition in (
+        Disposition.INTERESTED_CALLBACK_REQUESTED,
+        Disposition.INTERESTED_EMAIL_CAPTURED,
+        Disposition.CALL_BACK_LATER,
+    ):
+        return _build_callback_task(
+            session=session, queue_item=queue_item, normalized=normalized, ended_at=ended_at
+        )
+    if disposition is Disposition.NEEDS_HUMAN_REVIEW:
+        return _build_review_task(
+            session=session,
+            queue_item=queue_item,
+            persona_output=persona_output,
+            ended_at=ended_at,
+        )
+    return None
+
+
+def _emit_writeback(
+    adapter: DataverseWriteBackAdapter,
+    *,
+    steps,
+    conn: sqlite3.Connection,
+    session_id: str,
+    queue_item,
+    disposition: Disposition,
+    persona_version: str,
+    provider_call_id: str,
+    connected: bool,
+    connected_call_timestamps: dict[str, str] | None,
+    summary: str,
+    started_at: str,
+    ended_at: str,
+    task_payload: TaskPayload | None,
+) -> list[WriteBackOperationStatus]:
+    """Emit each planned write-back step in ``assemble_writeback`` order.
+
+    Returns the ``per_writeback_operation_status`` entries in emission order so
+    the run report reflects DNC-first ordering (Round 2 Q14). A terminal
+    (non-connected) outcome skips the Phone Call activity so no false
+    connected-call record is written (SC-006).
+    """
+    emitted: list[WriteBackOperationStatus] = []
+    for step in steps:
+        if step.operation == "phone_call_activity":
+            if not connected:
+                continue
+            activity = PhoneCallActivityPayload(
+                session_id=session_id,
+                queue_item_id=queue_item.queue_item_id,
+                mock_provider_call_id=provider_call_id,
+                persona_version=persona_version,
+                final_disposition=disposition,
+                summary=summary[:200],
+                started_at=started_at,
+                ended_at=ended_at,
+            )
+            with store.transaction(conn):
+                adapter.emit_phone_call_activity(
+                    activity,
+                    provider_call_id=provider_call_id,
+                    connected_call_timestamps=connected_call_timestamps,
+                )
+            emitted.append(
+                WriteBackOperationStatus(operation="phone_call_activity", status="completed")
+            )
+        elif step.variant is not None:
+            new_status = _NEW_STATUS_MAP.get(disposition, queue_item.callable_status)
+            payload = QueueStatusUpdatePayload(
+                session_id=session_id,
+                queue_item_id=queue_item.queue_item_id,
+                previous_status=queue_item.callable_status,
+                new_status=new_status,
+                transition_reason=disposition.value,
+                transition_at=ended_at,
+            )
+            with store.transaction(conn):
+                adapter.emit_queue_status_update(payload, variant=step.variant)
+            emitted.append(WriteBackOperationStatus(operation=step.operation, status="completed"))
+        elif step.operation == "task" and task_payload is not None:
+            with store.transaction(conn):
+                adapter.emit_task(task_payload)
+            emitted.append(WriteBackOperationStatus(operation="task", status="completed"))
+    return emitted
+
+
+def _safe_runtime_identity():
+    """Record the runtime/model identity (FR-016); never fails the run."""
+    try:
+        return build_runtime_identity(select_realtime_provider())
+    except (ValueError, RuntimeError):  # pragma: no cover - defensive
+        return None
+
+
+def _blocked_before_call(
+    crm_report: CrmRunReport, *, run_mode: Slice3RunMode, operator_id: str
+) -> RealCallRunReport:
+    """Map a Slice 2 readiness / queue-load short-circuit to a Slice 3 exit."""
+    exit_code = EXIT_DATAVERSE_UNREACHABLE if crm_report.exit_status == "blocked" else EXIT_SUCCESS
+    return RealCallRunReport(
+        exit_status=crm_report.exit_status,
+        exit_code=exit_code,
+        session_id=crm_report.session_id,
+        queue_item_id=crm_report.queue_item_id,
+        run_mode=run_mode,
+        warnings=[crm_report.message] if crm_report.message else [],
     )

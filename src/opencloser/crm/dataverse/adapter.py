@@ -599,7 +599,10 @@ class DataverseWriteBackAdapter:
         }
         if provider_call_id is not None:
             # Real SignalWire SID on the Phone Call activity (FR-006 / FR-020).
-            body["medx_providercallid"] = provider_call_id
+            # Resolved through the mapping translator (like every other custom
+            # phonecall field) so the FR-009 readiness check verifies it pre-dial
+            # rather than failing as a post-connect Dataverse 4xx.
+            body[self._t.logical_name("phone_call.provider_call_id")] = provider_call_id
         return body
 
     def _queue_status_body(self, payload: QueueStatusUpdatePayload) -> dict[str, object]:
