@@ -52,8 +52,12 @@ def run_real_call(
     run_mode: Slice3RunMode = Slice3RunMode.REAL_CALL,
     operator_id: str = OPERATOR_A,
     queue_item_id: str = QID,
+    telephony_config: object | None = None,
 ):
     """Drive one Slice 3 real-call run through the injectable runner core.
+
+    ``telephony_config`` (a ``Slice3TelephonyConfig``) lets US3 readiness tests
+    break exactly one FR-009 check; ``None`` uses the all-pass default.
 
     Returns the :class:`~opencloser.slice3.runner.RealCallRunReport`, or ``None``
     while the T034 runner core is an unimplemented stub (TDD-red).
@@ -61,6 +65,7 @@ def run_real_call(
     from opencloser.slice3.runner import run_one_real_call
 
     cfg2 = slice2_config(mapping_path=_MAPPING_FIXTURE)
+    extra = {"telephony_config": telephony_config} if telephony_config is not None else {}
     try:
         return run_one_real_call(
             ExplicitId(queue_item_id),
@@ -76,6 +81,7 @@ def run_real_call(
             operator_id=operator_id,
             run_mode=run_mode,
             clock=CLOCK,
+            **extra,
         )
     except NotImplementedError:
         return None
@@ -100,6 +106,18 @@ def find_planned_writeback(artifact_dir: Path) -> dict | None:
     Returns ``None`` if no rehearsal planned-write-back artifact was written.
     """
     candidates = list(artifact_dir.rglob("planned_writeback.json"))
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return json.loads(latest.read_text(encoding="utf-8"))
+
+
+def find_telephony_readiness(artifact_dir: Path) -> dict | None:
+    """Locate and parse ``telephony_readiness.json`` under ``artifact_dir`` (FR-009).
+
+    Returns ``None`` if no readiness artifact was written.
+    """
+    candidates = list(artifact_dir.rglob("telephony_readiness.json"))
     if not candidates:
         return None
     latest = max(candidates, key=lambda p: p.stat().st_mtime)

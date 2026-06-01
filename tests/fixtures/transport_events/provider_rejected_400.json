@@ -1,0 +1,5 @@
+{
+  "fixture_id": "provider_rejected_400",
+  "provider_rejected": { "http_status": 400, "provider_message": "invalid 'To' number" },
+  "events": []
+}

@@ -38,6 +38,7 @@ from opencloser.artifacts.writer import (
     write_actual_writeback,
     write_planned_writeback,
     write_session_artifacts,
+    write_telephony_readiness,
 )
 from opencloser.core import ids
 from opencloser.core.clock import SystemClock
@@ -51,10 +52,12 @@ from opencloser.core.orchestrator import (
 from opencloser.crm.dataverse.adapter import DataverseWriteBackAdapter
 from opencloser.eligibility.evaluator import BuiltinEligibilityEvaluator
 from opencloser.models import (
+    CallableStatus,
     Disposition,
     NormalizedResult,
     PhoneCallActivityPayload,
     QueueStatusUpdatePayload,
+    QueueStatusUpdateVariant,
     RunReport,
     Session,
     SessionState,
@@ -62,6 +65,9 @@ from opencloser.models import (
     Slice3RunMode,
     SliceConfig,
     TaskPayload,
+    TelephonyReadinessCheckName,
+    TelephonyReadinessReport,
+    TelephonyReadinessResult,
     WriteBackOperationStatus,
 )
 from opencloser.persona.alf_appointment_setter import ALFAppointmentSetterPersona
@@ -75,6 +81,7 @@ from opencloser.slice2.runner import (
     _stage_queue_item,
     _verify_readiness,
 )
+from opencloser.slice3.readiness import Slice3TelephonyConfig, TelephonyReadinessChecker
 from opencloser.slice3.run_report import build_run_report, write_run_report
 from opencloser.state import store
 
@@ -134,15 +141,17 @@ def run_slice3(args: Slice3Args) -> int:
     """
     raise NotImplementedError(
         "opencloser.slice3.runner.run_slice3 is the Typer-surface production "
-        "entry point and remains a stub. The injectable orchestration cores are "
-        "implemented — run_one_real_call covers BOTH the US1 real-call branch "
-        "(T034) and the US2 rehearsal branch (T038, run_mode=REHEARSAL) and is "
-        "exercised by the US1/US2 integration tests. What is still missing here "
-        "is the production wiring: loading config/slice3.toml, building the "
-        "Dataverse client + SQLite connection, mapping the run to an exit code, "
-        "and the tolerant no-backing-store rehearsal path the test_cli_slice3 "
-        "assertions drive. That wiring needs the Slice 3 config loader and the "
-        "US3 telephony-readiness checker (T045/T046) and lands with US3."
+        "entry point and remains a stub. The injectable orchestration core "
+        "run_one_real_call now implements the US1 real-call branch (T034), the "
+        "US2 rehearsal branch (T038), and the US3 pre-dial gates — concurrent "
+        "claim (exit 3), telephony readiness (exit 4), and provider-rejected "
+        "dial (exit 5) — all exercised by the US1/US2/US3 integration tests. "
+        "What remains here is only the production CLI wiring: a Slice 3 config "
+        "loader (config/slice3.toml -> telephony config + Dataverse client + "
+        "SQLite connection), the tolerant no-backing-store rehearsal path, and "
+        "the RealCallRunReport -> exit-code mapping that the test_cli_slice3 "
+        "contract assertions drive. That config-loading surface is tracked "
+        "separately from the US3 task set (T041-T048)."
     )
 
 
@@ -185,6 +194,7 @@ def run_one_real_call(
     run_mode: Slice3RunMode = Slice3RunMode.REAL_CALL,
     clock: object | None = None,
     resume_session_id: str | None = None,
+    telephony_config: Slice3TelephonyConfig | None = None,
 ) -> RealCallRunReport:
     """Execute exactly one Slice 3 real-call run end-to-end against injected fakes.
 
@@ -240,6 +250,25 @@ def run_one_real_call(
     if isinstance(loaded, CrmRunReport):
         return _blocked_before_call(loaded, run_mode=run_mode, operator_id=operator_id)
     queue_item, _queue_baseline = loaded
+
+    # ----- US3 concurrent-claim gate (Round 1 Q5, exit 3) --------------------
+    # A second invocation observes the item as not `ready` (already claimed /
+    # in_progress by another run, or completed). It exits before any dial — no
+    # attempt consumed, no Phone Call activity, no Task — and the first
+    # invocation is unaffected.
+    if queue_item.callable_status is not CallableStatus.READY:
+        return RealCallRunReport(
+            exit_status="blocked_by_claim",
+            exit_code=EXIT_CONCURRENT_CLAIM,
+            queue_item_id=queue_item.queue_item_id,
+            run_mode=run_mode,
+            warnings=[
+                f"queue item {queue_item.queue_item_id} is "
+                f"'{queue_item.callable_status.value}', not 'ready' — already claimed "
+                "by another invocation (Round 1 Q5); no dial, no attempt consumed"
+            ],
+        )
+
     _stage_queue_item(conn, queue_item)
 
     # ----- eligibility gate (Slice 1 six rules, unchanged) -------------------
@@ -255,6 +284,69 @@ def run_one_real_call(
     # Phone Call activity carry ``None`` (US2 acceptance scenario #2).
     provider_call_id = ids.new_mock_provider_call_id()
     activity_provider_call_id = None if is_rehearsal else provider_call_id
+
+    # ----- US3 telephony readiness gate (FR-009 - FR-011) --------------------
+    # The nine FR-009 checks run before any dial. The Dataverse-metadata category
+    # was already gated upstream (exit 7); the eligibility category resolves to a
+    # blocked disposition (exit 0); every OTHER failing telephony check blocks a
+    # real-call dial with exit 4, writing zero Dataverse records (FR-011).
+    readiness_report = TelephonyReadinessChecker().check(
+        session_id=session_id,
+        queue_item=queue_item,
+        telephony_config=telephony_config or Slice3TelephonyConfig(),
+        dataverse_metadata_verified=True,
+        eligibility_blocked=decision.outcome == "block",
+        now=started_at,
+    )
+    telephony_summary = readiness_report.checks
+    telephony_failures = [
+        c
+        for c in telephony_summary
+        if c.check_name
+        not in (
+            TelephonyReadinessCheckName.DATAVERSE_METADATA_VERIFIED,
+            TelephonyReadinessCheckName.ELIGIBILITY,
+        )
+        and c.result is TelephonyReadinessResult.FAIL
+    ]
+    if telephony_failures and not is_rehearsal:
+        return _telephony_readiness_failed(
+            session_id=session_id,
+            queue_item=queue_item,
+            readiness_report=readiness_report,
+            failures=telephony_failures,
+            operator_id=operator_id,
+            persona_version=persona.version,
+            run_mode=run_mode,
+            artifact_root=slice1_config.artifacts.dir,
+            started_at=started_at,
+            ended_at=clk.now_utc_ms(),
+        )
+
+    # ----- US3 provider-rejected dial (FR-012, exit 5) -----------------------
+    # In the fixture-driven seam a transport fixture carrying a top-level
+    # ``provider_rejected`` marker stands in for a SignalWire 4xx on dial: no
+    # attempt is consumed, no Phone Call activity is created, and the queue-status
+    # is advanced via the dial-blocked variant per the per-disposition mapping.
+    provider_rejection = _provider_rejection(transport_fixture)
+    if provider_rejection is not None and not is_rehearsal and decision.outcome != "block":
+        return _provider_rejected_dial(
+            session_id=session_id,
+            queue_item=queue_item,
+            http_status=provider_rejection,
+            readiness_report=readiness_report,
+            operator_id=operator_id,
+            persona_version=persona.version,
+            run_mode=run_mode,
+            slice2_config=slice2_config,
+            translator=translator,
+            dataverse_client=dataverse_client,
+            conn=conn,
+            artifact_root=slice1_config.artifacts.dir,
+            started_at=started_at,
+            ended_at=clk.now_utc_ms(),
+            now_utc_ms=clk.now_utc_ms,
+        )
 
     # ----- live call + deterministic disposition -----------------------------
     persona_output = None
@@ -399,10 +491,16 @@ def run_one_real_call(
             else None
         ),
         per_writeback_operation_status=per_writeback,
+        telephony_readiness_summary=telephony_summary,
         started_at=started_at,
         ended_at=ended_at,
     )
 
+    write_telephony_readiness(
+        artifact_root=slice1_config.artifacts.dir,
+        session_id=session_id,
+        report=readiness_report,
+    )
     writeback = adapter.build_writeback(session_id)
     paths = write_session_artifacts(
         artifact_root=slice1_config.artifacts.dir,
@@ -637,6 +735,162 @@ def _safe_runtime_identity():
         return build_runtime_identity(select_realtime_provider())
     except (ValueError, RuntimeError):  # pragma: no cover - defensive
         return None
+
+
+def _provider_rejection(transport_fixture: Path) -> int | None:
+    """Return the HTTP status if the transport fixture carries a top-level
+    ``provider_rejected`` marker — the fixture-driven seam's stand-in for a
+    SignalWire 4xx on dial (FR-012). ``None`` when no marker is present."""
+    raw = json.loads(Path(transport_fixture).read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        marker = raw.get("provider_rejected")
+        if isinstance(marker, dict):
+            status = marker.get("http_status")
+            return status if isinstance(status, int) else 400
+    return None
+
+
+def _telephony_readiness_failed(
+    *,
+    session_id: str,
+    queue_item,
+    readiness_report: TelephonyReadinessReport,
+    failures: list[object],
+    operator_id: str,
+    persona_version: str,
+    run_mode: Slice3RunMode,
+    artifact_root: str | Path,
+    started_at: str,
+    ended_at: str,
+) -> RealCallRunReport:
+    """FR-009 - FR-011 exit-4 path: a pre-dial telephony readiness check failed.
+
+    Writes ``telephony_readiness.json`` + ``run_report.json`` locally and issues
+    ZERO Dataverse records (the queue is left unchanged for non-eligibility
+    readiness failures, FR-011); no SignalWire call is placed, no attempt is
+    consumed, no Phone Call activity is created.
+    """
+    failing = ", ".join(c.check_name.value for c in failures)
+    report = build_run_report(
+        session_id=session_id,
+        run_mode=run_mode,
+        operator_current=operator_id,
+        real_provider_call_id=None,
+        persona_version=persona_version,
+        final_disposition=None,
+        blocked_reason=f"telephony_readiness_failure: {failing}",
+        telephony_readiness_summary=readiness_report.checks,
+        per_writeback_operation_status=[],
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    write_telephony_readiness(
+        artifact_root=artifact_root, session_id=session_id, report=readiness_report
+    )
+    session_dir = Path(artifact_root) / session_id
+    write_run_report(session_dir, report)
+    return RealCallRunReport(
+        exit_status="telephony_readiness_failure",
+        exit_code=EXIT_TELEPHONY_READINESS_FAILURE,
+        session_id=session_id,
+        artifact_dir=session_dir,
+        queue_item_id=queue_item.queue_item_id,
+        run_mode=run_mode,
+        run_report=report,
+        warnings=[f"telephony readiness failed: {failing}"],
+    )
+
+
+def _provider_rejected_dial(
+    *,
+    session_id: str,
+    queue_item,
+    http_status: int,
+    readiness_report: TelephonyReadinessReport,
+    operator_id: str,
+    persona_version: str,
+    run_mode: Slice3RunMode,
+    slice2_config: Slice2Config,
+    translator,
+    dataverse_client: object,
+    conn: sqlite3.Connection,
+    artifact_root: str | Path,
+    started_at: str,
+    ended_at: str,
+    now_utc_ms,
+) -> RealCallRunReport:
+    """FR-012 exit-5 path: SignalWire returned a 4xx before the call was placed.
+
+    No attempt is consumed and no Phone Call activity is created; the queue-status
+    is advanced via the dial-blocked variant per the per-disposition mapping for
+    blocked / failed cases.
+    """
+    # Persist a minimal finalized session first so the dial-blocked queue-status
+    # update's crm_correlations row satisfies its FK to sessions. No dial reached
+    # the connected state, so there is no provider call id and no persona output.
+    session = Session(
+        session_id=session_id,
+        queue_item_id=queue_item.queue_item_id,
+        persona_version=None,
+        state=SessionState.FINALIZED,
+        final_disposition=Disposition.BLOCKED,
+        blocked_reason=None,
+        mock_provider_call_id=None,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    adapter = DataverseWriteBackAdapter(
+        conn=conn,
+        client=dataverse_client,
+        translator=translator,
+        task_owners=slice2_config.task_owners,
+        now_utc_ms=now_utc_ms,
+        dry_run=False,
+    )
+    payload = QueueStatusUpdatePayload(
+        session_id=session_id,
+        queue_item_id=queue_item.queue_item_id,
+        previous_status=queue_item.callable_status,
+        new_status=CallableStatus.BLOCKED,
+        transition_reason=f"provider_rejected_dial_{http_status}",
+        transition_at=ended_at,
+    )
+    with store.transaction(conn):
+        store.insert_session(conn, session)
+        adapter.emit_queue_status_update(payload, variant=QueueStatusUpdateVariant.DIAL_BLOCKED)
+    per_writeback = [
+        WriteBackOperationStatus(
+            operation=QueueStatusUpdateVariant.DIAL_BLOCKED.value, status="completed"
+        )
+    ]
+    report = build_run_report(
+        session_id=session_id,
+        run_mode=run_mode,
+        operator_current=operator_id,
+        real_provider_call_id=None,
+        persona_version=persona_version,
+        final_disposition=None,
+        blocked_reason=f"provider_rejected_dial: HTTP {http_status}",
+        telephony_readiness_summary=readiness_report.checks,
+        per_writeback_operation_status=per_writeback,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    write_telephony_readiness(
+        artifact_root=artifact_root, session_id=session_id, report=readiness_report
+    )
+    session_dir = Path(artifact_root) / session_id
+    write_run_report(session_dir, report)
+    return RealCallRunReport(
+        exit_status="provider_rejected_dial",
+        exit_code=EXIT_PROVIDER_REJECTED_DIAL,
+        session_id=session_id,
+        artifact_dir=session_dir,
+        queue_item_id=queue_item.queue_item_id,
+        run_mode=run_mode,
+        run_report=report,
+        warnings=[f"provider rejected dial: HTTP {http_status}"],
+    )
 
 
 def _blocked_before_call(

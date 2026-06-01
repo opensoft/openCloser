@@ -79,6 +79,7 @@ _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
 _DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
 _PLANNED_WRITEBACK_FILENAME = "planned_writeback.json"
 _ACTUAL_WRITEBACK_FILENAME = "actual_writeback.json"
+_TELEPHONY_READINESS_FILENAME = "telephony_readiness.json"
 
 # Cached so repeated calls without an explicit layer don't re-compile a noop on
 # every session write. Copilot PR #3 LOW: this was previously
@@ -266,6 +267,23 @@ def write_planned_writeback(
     session_dir.mkdir(parents=True, exist_ok=True)
     path = session_dir / _PLANNED_WRITEBACK_FILENAME
     _write_json_atomic(path, writeback)
+    return path
+
+
+def write_telephony_readiness(
+    *, artifact_root: str | Path, session_id: str, report: BaseModel
+) -> Path:
+    """Write the Slice 3 ``telephony_readiness.json`` artifact (data-model §4, FR-036).
+
+    Produced on every invocation — it mirrors the run report's
+    ``telephony_readiness_summary`` so an operator can read each FR-009 pre-dial
+    check (``pass`` / ``fail`` + detail) without opening the full run report.
+    ``report`` is a :class:`~opencloser.models.TelephonyReadinessReport`.
+    """
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _TELEPHONY_READINESS_FILENAME
+    _write_json_atomic(path, report)
     return path
 
 

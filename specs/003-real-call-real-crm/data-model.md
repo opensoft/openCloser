@@ -196,6 +196,8 @@ readiness check from FR-009.
 | `detail` | str | Human-readable explanation; on `fail`, names the failing condition |
 | `checked_at` | ISO8601 | |
 
+**Implementation staging** *(per `/speckit-analyze` I1)*: US3 (T045) implements the **9 base FR-009 checks** — `signalwire_credentials`, `source_caller_id_authorized`, `destination_phone_e164`, `status_callback_url_configured`, `media_callback_url_configured`, `campaign_persona_runtime_mapping`, `dataverse_metadata_verified`, `task_owner_mapping_resolved`, `eligibility` — which is the set the `TelephonyReadinessCheckName` enum in `models.py` carries today. The six Round-4 additions above (`signing_secret_verifiable`, `realtime_ai_credentials`, `shadow_stt_credentials`, `shadow_discrepancy_policy_loadable`, `callback_url_placeholder_valid`, `dataverse_accepts_shadow_discrepancy_reason`) are the **post-T110 target**; T110 extends both the checker and the model enum to add them.
+
 ### 1.10 `RunReport` *(FR-036, extended by Round 2 amendments)*
 
 One JSON file per session at `artifacts/<session_id>/run_report.json`. Schema in
@@ -499,7 +501,7 @@ artifacts/<session_id>/
 ├── conflicting_callbacks_audit.jsonl   # §1.5 (only when ≥1 late callback received)
 ├── shadow_discrepancies.jsonl          # §1.7 (only when shadow STT enabled and ≥1 discrepancy)
 ├── shadow_lane_truncated.json          # §1.8 (only when lane was truncated)
-├── telephony_readiness.json            # §1.9 (always; mirrors the `run_report.json` summary)
+├── telephony_readiness.json            # §1.9 (every run that reaches the pre-dial readiness stage; the concurrent-claim (exit 3) and Dataverse-verification (exit 7) gates precede it)
 ├── planned_writeback.json              # Slice 2; planned write-back payloads (rehearsal + real)
 └── actual_writeback.json               # Slice 2; actually-emitted write-back payloads (real only)
 ```
