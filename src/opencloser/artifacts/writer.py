@@ -78,6 +78,7 @@ _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
 _DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
 _PLANNED_WRITEBACK_FILENAME = "planned_writeback.json"
+_ACTUAL_WRITEBACK_FILENAME = "actual_writeback.json"
 
 # Cached so repeated calls without an explicit layer don't re-compile a noop on
 # every session write. Copilot PR #3 LOW: this was previously
@@ -264,6 +265,31 @@ def write_planned_writeback(
     session_dir = Path(artifact_root) / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     path = session_dir / _PLANNED_WRITEBACK_FILENAME
+    _write_json_atomic(path, writeback)
+    return path
+
+
+def write_actual_writeback(
+    *, artifact_root: str | Path, session_id: str, writeback: WriteBack
+) -> Path:
+    """Write the Slice 3 real-call ``actual_writeback.json`` (data-model §4).
+
+    The real-call counterpart of :func:`write_planned_writeback`. On a real-call
+    run the write-back adapter actually issues the Phone Call activity,
+    queue-status update, and Task to Dataverse; this function records the
+    write-back payloads that WERE emitted to
+    ``<artifact_root>/<session_id>/actual_writeback.json`` so the demo-evidence
+    checklist (T094) and the quickstart walkthrough (T099) can diff the planned
+    vs. actual write-back (R4-Q43) and an operator can confirm what was written.
+
+    Named ``actual_writeback.json`` per the Slice 3 file taxonomy, distinct from
+    the rehearsal ``planned_writeback.json`` (and from the Slice 1/2
+    ``writeback.json`` the orchestrator also writes for conceptual-contract
+    continuity).
+    """
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _ACTUAL_WRITEBACK_FILENAME
     _write_json_atomic(path, writeback)
     return path
 

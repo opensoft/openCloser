@@ -66,9 +66,7 @@ def run_real_call(
             ExplicitId(queue_item_id),
             transport_fixture=_TRANSPORT_FIXTURES / f"{transport_fixture}.json",
             conversation_fixture=(
-                _CONVERSATIONS / f"{conversation_fixture}.json"
-                if conversation_fixture
-                else None
+                _CONVERSATIONS / f"{conversation_fixture}.json" if conversation_fixture else None
             ),
             slice1_config=slice1_config(artifact_dir, Path(":memory:")),
             slice2_config=cfg2,
@@ -102,6 +100,19 @@ def find_planned_writeback(artifact_dir: Path) -> dict | None:
     Returns ``None`` if no rehearsal planned-write-back artifact was written.
     """
     candidates = list(artifact_dir.rglob("planned_writeback.json"))
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return json.loads(latest.read_text(encoding="utf-8"))
+
+
+def find_actual_writeback(artifact_dir: Path) -> dict | None:
+    """Locate and parse ``actual_writeback.json`` under ``artifact_dir`` (data-model §4).
+
+    The real-call counterpart of :func:`find_planned_writeback`; ``None`` if no
+    actually-emitted write-back artifact was written (e.g. on a rehearsal run).
+    """
+    candidates = list(artifact_dir.rglob("actual_writeback.json"))
     if not candidates:
         return None
     latest = max(candidates, key=lambda p: p.stat().st_mtime)

@@ -34,7 +34,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from opencloser.artifacts.writer import write_planned_writeback, write_session_artifacts
+from opencloser.artifacts.writer import (
+    write_actual_writeback,
+    write_planned_writeback,
+    write_session_artifacts,
+)
 from opencloser.core import ids
 from opencloser.core.clock import SystemClock
 from opencloser.core.orchestrator import (
@@ -414,9 +418,17 @@ def run_one_real_call(
         redaction_layer=redaction_layer,
     )
     # Rehearsal mode emits the captured (dry-run) write-back as the planned
-    # artifact an operator inspects before authorizing a real call (US2 T039).
+    # artifact an operator inspects before authorizing a real call (US2 T039);
+    # a real-call run emits the actually-issued write-back as actual_writeback.json
+    # so planned-vs-actual can be diffed (data-model §4, R4-Q43).
     if is_rehearsal:
         write_planned_writeback(
+            artifact_root=slice1_config.artifacts.dir,
+            session_id=session_id,
+            writeback=writeback,
+        )
+    else:
+        write_actual_writeback(
             artifact_root=slice1_config.artifacts.dir,
             session_id=session_id,
             writeback=writeback,

@@ -29,6 +29,7 @@ from tests.fixtures.slice2_configs import OWNER_CALLBACK, seed
 from tests.fixtures.slice3_configs import (
     REQUIRED_RUN_REPORT_FIELDS,
     created_of,
+    find_actual_writeback,
     find_run_report,
     queue_patches,
     run_real_call,
@@ -93,3 +94,12 @@ def test_us1_real_call_callback_full_loop(
     assert real_sid in json.dumps(phonecalls[0]), (
         "Phone Call activity must carry the real SignalWire provider call id (FR-020)"
     )
+
+    # A real-call run emits actual_writeback.json (data-model §4) recording the
+    # write-back payloads that WERE issued — the real-call counterpart of the
+    # rehearsal planned_writeback.json.
+    actual = find_actual_writeback(tmp_artifact_dir)
+    assert actual is not None, "a real-call run must write actual_writeback.json (data-model §4)"
+    assert actual.get("phone_call_activity") is not None
+    assert actual.get("queue_status_update") is not None
+    assert actual.get("task") is not None, "interested_callback_requested emits a callback Task"

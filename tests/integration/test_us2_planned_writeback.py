@@ -18,6 +18,7 @@ from opencloser.models import Disposition, QueueStatusUpdateVariant, Slice3RunMo
 from tests.fixtures.dataverse.helpers import fake_for_mapping
 from tests.fixtures.slice2_configs import seed
 from tests.fixtures.slice3_configs import (
+    find_actual_writeback,
     find_planned_writeback,
     find_run_report,
     run_real_call,
@@ -54,6 +55,12 @@ def test_us2_planned_writeback_contains_real_call_payloads(
 
     planned = find_planned_writeback(tmp_artifact_dir)
     assert planned is not None, "T039 must write planned_writeback.json in rehearsal mode"
+
+    # A rehearsal writes ONLY the planned artifact — never actual_writeback.json
+    # (that is the real-call counterpart, data-model §4).
+    assert find_actual_writeback(tmp_artifact_dir) is None, (
+        "rehearsal must NOT write actual_writeback.json"
+    )
 
     # All three planned sub-payloads are present for an interested-callback outcome.
     assert planned.get("phone_call_activity") is not None, (
