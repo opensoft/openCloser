@@ -96,6 +96,18 @@ def find_run_report(artifact_dir: Path) -> dict | None:
     return json.loads(latest.read_text(encoding="utf-8"))
 
 
+def find_planned_writeback(artifact_dir: Path) -> dict | None:
+    """Locate and parse ``planned_writeback.json`` under ``artifact_dir`` (US2 T039).
+
+    Returns ``None`` if no rehearsal planned-write-back artifact was written.
+    """
+    candidates = list(artifact_dir.rglob("planned_writeback.json"))
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return json.loads(latest.read_text(encoding="utf-8"))
+
+
 def created_of(fake: DataverseFake, entity: str) -> list[dict]:
     """All record bodies POSTed to the Dataverse fake for ``entity``."""
     return [body for ent, body in fake.created if ent == entity]

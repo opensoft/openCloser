@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from opencloser.artifacts.writer import write_session_artifacts
+from opencloser.artifacts.writer import write_planned_writeback, write_session_artifacts
 from opencloser.core import ids
 from opencloser.core.clock import SystemClock
 from opencloser.core.orchestrator import (
@@ -129,11 +129,16 @@ def run_slice3(args: Slice3Args) -> int:
     recovery in US7 (T087 — T089).
     """
     raise NotImplementedError(
-        "opencloser.slice3.runner.run_slice3 is a Phase-2 foundational stub. "
-        "The end-to-end real-call branch lands in US1 task T034 "
-        "(see specs/003-real-call-real-crm/tasks.md); the rehearsal-mode "
-        "branch lands in US2 task T038. Run the CLI in rehearsal mode by "
-        "omitting --real-call once those tasks complete."
+        "opencloser.slice3.runner.run_slice3 is the Typer-surface production "
+        "entry point and remains a stub. The injectable orchestration cores are "
+        "implemented — run_one_real_call covers BOTH the US1 real-call branch "
+        "(T034) and the US2 rehearsal branch (T038, run_mode=REHEARSAL) and is "
+        "exercised by the US1/US2 integration tests. What is still missing here "
+        "is the production wiring: loading config/slice3.toml, building the "
+        "Dataverse client + SQLite connection, mapping the run to an exit code, "
+        "and the tolerant no-backing-store rehearsal path the test_cli_slice3 "
+        "assertions drive. That wiring needs the Slice 3 config loader and the "
+        "US3 telephony-readiness checker (T045/T046) and lands with US3."
     )
 
 
@@ -204,8 +209,17 @@ def run_one_real_call(
     clk = clock or SystemClock()
     persona = ALFAppointmentSetterPersona()
 
+    # Rehearsal / readiness mode (FR-002, US2): verify readiness + eligibility and
+    # produce the PLANNED write-back artifacts, but place zero SignalWire calls and
+    # issue zero Dataverse create/update operations. The adapter and the metadata
+    # verification both run in ``dry_run`` so every emit_* CAPTURES (never POSTs);
+    # the local queue-status / attempt mutations that simulate the Dataverse state
+    # are skipped, and the run report records ``run_mode = "rehearsal"`` with the
+    # real provider call id left not-yet-assigned (SC-002, SC-011).
+    is_rehearsal = run_mode is Slice3RunMode.REHEARSAL
+
     # ----- readiness + queue load (reuse the Slice 2 write-enabled gates) -----
-    readiness = _verify_readiness(slice2_config, dataverse_client, clk, dry_run=False)
+    readiness = _verify_readiness(slice2_config, dataverse_client, clk, dry_run=is_rehearsal)
     if isinstance(readiness, CrmRunReport):
         return _blocked_before_call(readiness, run_mode=run_mode, operator_id=operator_id)
     translator = readiness.translator
@@ -231,8 +245,12 @@ def run_one_real_call(
     started_at = clk.now_utc_ms()
     # Provider call id (the SignalWire SID in production). Allocated locally in
     # this fixture-driven seam; surfaced as ``real_provider_call_id`` on the run
-    # report and stamped onto the Phone Call activity (FR-006 / FR-020).
+    # report and stamped onto the Phone Call activity (FR-006 / FR-020). In
+    # rehearsal mode no dial is placed, so the SID is "not-yet-assigned": the
+    # local correlation id is still allocated, but the run report and the planned
+    # Phone Call activity carry ``None`` (US2 acceptance scenario #2).
     provider_call_id = ids.new_mock_provider_call_id()
+    activity_provider_call_id = None if is_rehearsal else provider_call_id
 
     # ----- live call + deterministic disposition -----------------------------
     persona_output = None
@@ -306,15 +324,20 @@ def run_one_real_call(
     with store.transaction(conn):
         store.insert_session(conn, session)
         store.insert_normalized_result(conn, normalized)
-        store.update_queue_item_status(
-            conn,
-            queue_item.queue_item_id,
-            last_decision_at=ended_at,
-            callable_status=_NEW_STATUS_MAP.get(disposition, queue_item.callable_status),
-            dnc_flag=True if disposition is Disposition.DO_NOT_CALL else None,
-        )
-        if decision.outcome != "block":
-            store.increment_attempt_count(conn, queue_item.queue_item_id)
+        # Rehearsal mode mutates zero CRM state, so the local queue-status mirror
+        # and attempt counter (which simulate the Dataverse row) are left
+        # untouched; only the local session + normalized-result audit rows are
+        # persisted for inspection.
+        if not is_rehearsal:
+            store.update_queue_item_status(
+                conn,
+                queue_item.queue_item_id,
+                last_decision_at=ended_at,
+                callable_status=_NEW_STATUS_MAP.get(disposition, queue_item.callable_status),
+                dnc_flag=True if disposition is Disposition.DO_NOT_CALL else None,
+            )
+            if decision.outcome != "block":
+                store.increment_attempt_count(conn, queue_item.queue_item_id)
 
     # ----- Slice 3 write-back (DNC-first via assemble_writeback) -------------
     adapter = DataverseWriteBackAdapter(
@@ -323,7 +346,7 @@ def run_one_real_call(
         translator=translator,
         task_owners=slice2_config.task_owners,
         now_utc_ms=clk.now_utc_ms,
-        dry_run=False,
+        dry_run=is_rehearsal,
     )
     task_payload = _build_task_payload(
         disposition=disposition,
@@ -342,12 +365,14 @@ def run_one_real_call(
         disposition=disposition,
         persona_version=persona_version,
         provider_call_id=provider_call_id,
+        real_provider_call_id=activity_provider_call_id,
         connected=connected,
         connected_call_timestamps=connected_call_timestamps,
         summary=normalized.summary or f"Final disposition: {disposition.value}",
         started_at=started_at,
         ended_at=ended_at,
         task_payload=task_payload,
+        status="planned" if is_rehearsal else "completed",
     )
 
     # ----- artifacts + run report --------------------------------------------
@@ -357,7 +382,9 @@ def run_one_real_call(
         run_mode=run_mode,
         operator_current=operator_id,
         operator_original=None,
-        real_provider_call_id=provider_call_id if decision.outcome != "block" else None,
+        real_provider_call_id=(
+            None if is_rehearsal or decision.outcome == "block" else provider_call_id
+        ),
         persona_version=persona_version,
         runtime_identity=runtime_identity if connected else None,
         final_disposition=disposition,
@@ -386,10 +413,24 @@ def run_one_real_call(
         conflicting_events=None,
         redaction_layer=redaction_layer,
     )
+    # Rehearsal mode emits the captured (dry-run) write-back as the planned
+    # artifact an operator inspects before authorizing a real call (US2 T039).
+    if is_rehearsal:
+        write_planned_writeback(
+            artifact_root=slice1_config.artifacts.dir,
+            session_id=session_id,
+            writeback=writeback,
+        )
     write_run_report(paths.session_dir, report)
 
+    if is_rehearsal:
+        exit_status = "rehearsed"
+    elif disposition is Disposition.BLOCKED:
+        exit_status = "blocked"
+    else:
+        exit_status = "completed"
     return RealCallRunReport(
-        exit_status="blocked" if disposition is Disposition.BLOCKED else "completed",
+        exit_status=exit_status,
         exit_code=EXIT_SUCCESS,
         session_id=session_id,
         final_disposition=disposition,
@@ -516,12 +557,14 @@ def _emit_writeback(
     disposition: Disposition,
     persona_version: str,
     provider_call_id: str,
+    real_provider_call_id: str | None,
     connected: bool,
     connected_call_timestamps: dict[str, str] | None,
     summary: str,
     started_at: str,
     ended_at: str,
     task_payload: TaskPayload | None,
+    status: str = "completed",
 ) -> list[WriteBackOperationStatus]:
     """Emit each planned write-back step in ``assemble_writeback`` order.
 
@@ -529,6 +572,10 @@ def _emit_writeback(
     the run report reflects DNC-first ordering (Round 2 Q14). A terminal
     (non-connected) outcome skips the Phone Call activity so no false
     connected-call record is written (SC-006).
+
+    ``status`` is ``"completed"`` on a real-call run; rehearsal mode passes
+    ``"planned"`` because the adapter ran in ``dry_run`` and captured (rather
+    than issued) every operation (US2, FR-002).
     """
     emitted: list[WriteBackOperationStatus] = []
     for step in steps:
@@ -548,12 +595,10 @@ def _emit_writeback(
             with store.transaction(conn):
                 adapter.emit_phone_call_activity(
                     activity,
-                    provider_call_id=provider_call_id,
+                    provider_call_id=real_provider_call_id,
                     connected_call_timestamps=connected_call_timestamps,
                 )
-            emitted.append(
-                WriteBackOperationStatus(operation="phone_call_activity", status="completed")
-            )
+            emitted.append(WriteBackOperationStatus(operation="phone_call_activity", status=status))
         elif step.variant is not None:
             new_status = _NEW_STATUS_MAP.get(disposition, queue_item.callable_status)
             payload = QueueStatusUpdatePayload(
@@ -566,11 +611,11 @@ def _emit_writeback(
             )
             with store.transaction(conn):
                 adapter.emit_queue_status_update(payload, variant=step.variant)
-            emitted.append(WriteBackOperationStatus(operation=step.operation, status="completed"))
+            emitted.append(WriteBackOperationStatus(operation=step.operation, status=status))
         elif step.operation == "task" and task_payload is not None:
             with store.transaction(conn):
                 adapter.emit_task(task_payload)
-            emitted.append(WriteBackOperationStatus(operation="task", status="completed"))
+            emitted.append(WriteBackOperationStatus(operation="task", status=status))
     return emitted
 
 

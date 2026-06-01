@@ -77,6 +77,7 @@ _TASK_FILENAME = "task.json"
 _ELIGIBILITY_DECISION_FILENAME = "eligibility-decision.json"
 _CONFLICTING_EVENTS_FILENAME = "conflicting-events.json"
 _DRY_RUN_MARKER_FILENAME = "dry-run-marker.json"
+_PLANNED_WRITEBACK_FILENAME = "planned_writeback.json"
 
 # Cached so repeated calls without an explicit layer don't re-compile a noop on
 # every session write. Copilot PR #3 LOW: this was previously
@@ -239,6 +240,32 @@ def write_dry_run_marker(*, artifact_root: str | Path, session_id: str) -> Path:
     marker_path = session_dir / _DRY_RUN_MARKER_FILENAME
     _write_json_atomic(marker_path, _DryRunMarker(session_id=session_id))
     return marker_path
+
+
+def write_planned_writeback(
+    *, artifact_root: str | Path, session_id: str, writeback: WriteBack
+) -> Path:
+    """Write the Slice 3 US2 ``planned_writeback.json`` (T039, FR-002 / data-model §4).
+
+    In rehearsal / readiness mode the runner drives the write-back adapter in
+    ``dry_run=True``, so every ``emit_*`` CAPTURES the payload that a real-call
+    run WOULD have sent to Dataverse without issuing any create / update. This
+    function serializes that captured :class:`~opencloser.models.WriteBack` to
+    ``<artifact_root>/<session_id>/planned_writeback.json`` so an operator can
+    inspect the planned Phone Call activity, queue-status update, and Task
+    (US2 acceptance scenario #2) before authorizing a real-call run.
+
+    Distinct from the Slice 1/2 ``writeback.json`` (same content here, but the
+    Slice 3 file taxonomy names the rehearsal artifact ``planned_writeback.json``
+    and reserves ``actual_writeback.json`` for the real-call path). Zero
+    SignalWire calls and zero Dataverse mutations occur on the path that calls
+    this (SC-002, SC-011).
+    """
+    session_dir = Path(artifact_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _PLANNED_WRITEBACK_FILENAME
+    _write_json_atomic(path, writeback)
+    return path
 
 
 def _write_json_atomic(path: Path, model: BaseModel) -> None:
