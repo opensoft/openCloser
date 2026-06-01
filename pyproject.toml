@@ -102,14 +102,20 @@ omit = [
     # suite (T013) imports and exercises the public surface; only the
     # NotImplementedError method bodies are excluded here.
     # T022 (2026-05-25): signature.py removed — HMAC-SHA256 verify is real.
-    "src/opencloser/transport/signalwire/adapter.py",
-    "src/opencloser/transport/signalwire/callbacks.py",
-    "src/opencloser/transport/signalwire/dial.py",
+    # T024/T025 (2026-05-31): dial.py + callbacks.py removed — real, unit-tested.
+    # T026 (2026-05-31): adapter.py removed — place_call/event_stream/ingest_callback
+    #   are real (signature enforcement + audit writes land in T032).
     # Slice 3 Pipecat runtime + rejected-auth log + artifact stubs (T013b /
     # T014 TDD red). Same rationale — implementation bodies land in T030 /
     # T032 / T064 / T065 / T066 / T067.
     "src/opencloser/runtime/pipecat/runtime.py",
     "src/opencloser/artifacts/rejected_auth_log.py",
+    # T029 (2026-06-01): pipeline.py is production Pipecat FrameProcessor wiring;
+    # `process_frame` delivery needs Pipecat's live pipeline setup (not available
+    # in unit tests). The pure translation helpers + assembly are unit-tested in
+    # tests/unit/test_pipecat_pipeline.py; integration/manual runs exercise the
+    # live chain. Same rationale as runtime.py above.
+    "src/opencloser/runtime/pipecat/pipeline.py",
 ]
 
 [tool.coverage.report]

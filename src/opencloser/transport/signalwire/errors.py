@@ -4,9 +4,13 @@ The five exception types raised by the SignalWire transport adapter. Each
 maps to a distinct pre-dial or post-dial failure mode named in spec FR-008,
 FR-010, FR-012, FR-013, and FR-026.
 
-Stub module — bodies land in T022/T023. See
-``contracts/signalwire-transport.md`` and ``specs/003-real-call-real-crm/
-t013-clarify-questions.md`` (Q5: stub-first TDD red).
+T023 (2026-05-31): real hierarchy. ``RealDialPhoneValidationError`` subclasses
+``TelephonyReadinessError`` so a ``place_call`` caller catching the latter also
+catches the E.164 pre-dial failure (contract: ``signalwire-transport.md`` §Raises).
+``SignatureVerificationError`` and ``ProviderRejectedDialError`` carry an
+``http_status`` for the embedded callback receiver, and — per FR-008 / FR-035 —
+their messages MUST NOT include the signing secret or the callback body. See
+``contracts/signalwire-transport.md`` and ``tests/unit/test_signalwire_errors.py``.
 """
 
 from __future__ import annotations

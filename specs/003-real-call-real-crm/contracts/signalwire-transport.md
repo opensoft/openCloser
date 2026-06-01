@@ -46,9 +46,11 @@ class CallTransport(Protocol):
         - mark `late_after_finalization=True` if the orchestrator has already
           finalized this session (FR-027).
         - normalize provider intermediate states (ringing / answered /
-          in-progress / busy / canceled / failed) into the six normalized
+          in-progress / busy / canceled / failed) into the normalized
           event types: connected | no_answer | voicemail | failed |
-          completed | callback_requested.
+          completed. (`callback_requested` is part of the normalized event
+          vocabulary but is NOT produced from call-status normalization — it
+          is a persona-determined disposition, not a transport event.)
         - end the iterator on the first normalized terminal event OR on
           live-call abandonment timeout per FR-026.
         """
@@ -78,7 +80,9 @@ class CallTransport(Protocol):
    are still readable for audit inspection.
 
 5. **No state mutation outside this adapter**: the adapter MUST NOT write to Dataverse,
-   MUST NOT write to the session store other than appending to `signalwire_callbacks`,
+   MUST NOT write to the session store other than appending to the callbacks audit
+   surface — the `CallbacksAuditLog` (`artifacts/<session_id>/callbacks_audit.jsonl`,
+   data-model §1.3) and the `rejected_auth_callbacks` table (data-model §1.4),
    MUST NOT call into the persona or runtime modules directly.
 
 ## Inputs / outputs (boundary)
