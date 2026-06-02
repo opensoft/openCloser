@@ -75,6 +75,22 @@ differs from the current operator's identity:
   ("resumed by X, original operator Y") — this is the canonical run-report key for that string.
 - The resume MUST still satisfy `--real-call` per Round 2 Q13.
 
+#### Per-artifact operator identity is derived, not stored (FR-016 — CHK161)
+
+The operator identity chain (`{current, original, chain}`) is stored in exactly ONE place:
+the `sessions` row (data-model §2.1 `operator_identity_current/original/chain_json`) and is
+projected into `run_report.json`. The per-artifact audit tables — `callbacks_audit` (§1.3),
+`rejected_auth_callbacks` (§1.4), `conflicting_callbacks_audit` (§1.5),
+`shadow_stt_discrepancies` (§1.8), and the write-back progress ledger — are
+**`session_id`-FK-scoped and carry NO per-artifact operator column.** The operator attributed
+to any one audit artifact (and the original-operator-vs-resuming-operator distinction for it)
+is **DERIVED** by resolving its `session_id` FK to the session row's
+`operator_identity {current, original, chain}`. Artifacts written before a resume are
+attributed to the `original` operator; artifacts written after a resume are attributed to the
+`current` operator; the full ordered `chain` disambiguates multi-resume sequences. There is no
+per-artifact operator stamping or duplication, and no requirement to back-fill an operator
+column onto existing audit rows on resume.
+
 ### Schema-migration subcommand (`opencloser db-migrate`)
 
 The Slice 3 forward-only schema migration (the additive `sessions` columns + the `call_events`
@@ -84,6 +100,39 @@ data-model §3) is applied by a distinct `opencloser db-migrate` subcommand — 
 `run3`. It is additive and backward-compatible (Slice 2 reads ignore the new columns/tables);
 the documented rollback posture is restoring a pre-migration database snapshot (R4-Q31). This
 is the canonical spelling referenced by quickstart §1.0 and tasks T116.
+
+This subcommand is a distinct CLI contract surface from `run3` (it does NOT accept
+`--campaign-id`, `--queue-item-id`, `--real-call`, or `--resume`):
+
+```bash
+opencloser db-migrate \
+  [--db <path>] \
+  [--config <path>] \
+  [--check]
+```
+
+| Option | Type | Default | Notes |
+|---|---|---|---|
+| `--db` | path | from `config/slice3.toml` `[storage].db_path` | Target local SQLite database to migrate |
+| `--config` | path | `config/slice3.toml` | Non-secret config file (same loader/precedence as `run3`) |
+| `--check` | flag | absent → apply | Dry-run: report whether the DB is already at the Slice 3 schema and exit WITHOUT mutating |
+
+Required behaviors:
+- **Forward-only, idempotent re-run.** Running `db-migrate` against an already-migrated DB
+  is a no-op that re-applies nothing and is NOT an error: it MUST exit `0` with a
+  "already at current schema; no changes applied" message. Each additive step is guarded
+  (column/table existence checks; the `cm_`→`crm_writeback_started_at` rename is skipped when
+  the renamed column already exists). There is no `down`/rollback subcommand — rollback is
+  snapshot restore only (R4-Q31).
+- **`--check` mode** never mutates: exits `0` when the DB is already current, and exits `0`
+  with a "migration pending" report when additive steps WOULD be applied (it reports, it does
+  not apply).
+- **Exit codes.** `0` = applied successfully OR already-current (idempotent no-op); `1` =
+  unexpected error during migration (mapped after redaction-safe logging, named operator
+  message, no secret in message/stderr — same contract as `run3` exit `1`); `2` = bad usage
+  (e.g., unknown flag, unreadable `--db` / `--config` path), always naming the offending
+  argument. The migration is wrapped in a single transaction so a failed apply leaves the DB
+  at its pre-migration schema (no partial migration).
 
 ### Required readiness checks before any dial (FR-009 – FR-012)
 
@@ -150,6 +199,39 @@ FR-036 amended by Round 2:
 - Any failure or blocked reason (including `redaction_failed` per FR-015 and
   `live_call_abandonment` per FR-026)
 
+### Stdout human-readable summary (FR-037 / R4-Q37)
+
+Every `run3` invocation MUST print a human-readable summary to **stdout** on completion
+(distinct from, and in addition to, `run_report.json`). The summary is the informal operator
+surface; its guaranteed minimum content is:
+- `run_mode` (rehearsal / real-call)
+- `session_id`
+- `final_disposition`
+- exit outcome (the numeric exit code AND its named meaning, e.g. `4 — telephony readiness failure`)
+- for any non-zero exit, the human-readable reason / failing check (see exit-code operator
+  messages below) and its remediation class (`config` / `transient_provider` / `ineligible`)
+- the path to `run_report.json` and the artifacts directory
+
+The summary MUST NOT contain any secret value (SC-018) and is redaction-safe (no PHI / no
+clinical content). It is parseable informally by a piping script but is not a stable machine
+contract — `run_report.json` remains the machine-readable surface.
+
+#### Console operator message per non-zero exit code (FR-011 / FR-012 / FR-026 — CHK179)
+
+Every non-zero exit code MUST surface a human-readable operator message on the console
+(stdout summary and/or stderr) stating the reason — not only the numeric code and
+`run_report.json`. This is uniform across all wired codes:
+
+| Exit | Console operator message (minimum) |
+|---|---|
+| `1` | Named operator message (post-redaction); no secret in message/stderr |
+| `2` | Names the offending / missing argument |
+| `3` | States the concurrent-claim block (item already claimed; no dial, no attempt consumed) |
+| `4` | Names the failing readiness check |
+| `5` | States the provider-rejected dial (no attempt consumed; no Phone Call activity) |
+| `6` | States live-call abandonment (timeout elapsed; finalized `failed` / `live_call_abandonment`) |
+| `7` | States Dataverse-unreachable-at-start |
+
 ### Demo evidence without a custom UI (FR-038)
 
 The CLI MUST provide enough operator evidence — via CLI stdout, the run report, the local
@@ -188,6 +270,27 @@ Each non-zero exit code corresponds to a specific named outcome in the run repor
   resumed session. A selector mismatch → exit `2` with a named message identifying
   the inconsistent selector.
 
+The exit-`1` and exit-`2` behaviors above are CLI-contract obligations (named, guaranteed
+behaviors — not implicit consequences of the "plus 0/1/2" exit-code note): exit `1` is the
+sole code for any uncaught exception and MUST emit a named operator message only after the
+redaction pass, and exit `2` MUST always name the offending/missing argument and never exit
+silently. They are verified by `test_exit_1_and_2_emit_named_messages`,
+`test_unknown_resume_session_exits_2`, and `test_resume_with_selectors_validates_consistency`.
+
+### Configuration precedence (Round 3 / Round 4 — CLI-contract obligation)
+
+The CLI guarantees, as a contract obligation (not merely documentation), a single
+precedence ordering for every overlapping **non-secret** setting:
+
+**CLI flag > environment variable > `config/slice3.toml` value > built-in default.**
+
+The higher-precedence source wins for each individual setting independently (a CLI flag for
+setting A does not suppress an env var for unrelated setting B). **Secrets are env-var-only:**
+credentials (SignalWire, real-time AI provider, shadow-STT, callback signing secret) have NO
+TOML key and NO CLI flag — they are read solely from the environment, so they never appear in
+a config file or in `--help` / argv (SC-018). This precedence is the same loader used by both
+`run3` and `db-migrate`. Verified by `test_config_precedence_cli_over_env_over_toml`.
+
 ### Error-message remediation classification (Round 4 R4-Q41)
 
 Operator error messages MUST classify the remediation path as one of `config` /
@@ -216,6 +319,9 @@ queue item is not eligible (ineligible).
 | `test_unknown_resume_session_exits_2` | `--resume <unknown_sid>` exits with code 2 and emits a named message identifying the unknown session id (Round 4 R4-Q39) |
 | `test_resume_with_selectors_validates_consistency` | `--resume <sid>` combined with `--campaign-id` / `--queue-item-id` resolves to the resumed session (resume wins); a selector that mismatches the resumed session exits with code 2 naming the inconsistent selector (Round 4 R4-Q39) |
 | `test_exit_1_and_2_emit_named_messages` | Exit 1 (uncaught exception, after redaction-safe logging) and exit 2 (bad usage) each emit an operator message naming the failure / offending arg; exit 1 message + stderr contain no secret (Round 4 R4-Q9) |
+| `test_db_migrate_idempotent_rerun_exits_0` | `opencloser db-migrate` against an already-migrated DB applies nothing and exits 0 with an "already at current schema" message; a second run is a no-op (forward-only idempotent re-run, R4-Q31). `--check` reports pending-vs-current without mutating |
+| `test_stdout_summary_contains_required_fields` | After any `run3` invocation, stdout contains `run_mode`, `session_id`, `final_disposition`, the exit-code + named meaning, and the `run_report.json` path; no secret value appears (R4-Q37 / SC-018) |
+| `test_nonzero_exit_codes_emit_console_message` | Each of exit codes 3 / 5 / 6 (and 1 / 2 / 4 / 7) emits a human-readable operator reason on the console (stdout/stderr), not only the numeric code + `run_report.json` (FR-011 / FR-012 / FR-026) |
 
 ## Round 4 — Checklist-Residual Alignment (2026-06-01)
 

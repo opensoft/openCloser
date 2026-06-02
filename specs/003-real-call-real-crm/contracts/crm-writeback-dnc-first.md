@@ -162,6 +162,36 @@ write exhaustion finalizes the failure reason `dnc_write_failed` per R4-Q7 becau
 contact-protecting write is the one that failed — this is a run-level failure reason, not an
 overwrite of the persona disposition.)
 
+### Planned-vs-actual write-back artifact parity (R4-Q43 — CHK201)
+
+Both run modes emit a local write-back artifact under `artifacts/<session_id>/`:
+- **`planned_writeback.json`** — produced in EVERY mode (rehearsal and real-call); the
+  ordered set of write-back operations the run *would* / *did intend to* emit.
+- **`actual_writeback.json`** — produced in REAL-CALL mode ONLY (written by the US1 write-back
+  adapter wiring, T034); the operations actually emitted to Dataverse.
+
+So the operator's manual diff (R4-Q43; a diff UI is OUT OF SCOPE) is meaningful and
+unambiguous, the two artifacts MUST be parity-correlated as a requirement-level contract:
+
+- **Same operation set, same order.** Each artifact is the ordered list of the SAME
+  per-disposition write-back operations produced by `assemble_writeback` (including DNC-first
+  ordering on `do_not_call`). The operation set and its ordering MUST match between the two
+  artifacts for a given session; an operation present in `planned` MUST have a corresponding
+  entry in `actual` (and vice versa) for a real-call run that ran to write-back.
+- **Join key.** Entries correlate one-to-one on the tuple
+  `(operation, variant, idempotency_key)` — the stable per-operation key — so a line-by-line
+  operator diff joins deterministically without positional guessing.
+- **Expected real-vs-rehearsal divergence is bounded and named.** The ONLY fields that may
+  differ between a `planned` entry and its correlated `actual` entry are the
+  provider-assigned / runtime-assigned values that do not exist until the real write happens:
+  `real_provider_call_id` (`"not-yet-assigned"` / absent in `planned`, populated in `actual`),
+  the connected-call timestamps, the Dataverse record IDs, and the per-step
+  completed / resume-needed / blocked status. The operation identity, variant, ordering, and
+  idempotency key MUST be identical. Any other divergence is a write-back correctness defect.
+- A `planned` entry with NO correlated `actual` entry after a real-call run means the
+  operation was not emitted (e.g., resume-needed / exhausted budget) and MUST be explained by
+  that step's status field — it is never a silent drop.
+
 ### Real-call flag still required on resume (Round 2 Q13)
 
 The adapter MUST refuse to perform any write when `Session.run_mode != 'real_call'`. A
@@ -197,6 +227,7 @@ and exits without mutation.
 | `test_idempotency_key_stamping_preserved` | Both Phone Call activity and Task creates pre-query by idempotency key; duplicate calls find the existing write and skip |
 | `test_resume_in_rehearsal_mode_does_not_mutate` | Resume invocation without `--real-call` performs 0 Dataverse writes; run report surfaces the planned writes |
 | `test_operator_identity_not_in_dataverse` | Inspecting any emitted Dataverse payload contains 0 operator identity strings (FR-016) |
+| `test_actual_writeback_parity_with_planned` | After a real-call run, `actual_writeback.json` and `planned_writeback.json` carry the SAME operation set and order, correlate one-to-one on `(operation, variant, idempotency_key)`, and differ ONLY in provider/runtime-assigned fields (`real_provider_call_id` populated — not `not-yet-assigned` — connected timestamps, record IDs, per-step status); any other divergence fails (R4-Q43 / CHK201) |
 
 ## Round 4 — Checklist-Residual Alignment (2026-06-01)
 

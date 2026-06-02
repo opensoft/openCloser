@@ -35,6 +35,13 @@ readiness gates without dialing.
    opencloser db-migrate            # applies the additive Slice 3 schema (backward-compatible)
    ```
 
+   `db-migrate` is idempotent and safe to re-run (R7): running it against an already-migrated
+   or partially-migrated SQLite store is a no-op for already-present columns/tables and never
+   errors or loses data. Each additive step (`ALTER ADD COLUMN`, `CREATE TABLE`) is applied
+   conditionally (add-if-missing), so if a first run is interrupted you simply re-run
+   `opencloser db-migrate` and it completes the remaining steps — no manual SQL and no need to
+   reset the store.
+
 4. **Provision the FastAPI callback receiver** — real-call mode binds a port via `uvicorn` to
    receive SignalWire status/media callbacks. The callback-URL templates in §1.3 must be
    reachable from the SignalWire side over TLS (HTTPS); terminate TLS at your ingress and
@@ -116,9 +123,17 @@ mode = "full_with_redaction"                 # or "summary_only" or "pointer_onl
 # Default-on per FR-033 / Round 2 Q10; covers transcript + summary + shadow transcript +
 # shadow discrepancy records; pointer metadata excluded
 policy = "default"
-# Setting policy = "disabled" turns default-on redaction entirely off — permitted ONLY via
-# this explicit value, and it emits a PROMINENT startup + run-report warning (R4-Q18).
-# Redaction is never silently off.
+# `policy` is a distinct knob from the default-on `[REDACTED]` / `[PHI-REDACTED]` coverage:
+#   - "default"  → default-on redaction across transcript + summary + shadow transcript +
+#                  shadow discrepancy records (pointer metadata excluded).
+#   - a configured replacement string → same coverage, different marker.
+#   - "disabled" → turns default-on redaction ENTIRELY OFF. This is the ONLY value that
+#                  fully disables redaction, and it is never silent: the run emits a PROMINENT
+#                  warning on BOTH surfaces (R4-Q18) — (1) a startup warning on stderr and
+#                  (2) a warning recorded in `run_report.json` — so a reviewer can always tell
+#                  from either the console or the artifact that redaction was off.
+# Redaction is never silently off; absence of `policy` or any value other than "disabled"
+# keeps redaction on.
 ```
 
 ### 1.4 Verify Slice 2 prerequisites are still healthy
@@ -126,6 +141,13 @@ policy = "default"
 ```bash
 opencloser dataverse-verify       # confirms mapping artifact + live verification still pass
 ```
+
+The Slice 2 verified-mapping prerequisite is EXTENDED for Slice 3 (R4-Q34): the same live
+verification step additionally confirms that Dynamics accepts the additive
+`shadow_stt_discrepancy` review-task reason value (option-set membership) before any real-call
+dial. So the verified-mapping deployment artifact is NOT silently assumed unchanged from
+Slice 2 — if you have enabled shadow STT, register the `shadow_stt_discrepancy` reason in the
+Dynamics review-task reason option set first, or the readiness check fails (exit `4`).
 
 ---
 
@@ -148,6 +170,23 @@ opencloser run3 \
 ```
 
 Note: no `--real-call` / `--write` flag → rehearsal mode (FR-002, SC-011).
+
+### Stdout run-mode echo (R4-Q36)
+
+At the very start of every invocation — before any readiness check, dial, or mutation — the
+CLI prominently echoes the resolved run mode on stdout so a first-time operator can confirm
+the mode *before* a real call could dial. A rehearsal run prints:
+
+```text
+=== openCloser run3 ===
+RUN MODE: REHEARSAL (no --real-call / --write flag) — no call will be placed, no Dataverse mutation
+session_id: sess_2026-05-25T14:00:00Z_a7f8
+campaign: ALF-CAMP-001  queue-item: 11111111-2222-3333-4444-555555555555  operator: alice@medx.example
+```
+
+This banner is the single human-readable confirmation surface; the canonical machine-readable
+run mode is `run_report.json` `run_mode` (R4-Q37). The banner is emitted regardless of how the
+CLI is invoked, including non-interactive / CI shells.
 
 ### Expected outputs
 
@@ -202,6 +241,18 @@ The `--real-call` flag is REQUIRED for any Dataverse mutation (FR-001 / FR-022 p
 Q13). There is no "sticky" promotion — every Dataverse-mutating invocation must pass this
 flag, including resume.
 
+In real-call mode the same start-of-run stdout banner (R4-Q36, see §2) instead reads:
+
+```text
+=== openCloser run3 ===
+RUN MODE: REAL_CALL (--real-call) — a real SignalWire call WILL be placed and Dataverse WILL be mutated
+session_id: sess_2026-05-25T14:00:00Z_a7f8
+campaign: ALF-CAMP-001  queue-item: 11111111-2222-3333-4444-555555555555  operator: alice@medx.example
+```
+
+The differing `RUN MODE:` line lets the operator visually confirm a real call is about to dial
+before it happens.
+
 ### Expected outputs (real-call mode)
 
 ```text
@@ -248,8 +299,29 @@ Same as §2 plus:
 
 `run_report.json` is the single canonical place to understand what happened. Key fields:
 
-The example below is a resume run (Q44): `operator_identity.original` is non-null and the
-report carries the human-readable "resumed by X, original operator Y" string.
+The `operator_identity` block has two literal shapes; both are shown so you can recognize
+each at a glance.
+
+**First-invocation shape** (no resume): `operator_identity.original` is literally `null` and
+there is no `resumed_by_summary`. This is the common case — a fresh real-call or rehearsal run
+that has never been resumed. Only the `operator_identity` block differs from the full example
+below; every other field is identical.
+
+```json
+{
+  "session_id": "sess_2026-05-25T14:00:00Z_a7f8",
+  "run_mode": "real_call",
+  "operator_identity": {
+    "current": "alice@medx.example",
+    "original": null,
+    "chain": ["alice@medx.example"]
+  }
+}
+```
+
+**Resume shape** (the full example below) is a resume run (Q44):
+`operator_identity.original` is non-null and the report carries the human-readable
+"resumed by X, original operator Y" string.
 
 ```json
 {
@@ -324,7 +396,25 @@ Field notes:
   `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}`, not a
   free-form string.
 - `config_identity` (R4-Q46) — version/hash of the redaction, retention, and disclosure
-  policies so policy changes are themselves auditable.
+  policies so policy changes are themselves auditable. Together with the per-artifact
+  `retention_mode` / `created_at` markers below, this is the configuration-audit surface: a
+  deployment can confirm which policy version produced each artifact and detect policy drift.
+- Per-artifact retention markers (R4-Q46) — every retained artifact additionally carries its
+  own `retention_mode` (the `[retention].mode` in effect when it was written) and `created_at`
+  timestamp, so the retention posture of each file is self-describing and auditable
+  independently of the run report. The run report records the same pair under
+  `retention_markers`, for example:
+
+  ```json
+  "retention_markers": {
+    "transcript.txt":          {"retention_mode": "full_with_redaction", "created_at": "2026-05-25T14:03:40Z"},
+    "shadow_discrepancies.jsonl": {"retention_mode": "full_with_redaction", "created_at": "2026-05-25T14:03:41Z"}
+  }
+  ```
+
+  Because each marker is stamped at write time, changing `[retention].mode` or the redaction
+  policy later does NOT retroactively re-stamp already-written artifacts — each file keeps the
+  posture it was written under.
 
 On a `do_not_call` outcome, `per_writeback_operation_status[0].operation` is
 `queue_status_update.dnc` (Round 2 Q14 DNC-first ordering).
@@ -491,3 +581,31 @@ decisions. Changes:
   `operator_identity.original` and the human-readable "resumed by X, original operator Y"
   string.
 - **§5 (R4-Q8)** — noted a resume that finalizes a previously-abandoned session exits `6`.
+
+---
+
+## Round 7 — Checklist-Residual Alignment (2026-06-02)
+
+This quickstart was extended to close the Round 7 net-new operator-documentation gaps:
+
+- **§1.0 step 3 db-migrate idempotency (deployment CHK141)** — documented that
+  `opencloser db-migrate` is idempotent and safe to re-run against an already-migrated or
+  partially-migrated store (add-if-missing steps; interrupted runs are re-runnable, no data
+  loss, no manual SQL).
+- **§1.3 [redaction] full-disable knob (configuration CHK140)** — expanded the `[redaction].policy`
+  comment so `"disabled"` is enumerated as a distinct knob with its mandatory
+  "never silently off" dual-warning contract (PROMINENT startup-stderr warning AND a
+  `run_report.json` warning).
+- **§1.4 verified-mapping Slice-3 extension (configuration CHK142)** — documented that the
+  Slice 2 live verification is EXTENDED (R4-Q34) to confirm Dynamics accepts the additive
+  `shadow_stt_discrepancy` review-task reason (option-set membership) before any real-call dial.
+- **§2/§3 stdout run-mode echo (ux CHK177)** — added literal example stdout banners for both
+  REHEARSAL and REAL_CALL run modes (R4-Q36) so a first-time operator can recognize the
+  run-mode confirmation before a real call dials.
+- **§4 first-invocation run-report shape (ux CHK165)** — added a literal `"original": null`
+  first-invocation `operator_identity` JSON example co-present with the existing non-null
+  resume example, so both shapes are shown as literal JSON, not prose.
+- **§4 per-artifact retention markers + config-audit surface (configuration CHK141)** —
+  documented the per-artifact `retention_mode` / `created_at` markers and the run-report
+  `retention_markers` block alongside `config_identity` as the configuration-audit surface
+  (which policy version produced each artifact; non-retroactive on later policy change).

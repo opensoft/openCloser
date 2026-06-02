@@ -86,6 +86,16 @@ class RealtimeAIProvider(Protocol):
    utterance MUST include the canonical AI-on-behalf-of-Medx disclosure. No exceptions.
    No explicit verbal acknowledgment required (Round 1 Q1).
 
+   **Sub-disclosure-lifetime opt-out / hangup (CHK117).** The disclosure-on-every-connected-call
+   requirement is an ATTEMPT obligation: the runtime MUST always attempt the disclosure as the
+   first connected-call utterance. If the caller opts out (or hangs up) BEFORE the disclosure
+   completes — i.e. the connection lifetime ends sub-disclosure — the requirement is not waived
+   and not violated: the runtime still initiated the mandatory disclosure, the call simply ends.
+   Such a call MUST be finalized and recorded as ended-before-disclosure-completed (a distinct,
+   observable run-report state — e.g. caller opt-out / early hangup — not a disclosure
+   violation and not a normal completed disclosure). The `disclosure_pause_ms` (R4-Q10) governs
+   the POST-disclosure pause only and does not apply to a pre-completion opt-out.
+
 2. **Deterministic disposition precedence preserved** (FR-014): the live model MAY produce
    conversation turns and `ExtractionEvent`s, but the persona module's deterministic
    disposition rules (Slice 1 FR-036) MUST select the final disposition. The live model
@@ -93,6 +103,16 @@ class RealtimeAIProvider(Protocol):
    `human_review_reason` enumeration MUST NOT be expanded or replaced by the live model
    (only the additive `shadow_stt_discrepancy` entry — emitted from the shadow lane, not
    the live model — is sanctioned).
+
+   **Turn-and-extraction disagreement (realistic precedence case).** The live model commonly
+   emits BOTH a conversation turn (whose text implies one disposition) AND an `ExtractionEvent`
+   (whose payload implies a different disposition) within the same call. When the two disagree,
+   the deterministic Slice 1 rules still own the outcome: the persona maps the EXTRACTED state
+   to the disposition and the turn text is non-authoritative narrative. Neither the turn nor a
+   conflicting `ExtractionEvent.disposition` field overrides the deterministic mapping. This is
+   the realistic (non-degenerate) precedence case and MUST be exercised by a fixture in which a
+   turn and an extraction event explicitly disagree (see `test_turn_and_extraction_disagree_*`),
+   not only the degenerate single-`ExtractionEvent` case.
 
 3. **Allowed-claim guardrails preserved** (FR-015): the live model attempting to emit a
    claim outside the allowed-claim categories MUST trigger persona escalation with the
@@ -108,6 +128,17 @@ class RealtimeAIProvider(Protocol):
    - The call MAY continue or end per the persona's existing decision rules.
    - The PHI-volunteered case MUST be observably distinct from a non-PHI call in the audit
      artifacts and the run report.
+
+   **Shadow-STT-disabled variant (CHK123 / FR-032 / FR-033).** When shadow STT is DISABLED, only
+   two of the four artifact types are produced (the live transcript and the session-result
+   summary); the shadow STT transcript and shadow STT discrepancy records do NOT exist. In the
+   PHI-volunteered case under shadow-disabled, the redaction tag-and-redact pass MUST still run
+   on the two produced artifacts (transcript + summary) before write, and the absence of the
+   shadow artifacts MUST NOT be treated as a redaction failure or a missing-artifact error. The
+   "before any of {transcript, summary, shadow transcript, shadow discrepancy records} is
+   written" obligation above applies only to the artifact types that exist for the run: with
+   shadow enabled all four; with shadow disabled, transcript + summary only (FR-033 scopes the
+   shadow-artifact redaction to "when shadow STT is enabled").
 
 5. **Live-runtime degradation triggers** (FR-013 per Round 1 Q4): any of the three triggers
    below MUST result in orchestrator finalization with the disposition mapping below:
@@ -162,7 +193,10 @@ class RealtimeAIProvider(Protocol):
 | `test_no_acknowledgment_required` | Caller silence after disclosure does NOT trigger any escalation; conversation continues |
 | `test_live_model_extraction_does_not_override_disposition` | A live-model `ExtractionEvent` claiming `disposition=foo` is ignored; deterministic Slice 1 rules pick the final disposition |
 | `test_disallowed_claim_escalates` | Live model emits a claim outside allowed categories → persona escalates `needs_human_review` with the matching reason; conversation ends safely |
-| `test_caller_volunteered_phi_escalates_and_redacts` | Caller volunteers PHI → `phi_collection_risk` escalation + PHI tag-and-redact pass runs on all four artifact types before write |
+| `test_caller_volunteered_phi_escalates_and_redacts` | With shadow STT ENABLED: caller volunteers PHI → `phi_collection_risk` escalation + PHI tag-and-redact pass runs on all four artifact types before write |
+| `test_caller_volunteered_phi_redacts_shadow_disabled` | With shadow STT DISABLED: caller volunteers PHI → `phi_collection_risk` escalation + redaction runs on the TWO produced artifacts (transcript + summary) before write; the absent shadow transcript / discrepancy records are NOT a failure and the test does not assert their presence (FR-032 / FR-033 / CHK123) |
+| `test_turn_and_extraction_disagree_deterministic_wins` | The live model emits a conversation turn implying one disposition AND an `ExtractionEvent` implying a different one; the deterministic Slice 1 rules map the extracted state and neither the turn nor the conflicting `ExtractionEvent.disposition` overrides it (realistic precedence, CHK114) |
+| `test_opt_out_before_disclosure_completes_records_early_end` | Caller opts out / hangs up before the first-utterance disclosure completes → the runtime still ATTEMPTED the disclosure; the call is finalized and recorded as ended-before-disclosure-completed (distinct observable state), not a disclosure violation (FR-015 / CHK117) |
 | `test_provider_error_pre_connected_yields_failed` | `RealtimeProviderError` raised before any `connected` event → finalize as `failed` with runtime-failure reason; no Phone Call activity |
 | `test_provider_error_post_connected_yields_needs_review` | `RealtimeProviderError` raised after `connected` → finalize as `needs_human_review` / `script_truncated` |
 | `test_runtime_crash_post_connected_yields_needs_review` | `PipecatRuntimeError` after `connected` → finalize as `needs_human_review` / `script_truncated` |

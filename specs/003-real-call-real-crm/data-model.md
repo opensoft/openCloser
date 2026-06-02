@@ -82,11 +82,49 @@ including duplicates and out-of-order deliveries. Persisted to
 | `received_at` | ISO8601 | |
 | `normalized_event_type` | str \| null | The `CallEvent.event_type` the transport produced |
 | `is_duplicate` | bool | True on second+ delivery for the same `(session_id, provider_event_id)` |
-| `is_out_of_order` | bool | |
-| `is_late_after_finalization` | bool | |
+| `is_out_of_order` | bool | True when a **non-duplicate** callback's normalized event ordering precedes an already-recorded later-phase event for the same session — i.e., the event's effective position in the call's lifecycle is earlier than an event already recorded for that `session_id` (R7 CHK137). Distinct from `is_duplicate`: an out-of-order event is a *new* `(session_id, provider_event_id)`, not a re-delivery |
+| `is_late_after_finalization` | bool | True when the callback arrives after `Session.finalized_at` (FR-027); see §1.5 `ConflictingEventAuditLog` |
 | `raw_callback_body` | JSON | Provider payload — **stored only if** retention policy allows; subject to redaction |
 
 **Identity & uniqueness**: append-only; no uniqueness constraint (duplicates are recorded).
+
+**Dedup-vs-reorder boundary (R7 CHK138, FR-005)**: a **duplicate** (`is_duplicate == true`,
+same `(session_id, provider_event_id)` re-delivered) is recorded for audit and otherwise
+**dropped as a no-op** — it produces no second `CallEvent`. An **out-of-order** callback
+(`is_out_of_order == true`) is a *non-duplicate* event (a new `(session_id, provider_event_id)`)
+and MUST be **RETAINED and reordered into the session's normalized event stream, not dropped**.
+Concretely, a late `connected` / `answered` callback that arrives AFTER a later-phase event for
+the same session is kept and reordered so the session still resolves to the connected-call
+outcome — satisfying FR-005's "single coherent disposition" requirement that the orchestrator
+MUST NOT rely on strict callback ordering. The decision rule is: *dedup by
+`(session_id, provider_event_id)` first; only true re-deliveries are dropped, every distinct
+event is retained even when it arrives out of phase order.*
+
+**Discriminator-flag set-rules & cross-table consistency (R7 CHK204)**: the three
+`callbacks_audit` row flags and the two `call_events` flags are set by these rules, and relate
+across tables as follows:
+
+| Flag | Table | Set when |
+|---|---|---|
+| `is_duplicate` | `callbacks_audit` | the `(session_id, provider_event_id)` was already recorded by a prior delivery |
+| `is_out_of_order` | `callbacks_audit` | a non-duplicate callback's normalized ordering precedes an already-recorded later-phase event for the session (see §1.3 table) |
+| `is_late_after_finalization` | `callbacks_audit` | `received_at` is after `Session.finalized_at` (FR-027) |
+| `out_of_order` | `call_events` | this normalized event's `received_at` < a prior event's `received_at` for the session (§1.2) |
+| `late_after_finalization` | `call_events` | the session was already finalized when this normalized event was produced (§1.2, FR-027) |
+
+Cross-table consistency: `callbacks_audit` is the **per-delivery** receipt log (every delivery,
+including duplicates, gets a row) while `call_events` is the **per-distinct-event** deduped
+table (one row per `(session_id, provider_event_id)`). For a given `(session_id,
+provider_event_id)`:
+
+- When `callbacks_audit.is_duplicate == true`, there is **no corresponding fresh `call_events`
+  row** for that delivery (the duplicate is dropped as a no-op per the dedup-vs-reorder rule),
+  so the audit-row duplicate flag has no `call_events` counterpart by design.
+- For the **first (non-duplicate)** delivery of an event, the audit-row `is_out_of_order` /
+  `is_late_after_finalization` flags MUST **agree** with the corresponding `call_events`
+  `out_of_order` / `late_after_finalization` flags — they are computed from the same observation
+  on the same delivery and cannot disagree. A disagreement is a data-integrity defect, not an
+  allowed state.
 
 ### 1.4 `RejectedAuthCallbackLog` — distinct rejected-by-authentication audit log *(Round 2 Q9)*
 
@@ -227,7 +265,13 @@ Key fields added or amended by Round 4:
 - `shadow_stt.discrepancy_summary`: a **structured** object (Round 4 R4-Q15), NOT a free-form
   string, of shape `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}`
   (counts plus per-field classification). The `field` / `classification` atoms reference the §1.7
-  `ShadowSTTDiscrepancyRecord` enum values.
+  `ShadowSTTDiscrepancyRecord` enum values. **Atom-pinning (R7 CHK206)**: `per_field[].field`
+  MUST be one of the §1.7 **9 atomic enum values** (`opt_out` \| `wrong_number` \|
+  `captured_email` \| `callback_intent` \| `preferred_callback_window` \| `person_reached_name`
+  \| `person_reached_role` \| `interest_level` \| `final_disposition`) — NOT the 7 logical
+  spec categories — so the summary's per-field representation is identical to the per-record
+  `ShadowSTTDiscrepancyRecord.field` enum and the two cannot drift. `per_field[].classification`
+  MUST be one of the §1.7 `classification` enum values (`benign` \| `uncertain`).
 - `shadow_stt.lane_failure_detail`: `{failure_type, at}` (Round 4 R4-Q14) — recorded alongside
   `shadow_stt.lane_failed` to describe how / when the lane failed.
 - `abandonment_timeout_sec`: int (Round 4 R4-Q40) — the live-call abandonment timeout value in
@@ -238,6 +282,19 @@ Key fields added or amended by Round 4:
   operator reminder line in the report.
 - `config_identity`: a config-identity block (Round 4 R4-Q46) recording a version / hash of the
   redaction, retention, and disclosure policies so policy changes are themselves auditable.
+  **Attribute shape (R7 CHK201)**: an object
+  `{policy_version: str, policy_hash: str, hashed_inputs: [str]}` where `policy_version` is the
+  human-set version label of the active policy bundle, `policy_hash` is a digest computed over
+  the **redaction policy, retention policy, and disclosure policy** inputs, and `hashed_inputs`
+  enumerates exactly which policy sources fed the hash (the redaction, retention, and disclosure
+  policy definitions). The disclosure-policy input includes `disclosure_pause_ms` (§2.1) so a
+  change to the post-disclosure pause is itself captured in the hash.
+  **Deferred to the implementation plan (R7 CHK201)**: the specific **hash algorithm** and the
+  **input canonicalization / serialization** the hash is taken over are deliberately NOT pinned
+  in this data-model — they are deferred to the implementation plan (plan.md). The contract here
+  is only that a deterministic, documented canonicalization + hash MUST be chosen at
+  implementation time and recorded so two identical policy bundles yield the same `policy_hash`;
+  the choice of digest function and serialization format is an implementation decision.
 
 ### 1.11 `WriteBackOperation` — field-level variants under queue-status update *(Round 2 Q8)*
 
@@ -281,6 +338,46 @@ alongside the existing credential exclusion.
 PRESERVED from the original session and MUST NOT be overwritten — the live runtime does not
 re-run on resume (there is no new call), exactly as `operator_identity_original` is preserved.
 
+### 1.13 `PlannedWriteBackArtifact` / `ActualWriteBackArtifact` *(R7 CHK202 / CHK203)*
+
+The two write-back artifacts listed in §4 (`planned_writeback.json`, `actual_writeback.json`)
+are first introduced in Slice 2; this section gives them an enumerated entity shape so the
+R4-Q43 manual planned-vs-actual operator diff is well-defined.
+
+Both files are an **ordered array of write-back operation records**, one record per operation
+(the four Slice 2 operations `phone_call_activity`, `queue_status_update`, `task`, `assembly`,
+plus the §1.11 `queue_status_update.*` variant key when applicable).
+
+| Field | Type | Notes |
+|---|---|---|
+| `operation` | enum | `phone_call_activity` \| `queue_status_update` \| `task` \| `assembly` |
+| `variant` | str \| null | The §1.11 `queue_status_update.*` variant key (`normal`/`dnc`/`blocked`/`dial_blocked`), or `null` for non-`queue_status_update` operations |
+| `correlation_key` | str | **Stable diff key** = `(session_id, operation, variant)`. This is the key by which an operator (or tooling) diffs `planned_writeback.json` against `actual_writeback.json` — a planned record and its actual counterpart share the same `correlation_key` |
+| `idempotency_key` | str \| null | The FR-021 idempotency key stamped on the create (Phone Call activity / Task); `null` for operations that do not stamp one |
+| `payload` | JSON | The write-back payload fields (redacted per §2.5 where applicable) |
+| `run_mode` | enum(`rehearsal`, `real_call`) | Records whether this entry was produced in rehearsal or real-call mode |
+
+**File-specific population**:
+
+- `planned_writeback.json` — written on **both** rehearsal and real-call invocations; records
+  the *planned* payload for every operation the disposition would emit (the full intended set).
+- `actual_writeback.json` — written on **real-call invocations only** (Slice 2); records only
+  operations that were *actually emitted* to Dataverse.
+
+**Reconciliation rule with `per_writeback_operation_status` (R7 CHK203)**: the §1.10
+`per_writeback_operation_status` run-report array, the two artifacts, and their ordering are
+mutually reconcilable by `correlation_key`:
+
+- Every operation marked **`completed`** in `per_writeback_operation_status` MUST appear in
+  `actual_writeback.json` (and also in `planned_writeback.json`, since every emitted operation
+  was first planned).
+- Operations in any non-completed state (**`planned`**, **`resume-needed`**, **`blocked`**)
+  appear in `planned_writeback.json` only and MUST NOT appear in `actual_writeback.json`.
+- The **ordering** of records in `actual_writeback.json` and in
+  `per_writeback_operation_status` reflects the same emission order, including the §1.11
+  **DNC-first** ordering on `do_not_call` outcomes (Round 2 Q14), so the two are
+  position-comparable as well as key-comparable.
+
 ---
 
 ## 2. Extended Slice 1 / Slice 2 entities
@@ -295,12 +392,30 @@ Added Slice 3 fields:
 | `runtime_identity` | JSON | The `RealtimeProviderSession` from §1.12. PRESERVED on resume — not overwritten, as the runtime does not re-run (Round 4 R4-Q12). EXCLUDES provider-account identifiers (SignalWire project id, provider account/org id); only provider name + `model_name`/`model_version` (Round 4 R4-Q16) |
 | `operator_identity_current` | str | Current invocation's operator (Round 1 Q3) |
 | `operator_identity_original` | str \| null | Original invocation's operator on resume (Round 2 Q12); `null` on first invocation |
-| `operator_identity_chain_json` | JSON (array of str) | Full ordered list of every operator that ran the session (Round 3); first element == `original`, last == `current`; no intermediate resumer dropped |
+| `operator_identity_chain_json` | JSON (array of str) | Full ordered list of every operator that ran the session (Round 3); first element == `original`, last == `current`; no intermediate resumer dropped. Ordering invariants pinned below (R7 CHK207) |
 | `run_mode` | enum(`rehearsal`, `real_call`) | Per FR-001 / FR-002 / Round 2 Q13 |
 | `grace_window_sec` | int | Value in effect for this session (Round 2 Q7) |
 | `shadow_stt_enabled` | bool | |
 | `finalized_at` | ISO8601 \| null | Set on disposition finalization; the post-finalization grace window starts here |
 | `crm_writeback_started_at` | ISO8601 \| null | `finalized_at + grace_window_sec`, or earlier if the shadow lane completed. *(Round 4 R4-Q28: renamed from `cm_writeback_started_at` — the `cm_` prefix was a typo.)* |
+
+**Operator-identity chain invariants (R7 CHK207)**: the `operator_identity_chain_json` array
+and the `operator_identity_current` / `operator_identity_original` columns are subject to these
+schema-level, inspector-checkable constraints (the same invariants surface on the §1.10
+`run_report.operator_identity` block):
+
+1. `len(chain) >= 1`.
+2. `chain[0] == operator_identity_original` **when** `operator_identity_original` is non-null
+   (i.e., on a resumed session); on a first-only invocation `operator_identity_original` is
+   `null`, `len(chain) == 1`, and `chain[0] == operator_identity_current`.
+3. `chain[-1] == operator_identity_current` **always**.
+4. No intermediate resumer is dropped: every operator that ran the session appears in `chain`
+   in invocation order, so a 3+-operator chain preserves the middle resumers.
+
+These rules make the chain and the single-pair columns **reconcilable by construction** — the
+pair (`original`, `current`) and the array can never disagree, because `original`/`current` are
+exactly the first/last elements of `chain`. A violation (e.g., `chain[-1] != current`) is a
+data-integrity defect.
 
 **Config-surface note (Round 4 R4-Q10)**: the post-disclosure "brief pause" is a
 deployment-configurable `disclosure_pause_ms` (default 1500 ms). No dedicated config entity
@@ -318,16 +433,29 @@ The shape preserved per FR-017. Slice 3 additions to the existing field list:
 - `operator_identity` (current + original — Round 2 Q12).
 - No new disposition codes; `shadow_stt_discrepancy` is added to the `human_review_reason`
   enumeration per FR-031.
-- **Failure-reason vocabulary** (the reason string carried alongside a `failed` disposition,
-  distinct from `human_review_reason`): `live_call_abandonment` (FR-026); the Round 3 addition
-  `redaction_failed` (FR-015 / FR-033 fail-closed redaction); the **distinct runtime-failure
-  reason codes** `provider_error` / `runtime_crash` / `silence_timeout` (FR-013, enumerated as
-  separate codes per Round 4 R4-Q13 so the three FR-013 triggers are tellable apart in the run
-  report); and `dnc_write_failed` (FR-024 — emitted when the DNC-first write exhausts its retry
-  budget, per Round 4 R4-Q7). This vocabulary is open/extensible — consumers MUST NOT treat it as
-  a closed enum that rejects `redaction_failed`. The operator-tooling counter
-  `rejected_auth_unassociated_count` (FR-008, Round 3) is likewise a new deployment-level metric,
-  not a per-session run-report field.
+- **Failure-reason vocabulary** (the reason string carried alongside a `failed` disposition).
+  **Canonical enumeration & schema rule (R7 CHK205)**: this is one canonical
+  `FailureReason` vocabulary, declared here as the single source of truth and **DISTINCT from
+  `human_review_reason`** — the two namespaces MUST NOT be merged or cross-validated against each
+  other. The six codes and their one-to-one triggering conditions:
+
+  | Code | Trigger |
+  |---|---|
+  | `live_call_abandonment` | live call abandoned past the abandonment timeout (FR-026) |
+  | `redaction_failed` | default-on or PHI redaction pass could not complete; fail-closed (FR-015 / FR-033, Round 3) |
+  | `provider_error` | FR-013 trigger (a) — provider/transport error |
+  | `runtime_crash` | FR-013 trigger (b) — live runtime crash |
+  | `silence_timeout` | FR-013 trigger (c) — silence/no-input timeout |
+  | `dnc_write_failed` | DNC-first write exhausted its retry budget (FR-024, Round 4 R4-Q7) |
+
+  The three FR-013 codes (`provider_error` / `runtime_crash` / `silence_timeout`) map
+  **one-to-one** to FR-013 triggers (a)/(b)/(c) so the three are tellable apart in the run report
+  (Round 4 R4-Q13). **Schema-level open/extensible contract**: this vocabulary is an
+  **open enum** — consumers MUST NOT implement it as a closed enum that rejects an unrecognized
+  reason (e.g., MUST NOT reject `redaction_failed`); new reason codes may be added additively.
+  The operator-tooling counter `rejected_auth_unassociated_count` (FR-008, Round 3) is a
+  deployment-level metric, NOT a member of this vocabulary and NOT a per-session run-report
+  field.
 
 ### 2.3 `PhoneCallActivityPayload` *(Slice 2 contract, extended)*
 
@@ -360,9 +488,25 @@ Default-on redaction now covers (per FR-033 amended by Round 2 Q10):
 - The shadow STT discrepancy records
 - `CallbacksAuditLog.raw_callback_body` (§1.3) — the provider payload may echo caller-spoken
   content, so it is subject to default-on redaction before persistence (Round 4 R4-Q29)
+- `ShadowLaneTruncatedEvent.late_output_summary` (§1.8) — persisted on-disk as
+  `late_output_summary_json` (§3) — the truncated-event per-high-value-field summary derives
+  directly from shadow-lane output and may echo caller-spoken / PHI-bearing content, so it is
+  enrolled in the default-on **and** PHI tag-and-redact passes before persistence (R7 CHK134).
+  Without this enrollment a late-arriving (post-grace-window) discrepancy summary could be an
+  unredacted PHI back-channel, defeating FR-033.
+- `RunReport.shadow_stt.lane_failure_detail` (§1.10 — `{failure_type, at}`): `failure_type`
+  is a **bounded structural enum** (e.g., `provider_error` / `runtime_crash` / `silence_timeout`
+  / `timeout`) and `at` is a timestamp; neither carries free-form caller-spoken content. It is
+  therefore classified as **structural-only and EXCLUDED** from the default-on / PHI redaction
+  pass (listed under **Excluded** below), provided the implementation keeps `failure_type` a
+  closed enum and never lets a free-form provider error string flow into it. If an
+  implementation were to widen `failure_type` to an unbounded provider-supplied string, that
+  string MUST instead be enrolled in the default-on redaction pass (R7 CHK160).
 
 **Excluded** (machine-readable, must remain unredacted): transcript pointer metadata,
-session IDs, provider call IDs, timestamps, run-report structural fields.
+session IDs, provider call IDs, timestamps, run-report structural fields, and
+`RunReport.shadow_stt.lane_failure_detail` (`{failure_type, at}` — structural enum + timestamp;
+see the enrollment caveat above, R7 CHK160).
 
 The PHI tag-and-redact pass (Round 2 Q11) runs as a special-case pre-write step on the four
 artifact types above whenever a session's persona has emitted a `phi_collection_risk`
@@ -487,6 +631,22 @@ ALTER TABLE sessions ADD COLUMN crm_writeback_started_at TEXT;  -- Round 4 R4-Q2
 
 The Slice 2 `crm_correlations` and `writeback_progress` tables are reused unchanged.
 
+**Migration posture (R7 CHK208)**: the Slice 3 schema migration above (the nine additive
+`sessions` `ALTER … ADD COLUMN` statements + the five new tables) is applied by a distinct
+`opencloser db-migrate` subcommand (contract `cli-slice3.md §db-migrate`, R4-Q31) and has the
+following migration-surface properties stated as schema-level requirements:
+
+- **Forward-only / additive-only**: the migration only ADDs columns and tables; it never drops
+  or rewrites existing Slice 1 / Slice 2 columns, preserving pre-Slice-3 read compatibility
+  (e.g., `provider_call_id` is stored in the existing `mock_provider_call_id` column, no rename).
+- **Idempotent re-run safety**: re-running `db-migrate` against an already-migrated database is
+  safe and a no-op for already-present columns/tables — the migration MUST detect and skip
+  additions that already exist (e.g., guard each `ADD COLUMN` / `CREATE TABLE` so a second run
+  does not error or duplicate state).
+- **No down-migration**: there is NO automated rollback / down-migration. The only documented
+  rollback path is restoring a pre-migration database snapshot taken before `db-migrate` ran
+  (R4-Q31). Operators MUST snapshot before migrating.
+
 ---
 
 ## 4. Artifacts directory layout (Slice 3)
@@ -502,8 +662,8 @@ artifacts/<session_id>/
 ├── shadow_discrepancies.jsonl          # §1.7 (only when shadow STT enabled and ≥1 discrepancy)
 ├── shadow_lane_truncated.json          # §1.8 (only when lane was truncated)
 ├── telephony_readiness.json            # §1.9 (every run that reaches the pre-dial readiness stage; the concurrent-claim (exit 3) and Dataverse-verification (exit 7) gates precede it)
-├── planned_writeback.json              # Slice 2; planned write-back payloads (rehearsal + real)
-└── actual_writeback.json               # Slice 2; actually-emitted write-back payloads (real only)
+├── planned_writeback.json              # §1.13 (Slice 2); planned write-back payloads (rehearsal + real)
+└── actual_writeback.json               # §1.13 (Slice 2); actually-emitted write-back payloads (real only)
 ```
 
 All transcript-derived artifacts are redacted per the §2.5 amended policy before write.
@@ -651,3 +811,39 @@ data-model. No prior Round 1/2/3 content was removed; all edits are additive.
   `config_identity` policy version/hash block.
 - **R4-Q33** — §1.4: confirmed `_unassociated/` + pointer records honor the ≥ 90-day audit floor;
   config cannot lower it.
+
+## R7 — Requirements-Quality Checklist Residual Closure (2026-06-02)
+
+Additive closure of R7 checklist gaps. No prior content removed; all edits additive.
+
+- **CHK201** — §1.10: pinned the `config_identity` attribute shape
+  `{policy_version, policy_hash, hashed_inputs}` over redaction/retention/disclosure policies;
+  **deferred** the hash algorithm + input canonicalization to plan.md.
+- **CHK202** — §1.13 (new): gave `planned_writeback.json` / `actual_writeback.json` an enumerated
+  per-operation field shape with `correlation_key = (session_id, operation, variant)` as the
+  stable diff key; cross-linked §4.
+- **CHK203** — §1.13: stated the reconciliation rule between `actual_writeback.json` and
+  `per_writeback_operation_status` (completed→actual; planned/resume-needed/blocked→planned only;
+  DNC-first ordering preserved).
+- **CHK204** — §1.3: added per-flag set-rules and the `callbacks_audit`↔`call_events` cross-table
+  consistency rule (first-delivery flags MUST agree; duplicates have no fresh `call_events` row).
+- **CHK205** — §2.2: declared the canonical `FailureReason` vocabulary (six codes, per-code
+  triggers, FR-013 one-to-one mapping), its open-enum schema rule, and distinctness from
+  `human_review_reason`.
+- **CHK206** — §1.10: pinned `discrepancy_summary.per_field[].field` to the §1.7 **9 atomic** enum
+  values (not the 7 logical categories) and `.classification` to `benign`/`uncertain`.
+- **CHK207** — §2.1: stated `operator_identity_chain_json` ordering invariants
+  (first==original, last==current, no intermediate dropped) and chain-vs-pair reconciliation as
+  checkable schema constraints.
+- **CHK208** — §3: stated the migration-surface posture — additive-only / forward-only,
+  idempotent re-run safety, no down-migration (snapshot-only rollback, R4-Q31).
+- **CHK134** (shadow-stt) — §2.5: enrolled `ShadowLaneTruncatedEvent.late_output_summary`
+  (`late_output_summary_json`) in the default-on + PHI redaction coverage list.
+- **CHK160** (shadow-stt) — §2.5: classified `shadow_stt.lane_failure_detail` as
+  structural-only and EXCLUDED (closed enum + timestamp), with an enrollment caveat if
+  `failure_type` is ever widened to a free-form string.
+- **CHK137** (idempotency) — §1.3: filled the `is_out_of_order` Notes cell with the detection
+  predicate (non-duplicate event whose normalized ordering precedes an already-recorded later
+  event).
+- **CHK138** (idempotency) — §1.3: stated the dedup-vs-reorder boundary — a non-duplicate late
+  connection event is RETAINED and reordered (FR-005), not dropped as a duplicate.

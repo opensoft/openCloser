@@ -25,7 +25,21 @@ class ShadowSTTProvider(Protocol):
         audio_stream: AsyncIterator[AudioChunk],
     ) -> AsyncIterator[TranscriptSegment]: ...
 
-    async def close(self, session_id: SessionId) -> None: ...
+    async def close(self, session_id: SessionId) -> None:
+        """Release the provider-side resources for this session
+        (connection / stream handle / buffers). This is RESOURCE CLEANUP
+        ONLY — it is NOT the lane-completion signal: lane completion /
+        draining is owned by `ShadowSTTLane.stop()`. To preserve the FR-029
+        non-blocking guarantee, `close()` MUST NOT block the live call path
+        and MUST NOT await any pending live-conversation work; it is called
+        only after the lane's own task has been told to finish (via
+        `stop()`). `close()` MUST be idempotent and safe to call exactly
+        once per `session_id` even if the provider produced no output or
+        already failed (so two provider implementations cannot diverge on
+        whether `close` also flushes / finalizes transcript output — it does
+        not). It MUST NOT raise on an already-closed or never-started
+        session; any provider-side teardown error is swallowed/logged, never
+        propagated into the live path."""
 
 
 class ShadowSTTLane(Protocol):
@@ -127,6 +141,10 @@ class ShadowSTTLane(Protocol):
     `failure_detail {failure_type, at}` object alongside it (Round 4 R4-Q14): `failure_type`
     names the failure class (e.g. crash / timeout) and `at` records when in the call it
     occurred. `failure_detail` is audit-only and never mutates the finalized disposition.
+    The relationship is an IFF (CHK161): `failure_detail` is present (non-null) IF AND ONLY IF
+    `shadow_stt.lane_failed = true`, and MUST be absent / null whenever `lane_failed = false`.
+    There is no `failure_detail` on a successful or truncated-but-not-failed run, so the
+    failure-vs-no-failure case is observably unambiguous in the run report.
 
 11. **Structured discrepancy summary** (FR-036 per Round 4 R4-Q15): `shadow_stt.discrepancy_summary`
     is a STRUCTURED object, NOT a free-form string. Its defined shape is:
@@ -134,6 +152,18 @@ class ShadowSTTLane(Protocol):
     `fields_compared` / `discrepancies` / `uncertain` are counts and `per_field` carries one
     `{field, classification}` entry per compared high-value field (`classification` ∈
     `benign` / `uncertain`). Consumers MUST be able to parse it as structured data.
+
+12. **`redaction_applied` covers the shadow artifact classes** (FR-033 / FR-036 per Round 4
+    R4-Q40, CHK162): the run-report `redaction_applied: true|false` indicator reflects the
+    redaction state of the SHADOW artifact classes specifically — the shadow STT transcript
+    AND the shadow STT discrepancy records — NOT only the live transcript / summary. When
+    shadow STT is enabled, `redaction_applied = true` REQUIRES that the redaction passes over
+    the shadow transcript and the discrepancy records' `live_value` / `shadow_value` fields
+    (behaviors #7 / #8) actually ran to completion; if any shadow-artifact redaction pass was
+    skipped or failed, `redaction_applied` MUST NOT be reported `true` (the session finalizes
+    `redaction_failed` per fail-closed behavior #8 rather than emitting a false-positive
+    `true`). When shadow STT is disabled, the shadow artifact classes do not exist and
+    `redaction_applied` reflects only the produced (live transcript + summary) artifacts.
 
 ## What MUST NOT leak past this boundary
 
@@ -160,8 +190,8 @@ class ShadowSTTLane(Protocol):
 | `test_lane_does_not_write_crm` | After a shadow-enabled run, the Dataverse adapter recorded 0 writes attributable to the shadow lane (only orchestrator-driven writes) |
 | `test_uncertain_discrepancy_in_window_escalates` | Shadow emits an `uncertain` discrepancy inside the grace window → session disposition becomes `needs_human_review` / `shadow_stt_discrepancy`; one review Task created |
 | `test_benign_discrepancy_does_not_escalate` | Shadow emits a `benign` discrepancy → no escalation, no extra review Task |
-| `test_late_shadow_output_yields_truncated_event` | Shadow emits a discrepancy AFTER the grace window → `ShadowLaneTruncatedEvent` recorded; disposition unchanged; no new CRM payload |
-| `test_disabled_lane_completes_demonstrable_loop` | With shadow disabled, the Slice 3 loop completes; run report records `shadow_stt.enabled = false` |
+| `test_late_shadow_output_yields_truncated_event` | Shadow emits a discrepancy AFTER the grace window → `ShadowLaneTruncatedEvent` recorded; disposition unchanged; no new CRM payload; AND (inverse assertion, CHK136) NO `shadow_stt_discrepancy` review Task is created after the truncated event, so back-door escalation is caught |
+| `test_disabled_lane_completes_demonstrable_loop` | Parametrized over BOTH disabled branches of the research §4 OR-condition — the unset-env case AND the explicit `"disabled"`-value case (CHK152): in each, the Slice 3 loop completes and the run report records `shadow_stt.enabled = false` |
 | `test_lane_failure_does_not_abort_live_call` | Shadow lane raises mid-call → live call still finalizes normally; run report records shadow-lane failure |
 | `test_lane_failed_distinct_from_truncated` | A crashed/timed-out lane sets `shadow_stt.lane_failed = true` and `lane_truncated = false`; a late-but-present lane sets `lane_truncated = true` and `lane_failed = false` (Round 3) |
 | `test_retention_parity_with_live_transcript` | Shadow transcript and discrepancy records honor the same retention mode as the live transcript |
@@ -169,6 +199,9 @@ class ShadowSTTLane(Protocol):
 | `test_phi_volunteered_redacts_shadow_artifacts` | When persona emits `phi_collection_risk`, the PHI utterance is tagged and redacted in the shadow artifacts before write |
 | `test_run_report_states_shadow_enabled_flag` | Run report always contains `shadow_stt.enabled` (true or false) and, when true, `shadow_stt.discrepancy_summary` (structured object, Round 4 R4-Q15), `shadow_stt.lane_truncated`, and `shadow_stt.lane_failed`; when `lane_failed` is true, a `failure_detail {failure_type, at}` object accompanies it (Round 4 R4-Q14) |
 | `test_discrepancy_summary_is_structured` | `shadow_stt.discrepancy_summary` is a structured object `{fields_compared, discrepancies, uncertain, per_field:[{field, classification}]}` with integer counts and a per-field classification list — NOT a free-form string (Round 4 R4-Q15) |
+| `test_failure_detail_present_iff_lane_failed` | `shadow_stt.failure_detail` is present (non-null) IF AND ONLY IF `shadow_stt.lane_failed = true`, and is absent/null on a successful or truncated-but-not-failed run, so failure-vs-no-failure is unambiguous (CHK161) |
+| `test_redaction_applied_covers_shadow_artifacts` | `redaction_applied = true` requires the redaction passes over the SHADOW transcript AND the shadow discrepancy records (`live_value` / `shadow_value`) to have completed — not just the live transcript; a skipped/failed shadow-artifact redaction yields `redaction_failed`, never a false-positive `redaction_applied = true` (R4-Q40 / CHK162) |
+| `test_no_shadow_stt_specifics_leak` | The orchestrator-facing surface (`DiscrepancyEvent`, escalation reason, run-report `shadow_stt` block) contains 0 shadow STT provider streaming-protocol / SDK return-type fields, 0 discrepancy-policy internal rule-structure fields (only `benign` / `uncertain`), and 0 credentials (SC-015, CHK104 / CHK113) |
 
 ## Round 4 — Checklist-Residual Alignment (2026-06-01)
 

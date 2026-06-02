@@ -38,12 +38,17 @@ item not already pinned by the spec. The spec's 2026-05-25 clarification session
 
 ## 2. SignalWire signature verification + rejected-by-authentication audit log
 
-- **Decision**: Verify SignalWire's documented HMAC-SHA256 signature header on every inbound
+- **Decision**: Verify SignalWire's HMAC-SHA256 signature header
+  `[Assumption — pending vendor-doc confirmation]` on every inbound
   callback (status + media) using a deployment-provided shared signing secret loaded from
   `SIGNALWIRE_SIGNING_SECRET`. Per Round 4 R4-Q20 the signing secret (and every other secret) is
   loaded from the ENVIRONMENT ONLY, at signature-module init — never from disk and never from CLI
   argv (reinforces FR-035). Verification happens in `transport/signalwire/signature.py`
-  before any orchestrator hand-off. A failed-signature callback is rejected with HTTP `401`
+  before any orchestrator hand-off. The signature comparison in `signature.py` MUST use a
+  CONSTANT-TIME / timing-safe equality (R7) — e.g. `hmac.compare_digest(expected, received)`
+  — NEVER a naive `==` byte comparison, so an attacker cannot recover the expected signature
+  (and thereby the signing secret) through a timing side channel by observing how quickly a
+  forged signature is rejected. A failed-signature callback is rejected with HTTP `401`
   and recorded in a distinct `rejected_auth_callbacks` SQLite table with columns
   `(received_at, source_metadata_json, http_status)` — explicitly NOT the verification secret
   and NOT the callback body content. `source_metadata_json` is restricted to an allow-list of
@@ -56,7 +61,13 @@ item not already pinned by the spec. The spec's 2026-05-25 clarification session
   surfaces a count of rejected-auth callbacks per session, and operator tooling surfaces a
   deployment-level `rejected_auth_unassociated_count` for the null-session rejections.
 - **Rationale**: Round 2 Q9 pinned Option B (distinct audit log, no secret, no body, run-report
-  count). HMAC-SHA256 is SignalWire's documented signature mechanism. A distinct table makes
+  count). The specific signature algorithm — HMAC-SHA256 — is recorded here as an
+  `[Assumption — pending vendor-doc confirmation]`: we cannot verify a vendor URL from this
+  research context, so the plan MUST confirm the exact algorithm and canonicalization (header
+  name, signed-string construction, encoding) against SignalWire's PUBLISHED signature-verification
+  documentation BEFORE real-call enablement, and pin the doc title + version + URL when confirmed.
+  If the published mechanism differs (algorithm or canonical-string shape), `signature.py` is
+  corrected to match before any live callback is trusted. A distinct table makes
   the count trivially queryable and keeps the existing `callbacks_audit_log` keyed by
   `(session_id, provider_event_id)` semantics clean.
 - **Alternatives rejected**: silent rejection (Round 2 Q9 Option A — loses operator-visible
@@ -98,11 +109,25 @@ item not already pinned by the spec. The spec's 2026-05-25 clarification session
   protocol with two methods: `transcribe(audio_stream) → AsyncIterator[TranscriptSegment]`
   and `close(session_id)`. Provider selected by `SLICE3_SHADOW_STT_PROVIDER` env var; if
   the env var is unset OR equal to `"disabled"`, the shadow lane is no-op and FR-032's
-  "Slice 3 demonstrable loop completes without it" guarantee is satisfied. Discrepancy
+  "Slice 3 demonstrable loop completes without it" guarantee is satisfied. **Empty-string /
+  whitespace normalization (R7)**: the provider value is normalized by trimming surrounding
+  whitespace before selection, so an empty-string or whitespace-only `SLICE3_SHADOW_STT_PROVIDER`
+  normalizes to "unset" — i.e. it is treated EXACTLY like unset / `"disabled"` (lane no-op, never
+  a readiness error and never an attempt to load a provider named `""`). Only a non-empty,
+  non-`"disabled"` trimmed value selects a real provider. Discrepancy
   policy is a deployment-configurable JSON file `config/shadow_stt_discrepancy_policy.json`
   with two sections: `benign_rules` (case-insensitive equality, whitespace normalization,
   phonetic-spelling tolerance for names) and `uncertain_rules` (semantically different
   emails, callback windows that differ by > 1 day, opt-out vs. interest disagreement).
+  **Per-field rule coverage (R7 — illustrative, not exhaustive)**: the `benign_rules` /
+  `uncertain_rules` examples above are ILLUSTRATIVE only — they show the rule SHAPE, not the
+  complete per-field rule set. The exhaustive per-field classification rules — explicitly
+  including `person_reached_role`, `wrong_number`, `final_disposition`, and `interest_level`
+  disagreements, plus email-casing-vs-domain distinctions — are DEFERRED to the
+  `config/shadow_stt_discrepancy_policy.json` policy file itself and to the plan, which owns
+  enumerating one rule path per FR-030 high-value field and the default classification for any
+  field not otherwise matched. Research §4 fixes the two-section structure; the plan/policy file
+  fixes the per-field contents.
 - **Shadow credential readiness (Round 4 R4-Q1)**: a missing shadow-STT credential FAILS the
   run via the FR-009 `shadow_stt_credentials` readiness check (exit 4) only when shadow is
   EXPLICITLY enabled via `--shadow-stt`. When shadow is only default-on-from-config, a missing
@@ -159,6 +184,16 @@ item not already pinned by the spec. The spec's 2026-05-25 clarification session
   shadow lane to Pipecat internals. Running the lane in a separate `asyncio.Task` (not a
   thread or subprocess) keeps single-process scheduling simple and matches the rest of the
   CLI's async model.
+- **SC-013 non-blocking measurement (R7 — acceptable deferral)**: SC-013 ("no observable
+  slowdown attributable to the shadow lane") is verified qualitatively at the research layer and
+  by the `test_lane_does_not_block_live_turns` contract test, which asserts the live-turn cadence
+  is "statistically indistinguishable" between shadow-enabled and shadow-disabled runs. The exact
+  performance harness — sampling method, sample size, the chosen statistic, and the numeric
+  indistinguishability threshold that operationalizes "no observable slowdown" — is intentionally
+  DEFERRED to the plan's "Performance and latency targets" subsection. This is an accepted
+  deferral, not a research gap: the non-blocking guarantee is enforced structurally (separate
+  `asyncio.Task`, no `await` on the lane before finalization per §7), and the numeric threshold is
+  a tuning choice that belongs with the other latency budgets in the plan.
 - **Alternatives rejected**: running shadow STT inside the Pipecat pipeline (couples the
   shadow lane's failure modes to the live conversation path — violates FR-029 non-blocking
   guarantee by construction); separate subprocess (over-engineered for one-item-per-invocation).
@@ -305,6 +340,15 @@ item not already pinned by the spec. The spec's 2026-05-25 clarification session
   - `shadow_lane_truncated.json` — single JSON file per session if (and only if) the lane
     was truncated post-finalization per Round 2 Q7.
   - `conflicting_callbacks_audit.jsonl` — late-after-finalization callbacks per FR-027.
+- **JSONL line-format constraint (R7)**: every `.jsonl` artifact above
+  (`callbacks_audit.jsonl`, `rejected_auth_callbacks.jsonl`, `shadow_discrepancies.jsonl`,
+  `conflicting_callbacks_audit.jsonl`) MUST emit exactly ONE complete JSON object per physical
+  line, serialized in COMPACT form with NO embedded newlines inside any object — i.e. each record
+  is written with a newline-free serializer (e.g. `json.dumps(obj)` with no `indent=` and
+  `\n`-escaped string values) and terminated by a single `\n`. This is a hard requirement, not a
+  stylistic preference: it is what makes the files line-readable by `grep` / `jq -c` / `wc -l` and
+  makes one line == one record for append-and-count tooling. Pretty-printed / multi-line JSON
+  objects are forbidden in these artifacts.
 - **Redaction-pass scope (Round 4 R4-Q52)**: the default-on redaction pass runs over the FULL
   four-artifact set — the full transcript, the session-result `summary`, the shadow STT
   transcript, and the shadow STT discrepancy records — before any of them is written to disk. The
@@ -390,6 +434,21 @@ item not already pinned by the spec. The spec's 2026-05-25 clarification session
     controlled SignalWire dev tenant + a controlled Dataverse dev environment + a recorded
     test contact who has opted in to test calls. NOT run automatically.
   - **FR-to-coverage map** (R4-Q51, closes requirements CHK163): which FRs rely on integration-only coverage vs. contract-test coverage — **Contract-test-covered**: FR-004–FR-008 (signalwire-transport), FR-013–FR-016 (pipecat-runtime), FR-017/FR-018/FR-023/FR-025 (slice12-preservation per T101), FR-020/FR-021/FR-024 (crm-writeback-dnc-first), FR-028–FR-032 (shadow-stt-lane), FR-008/FR-035 (rejected-auth-audit-log), FR-001/FR-002/FR-003/FR-036/FR-037 (cli-slice3). **Integration-only-covered** (exercised end-to-end through the runner, not a single contract): FR-009–FR-012 (telephony readiness gating across US3), FR-022/FR-026/FR-027 (resume + abandonment + conflicting-late callbacks across US4/US7), FR-033/FR-034 (retention modes across T100), FR-038 (demo-without-UI across US1/US2/US6/US7).
+- **Coverage measurement (R7)**:
+  - **Repo-wide floor, per-package check manual (CHK127)**: the accepted measure is the
+    repo-wide **90% coverage floor** configured in `pyproject.toml` — the SAME single repo-wide
+    gate used by Slice 1 / Slice 2. Task T098 performs a MANUAL per-package check that each new
+    Slice 3 package (`transport/signalwire/`, `runtime/pipecat/`, `shadow_stt/`, `slice3/`) is at
+    or above the floor, but ENFORCED per-package coverage thresholds are intentionally DEFERRED to
+    the plan (which may add `[tool.coverage]` per-package gates if it chooses). The CI gate remains
+    the repo-wide 90% number; per-package is a manual T098 spot-check, not a pinned threshold.
+  - **In-package fakes excluded from the measurement (CHK128)**: the in-package fakes
+    (`runtime/pipecat/provider_fake.py` per §3, the `ShadowSTTProvider` fake per §4, and the
+    SignalWire transport fake) are TEST ARTIFACTS, not production code. Their own line coverage is
+    EXCLUDED from the 90% measurement (via the coverage config `omit` / exclusion list), so the
+    90% floor reflects PRODUCTION code only. The fakes still EXERCISE production code through the
+    contract tests — they count toward covering production lines — but their own lines do not count
+    toward (nor dilute) the production-code coverage number.
 - **Rationale**: Matches the Slice 1 / Slice 2 test taxonomy (90% coverage floor per
   `pyproject.toml`). Fixture-replay through the SignalWire transport + recorded-audio
   playback through the Pipecat runtime are explicitly named in the spec's Deferred-to-Plan
@@ -463,6 +522,33 @@ notes are preserved. What changed:
   Q46). JSON example updated accordingly.
 - **§10 (artifact formats)**: noted the cumulative redaction-pass latency spans the four-artifact
   set (transcript + summary + shadow transcript + shadow discrepancy records) (R4-Q52).
+
+## Round 7 — Checklist-Residual Closure (2026-06-02)
+
+Additive-only closure of R7 requirements-quality checklist gaps. §1–§14 and the Round 1–4
+notes are preserved. What changed:
+
+- **§10 (artifact formats)**: pinned the JSONL line-format constraint — each `.jsonl` record is
+  one complete, compact, embedded-newline-free JSON object per physical line, terminated by `\n`
+  (grep / `jq -c` / `wc -l` line-readability) (observability CHK118).
+- **§2 (signature verification)**: marked the HMAC-SHA256 algorithm claim as
+  `[Assumption — pending vendor-doc confirmation]` and required the plan to confirm it against
+  SignalWire's published signature docs (title/version/URL) before real-call enablement
+  (security CHK128); required `signature.py` to use a CONSTANT-TIME / timing-safe comparison
+  (`hmac.compare_digest`) rather than naive `==` to close the timing-side-channel gap
+  (security CHK171).
+- **§6 (shadow lane topology)**: recorded SC-013's non-blocking harness / numeric threshold as an
+  accepted deferral to the plan's Performance subsection, with structural non-blocking enforced by
+  construction (shadow-stt CHK002).
+- **§4 (shadow STT + discrepancy policy)**: stated the `benign_rules` / `uncertain_rules` examples
+  are illustrative only and deferred the exhaustive per-field rule set (`person_reached_role`,
+  `wrong_number`, `final_disposition`, `interest_level`) to the policy file / plan
+  (shadow-stt CHK138); specified that empty-string / whitespace-only `SLICE3_SHADOW_STT_PROVIDER`
+  normalizes to "unset" (lane no-op), same as unset / `"disabled"` (shadow-stt CHK151).
+- **§12 (testing strategy)**: recorded repo-wide 90% as the accepted coverage measure with T098's
+  manual per-package check and per-package enforcement deferred to the plan (testing CHK127); and
+  stated the in-package fakes are test artifacts excluded from the production-code coverage
+  measurement (testing CHK128).
 
 ## Open items (NONE blocking entry to Phase 1)
 

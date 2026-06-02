@@ -303,3 +303,31 @@ The items below validate the Phase-1 plan-side artifacts (plan.md, research.md, 
 - Items closed this round: 12
 - Items still open: 0
 - Aligned: yes — Residual open: none
+
+## Round 7 — Net-New Gap Scan (post US1–US4 / R4 amendments) (2026-06-02)
+
+Gap-scan of compliance surface introduced by the Round 4 spec amendments (R4-Q17, R4-Q20, R4-Q23, R4-Q29, R4-Q33, R4-Q40) for requirement-quality gaps not covered by any existing CHK item.
+
+### R4-Q17 — Exception-text / stack-trace redaction (FR-035 extension)
+
+- [x] CHK151 Does FR-035 define the redaction-before-write guarantee for exception messages and stack traces precisely enough that a compliance reviewer can confirm error text cannot leak a secret OR a caller-volunteered PHI span to stderr, the run report, or logs? The existing items (CHK038/CHK039/CHK089) enumerate the four credential classes and SC-018's 0-secrets sweep but none addresses the R4-Q17 global-exception-handler redaction path, nor whether that path applies the PHI `[PHI-REDACTED]` policy in addition to the secret `[REDACTED]` policy. [Completeness, Gap, Spec §FR-035 (R4-Q17), §FR-015] — Gap. → CLOSED R7-fix (2026-06-02): spec.md FR-035 — global exception handler's redaction pass MUST apply BOTH `[REDACTED]` (secret) AND `[PHI-REDACTED]` (PHI) to exception messages/stack traces before log/stderr/run-report write.
+
+### R4-Q20 — Secret provenance (environment-only load)
+
+- [x] CHK152 Is the FR-035 "every secret MUST be loaded from the environment ONLY, at module init; loading a secret from disk or from CLI argv is forbidden" requirement testable/measurable as a compliance control (e.g., a stated check that no secret-bearing config key is read from a file path or argv), or is it asserted without a verification surface? No existing item (CHK038–CHK040, CHK089) covers secret provenance / load-path restriction — they cover only secret presence in output artifacts. [Measurability, Gap, Spec §FR-035 (R4-Q20)] — Gap. → CLOSED R7-fix (2026-06-02): spec.md FR-035 — env-only load-path is a testable compliance control; a verification check MUST confirm no secret-bearing config key resolves from a file path, TOML, or argv.
+
+### R4-Q29 — raw_callback_body redaction coverage
+
+- [x] CHK153 Does the FR-033 default-on redaction coverage set explicitly include `CallbacksAuditLog.raw_callback_body` (which may echo caller-spoken / PHI-bearing content) with the same before-write timing as the transcript artifacts? Existing items CHK036/CHK037/CHK043 and CHK093/CHK102 enumerate the four transcript-class artifacts but none names the callbacks-audit raw body, so the requirement that this stored provider payload is redacted is not validated for completeness or for write-timing. [Completeness, Gap, Spec §FR-033 (R4-Q29), Data-Model §1.3/§2.5] — Gap. → CLOSED R7-fix (2026-06-02): spec.md FR-033 — `CallbacksAuditLog.raw_callback_body` added to the default-on redaction set, passed through the same pass with the same before-write timing (redacted before the audit row is written).
+
+### R4-Q33 — Audit floor cannot be lowered by deployment config
+
+- [x] CHK154 Does the spec state, as an auditable invariant, that deployment configuration MAY set a LONGER retention but MUST NOT lower the ≥ 90-day audit retention floor for audit artifacts (the R4-Q33 "config cannot lower the audit floor" clause)? Existing items CHK030–CHK035 / CHK137 establish the floor's scope (pointer records, `_unassociated/`) but none validates the floor-vs-config precedence rule that prevents a misconfiguration from silently shortening audit retention. [Completeness, Gap, Spec §Assumptions "Audit retention floor is a floor" (R4-Q33), §FR-022] — Gap. → CLOSED R7-fix (2026-06-02): spec.md SC-022 — "0 deployment configurations can lower an audit artifact's effective retention below the 90-day floor ... the floor wins" as a measurable auditable invariant.
+
+### R4-Q40 — Positive redaction-applied indicator + static no-PHI reminder
+
+- [x] CHK155 Does FR-036 require the run/readiness report to carry a positive `redaction_applied: true|false` indicator AND a static no-PHI / no-clinical operator reminder line, distinct from the §2.5 PHI-escalation-keyed detectability covered by CHK101? CHK101/CHK097 establish that a PHI-volunteered case is "observably distinct," but neither validates the always-present boolean indicator (which must read `true` even on a non-PHI redacted call) nor the static reminder-line requirement, so the R4-Q40 operator-facing attestation surface is unvalidated. [Completeness, Measurability, Spec §FR-036 (R4-Q40)] — Gap. → CLOSED R7-fix (2026-06-02): spec.md FR-036 — positive `redaction_applied: true|false` that MUST read `true` even on a non-PHI call when the pass ran, plus an always-present static no-PHI / no-clinical operator reminder line.
+
+### R4-Q23 — Fail-closed when callback signature verification unavailable
+
+- [x] CHK156 Does the spec validate the R4-Q23 fail-closed decision — that a deployment which cannot supply callback signature verification MUST refuse to start in real-call mode with a named readiness failure (no unauthenticated-callback fallback) — as a distinct compliance requirement? Existing items CHK047/CHK109 close the FR-008 "where supported" caveat via the HMAC research decision and "no spurious rows," but neither validates the readiness-gate refuse-to-start consequence now in FR-008/FR-009 (R4-Q23), so the strongest authentication-posture guarantee lacks a requirement-quality check. [Completeness, Consistency, Spec §FR-008 (R4-Q23), §FR-009] — Gap. → CLOSED R7-fix (2026-06-02): spec.md FR-008 — unverifiable-signature deployment MUST refuse to start in real-call mode via the named `signing_secret_verifiable` readiness failure (FR-009), "a distinct compliance requirement," no unauthenticated fallback.

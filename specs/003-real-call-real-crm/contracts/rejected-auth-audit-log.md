@@ -87,6 +87,24 @@ class RejectedAuthCallbackLog(Protocol):
    under `artifacts/_unassociated/rejected_auth_callbacks.jsonl`. This is the sole definition
    of how a rejection becomes null-session.
 
+9. **Path-traversal sanitization before composing the write path** (CHK169): the
+   attacker-controlled `{session_id}` URL path segment MUST be validated/sanitized BEFORE it is
+   used as a filesystem path component. The receiver MUST treat `{session_id}` as untrusted
+   input on the forged-callback path (signature verification has already failed, so the segment
+   is not authenticated). A segment is admissible as a path component ONLY if it matches the
+   canonical session-id format (an allow-list charset, e.g. `^sess_[A-Za-z0-9]+$`); any segment
+   containing path-traversal or separator characters (`..`, `/`, `\`, NUL, absolute-path
+   prefixes) or otherwise failing the allow-list MUST NOT be used to compose
+   `artifacts/<session_id>/rejected_auth_callbacks.jsonl`. Such a segment is treated as
+   unassociatable (per #8) and its row is written under
+   `artifacts/_unassociated/rejected_auth_callbacks.jsonl`. The composed write path MUST further
+   be confined to the artifacts root (resolved/realpath MUST remain inside the artifacts
+   directory) so a forged `{session_id}` (e.g. `../../etc`) can NEVER steer the rejected-auth
+   log write outside the artifacts root. Note that the #8 known-session match already rejects
+   most forged ids, but sanitization is a SEPARATE, independent fail-closed gate applied before
+   any path composition (defense in depth: it holds even if a future change relaxes the
+   known-session match).
+
 ## File format
 
 ```jsonl
@@ -128,6 +146,7 @@ is the source of truth for human inspection.
 | `test_unassociated_retention_floor` | `artifacts/_unassociated/rejected_auth_callbacks.jsonl` is subject to the same ≥ 90-day retention floor; operator tooling reports `rejected_auth_unassociated_count` (Round 3) |
 | `test_append_one_row_per_delivery_no_dedup` | N forged deliveries (including repeated null-`session_id` deliveries) append N rows; no dedup collapses repeated attempts (Round 4 R4-Q27) |
 | `test_unassociatable_rule_defined` | A callback whose `{session_id}` path segment matches no known session row (or is absent) resolves to null `session_id` and lands under `artifacts/_unassociated/` (Round 4 R4-Q19) |
+| `test_session_id_path_traversal_sanitized` | A forged `{session_id}` containing traversal/separator characters (e.g. `../../etc`, `a/b`, NUL) fails the allow-list, is NOT used to compose the write path, lands under `artifacts/_unassociated/`, and the resolved write path stays confined inside the artifacts root — no write occurs outside it (CHK169) |
 
 ## Round 4 — Checklist-Residual Alignment (2026-06-01)
 
