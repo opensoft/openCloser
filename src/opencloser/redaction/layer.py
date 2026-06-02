@@ -17,6 +17,7 @@ when the persona emits ``phi_collection_risk`` (Round 2 Q11).
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -175,6 +176,25 @@ def redact_artifact_text(
     return layer.redact(text)
 
 
+PHI_REDACTION_TAG = "[PHI-REDACTED]"
+
+
+def _tag_and_redact_phi(text: str, phi_terms: Sequence[str]) -> str:
+    """Tag-and-redact every PHI term occurrence (case-insensitive, whole-or-partial
+    substring) with ``[PHI-REDACTED]``.
+
+    US5 (T066) concrete PHI tagging: the runtime detects the PHI signal in a
+    caller utterance and supplies the matched terms; each occurrence is replaced
+    so the PHI substring cannot survive into any persisted artifact (Round 2
+    Q11). Terms are sorted longest-first so a longer term ("methotrexate") is
+    redacted before a shorter overlapping one ("mg").
+    """
+    out = text
+    for term in sorted({t for t in phi_terms if t}, key=len, reverse=True):
+        out = re.sub(re.escape(term), PHI_REDACTION_TAG, out, flags=re.IGNORECASE)
+    return out
+
+
 def apply_phi_redaction_pass(
     layer: RedactionLayer,
     *,
@@ -182,7 +202,8 @@ def apply_phi_redaction_pass(
     summary_text: str | None,
     shadow_transcript_text: str | None,
     shadow_discrepancy_texts: list[str],
-    phi_spans: list[tuple[int, int]] | None = None,  # noqa: ARG001  (reserved for US5)
+    phi_terms: Sequence[str] | None = None,
+    phi_spans: list[tuple[int, int]] | None = None,
 ) -> dict[str, str | list[str]]:
     """PHI tag-and-redact pre-write pass for caller-volunteered PHI cases.
 
@@ -193,25 +214,25 @@ def apply_phi_redaction_pass(
     PHI-volunteered case MUST be observably distinct from a non-PHI call in
     the audit artifacts and the run report.
 
-    Slice 3 (T009) only wires the API shape; the concrete PHI-span detection
-    and tagging lands in US5 (T066). For now the function applies the standard
-    default-on redaction to every supplied artifact text so the contract test
-    ``test_caller_volunteered_phi_escalates_and_redacts`` can assert the
-    artifacts are at least passed through the redaction layer.
+    US5 (T066): ``phi_terms`` are the PHI-signal terms the runtime matched in
+    the caller utterance. Each artifact text is first PHI-tag-and-redacted (the
+    matched terms scrubbed to ``[PHI-REDACTED]``) and then passed through the
+    configured default-on redaction policy, so neither the PHI substring nor the
+    standard redaction targets survive into any persisted artifact.
     """
+    terms = phi_terms or ()
+
+    def _scrub(kind: str, text: str) -> str:
+        return redact_artifact_text(layer, kind, _tag_and_redact_phi(text, terms))
+
     redacted: dict[str, str | list[str]] = {}
     if transcript_text is not None:
-        redacted["transcript"] = redact_artifact_text(layer, "transcript", transcript_text)
+        redacted["transcript"] = _scrub("transcript", transcript_text)
     if summary_text is not None:
-        redacted["summary"] = redact_artifact_text(
-            layer, "session_result_summary", summary_text,
-        )
+        redacted["summary"] = _scrub("session_result_summary", summary_text)
     if shadow_transcript_text is not None:
-        redacted["shadow_transcript"] = redact_artifact_text(
-            layer, "shadow_transcript", shadow_transcript_text,
-        )
+        redacted["shadow_transcript"] = _scrub("shadow_transcript", shadow_transcript_text)
     redacted["shadow_discrepancy_records"] = [
-        redact_artifact_text(layer, "shadow_discrepancy_record", text)
-        for text in shadow_discrepancy_texts
+        _scrub("shadow_discrepancy_record", text) for text in shadow_discrepancy_texts
     ]
     return redacted

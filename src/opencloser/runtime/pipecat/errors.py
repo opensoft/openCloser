@@ -16,7 +16,20 @@ from __future__ import annotations
 class RealtimeProviderError(Exception):
     """Provider-side failure from the configured real-time AI model provider
     (FR-013 Round 1 Q4 (a)). Pre-connected → ``failed``; post-connected →
-    ``needs_human_review`` / ``script_truncated``."""
+    ``needs_human_review`` / ``script_truncated``.
+
+    Carries ``transient: bool`` (Round 4 R4-Q5). A transient PRE-connection
+    provider error is retried within the connect budget (it is NOT immediately
+    a degradation trigger); a terminal pre-connection error finalizes per
+    FR-013. POST-connection, ANY ``RealtimeProviderError`` is a degradation
+    trigger regardless of ``transient``. Defaults to terminal
+    (``transient=False``) so a bare ``RealtimeProviderError(message)`` — as the
+    contract-test fakes raise — is treated as a terminal failure.
+    """
+
+    def __init__(self, *args: object, transient: bool = False) -> None:
+        super().__init__(*args)
+        self.transient = transient
 
 
 class PipecatRuntimeError(Exception):

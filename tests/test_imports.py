@@ -119,6 +119,12 @@ _ALLOWED: dict[str, set[str]] = {
         "opencloser.models",
         "opencloser.persona",
         "opencloser.runtime",  # intra-boundary submodules
+        # contracts/pipecat-runtime.md Required-Behavior #4 (Round 2 Q11): on
+        # caller-volunteered PHI the runtime invokes the redaction layer's PHI
+        # tag-and-redact pass over the in-flight transcript / summary / shadow
+        # buffers before any artifact write — an explicitly sanctioned import
+        # (T066, mirrors the artifacts→redaction allowance).
+        "opencloser.redaction",
     },
     "shadow_stt": {
         # Non-blocking secondary transcript lane (FR-028 — FR-032). Foundational

@@ -105,10 +105,10 @@ omit = [
     # T024/T025 (2026-05-31): dial.py + callbacks.py removed — real, unit-tested.
     # T026 (2026-05-31): adapter.py removed — place_call/event_stream/ingest_callback
     #   are real (signature enforcement + audit writes land in T032).
-    # Slice 3 Pipecat runtime + rejected-auth log + artifact stubs (T013b /
-    # T014 TDD red). Same rationale — implementation bodies land in T030 /
-    # T032 / T064 / T065 / T066 / T067.
-    "src/opencloser/runtime/pipecat/runtime.py",
+    # T064/T065/T066 (US5, 2026-06-02): runtime.py removed — the degradation
+    # wiring + US5 live-conversation safety layer is real and exercised by the
+    # T014 contract suite plus the T058-T063 integration tests; it now meets the
+    # 90% coverage floor.
     # T029 (2026-06-01): pipeline.py is production Pipecat FrameProcessor wiring;
     # `process_frame` delivery needs Pipecat's live pipeline setup (not available
     # in unit tests). The pure translation helpers + assembly are unit-tested in
