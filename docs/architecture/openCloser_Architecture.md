@@ -2,13 +2,29 @@
 
 Status: Draft
 
-Last updated: 2026-05-22
+Last updated: 2026-05-25
 
 ## Purpose
 
 This document defines the target architecture for openCloser. The architecture is designed around a stable Interaction Core that can run different persona modules across multiple media transports. The first concrete implementation is CRM-driven outbound calling for assisted living facility outreach using Dynamics 365 / Dataverse, SignalWire, Pipecat, and a real-time AI model provider.
 
 The smallest MVP build order is defined in [openCloser MVP](../prds/openCloser_MVP.md): mock call plus mock CRM first, mock call plus real CRM second, and real SignalWire call plus real CRM third.
+
+The Dograh evaluation decision is recorded in
+[Dograh and Runtime Architecture Decision](./openCloser_Dograh_Runtime_Decision.md):
+Dograh is a reference and optional sidecar experiment, not the core MVP
+runtime or CRM control plane.
+
+Future AI video-call research is captured in
+[AI Video Calls and Talking Head Rendering Research](./openCloser_AI_Video_Calls_Research.md).
+
+Client installation, tenant onboarding, the Dynamics managed-solution install
+path, and the small admin/mobile status surface are captured in
+[Client Onboarding and Admin App](./openCloser_Client_Onboarding_and_Admin_App.md).
+
+Independent release boundaries for the runtime, Dynamics solution, and admin app
+are captured in
+[Release and Repository Strategy](./openCloser_Release_and_Repo_Strategy.md).
 
 ## Architectural Principles
 
@@ -30,6 +46,7 @@ The smallest MVP build order is defined in [openCloser MVP](../prds/openCloser_M
 - Mock call transport: used for Slices 1 and 2.
 - First production telephony transport: SignalWire.
 - First AI model path: OpenAI Realtime through the Pipecat pipeline.
+- Shadow STT path: non-blocking transcript verification lane for Slice 3.
 - First CRM adapter: Dynamics 365 / Dataverse Web API.
 - MVP local state: SQLite or local JSON artifacts for Slice 1.
 - Pilot business state: Dynamics 365 / Dataverse for Slices 2 and 3.
@@ -37,7 +54,9 @@ The smallest MVP build order is defined in [openCloser MVP](../prds/openCloser_M
 - Short-lived coordination: single worker for MVP; PostgreSQL row locks later, Redis optional later.
 - Artifact storage: deployment-configurable object storage for transcripts, recordings, and large logs.
 - Observability: structured logs, OpenTelemetry-compatible traces, and basic metrics.
-- UI: CLI and local artifacts for development; Dynamics views/forms for pilot operations; no custom web UI for MVP.
+- UI: CLI and local artifacts for development; Dynamics views/forms for pilot
+  operations; no custom operator UI for MVP. A narrow admin/mobile app is
+  allowed for install, tenant setup, health, and campaign status only.
 
 Python is recommended first because Pipecat support is strongest there and it keeps the real-time audio path close to the worker/API code. The public architecture should still define interfaces clearly enough that future adapters can be implemented in another language if needed.
 
@@ -46,6 +65,9 @@ Python is recommended first because Pipecat support is strongest there and it ke
 ```mermaid
 flowchart LR
     User["CRM User"] --> CRM["Dynamics 365 / Dataverse"]
+    Admin["Client Admin"] --> AdminApp["openCloser Admin"]
+    AdminApp --> CRM
+    AdminApp --> Worker
     CRM --> Worker["Queue Worker"]
     Worker --> Core["Interaction Core"]
     Core --> Rules["Compliance and Policy Engine"]
@@ -76,6 +98,32 @@ Responsibilities:
 - Create queue items from CRM workflow, views, campaigns, or lists.
 - Receive structured call outcomes from openCloser.
 - Remain the primary surface for sales and operations users in the first version.
+
+### Admin and Install Layer
+
+The admin/install layer helps a customer tenant connect openCloser without
+creating a second CRM workflow surface.
+
+Initial surface: responsive openCloser Admin, mobile-friendly from the start.
+Native mobile can wrap the same admin flow later.
+
+Responsibilities:
+
+- Create or join an openCloser account.
+- Guide Microsoft tenant consent.
+- Select a Dataverse/Dynamics environment.
+- Install or verify the Dynamics managed solution.
+- Configure solution environment variables.
+- Verify Dataverse access, metadata, command buttons, and write-back readiness.
+- Show runtime, CRM, telephony, model, and campaign health.
+- Pause or resume campaign automation.
+
+Non-responsibilities:
+
+- Full campaign building.
+- Custom task queues.
+- Transcript review console.
+- Replacing Dynamics views/forms for operators.
 
 ### Interaction Core
 
@@ -117,7 +165,10 @@ Runtime adapters execute the real-time conversation pipeline.
 
 Initial live-call adapter:
 
-- Pipecat pipeline with provider-specific STT, LLM, TTS, or real-time model components.
+- Pipecat pipeline with direct speech-to-speech real-time model components as
+  the default live-call path.
+- Optional modular STT, LLM, and TTS components for experiments, fallbacks, or
+  non-latency-sensitive workflows.
 
 Slices 1 and 2 use scripted conversation fixtures instead of the live-call
 runtime so CRM integration can be validated before audio and model risk are
@@ -130,6 +181,20 @@ Responsibilities:
 - Receive persona/tool events.
 - Stream transcript segments.
 - Return final summary, extracted fields, and completion signal.
+
+### Shadow STT Verification
+
+Slice 3 should support a non-blocking shadow STT lane that listens to the same
+caller audio while the real-time model handles the live conversation. The shadow
+lane records an independent transcript and emits discrepancy events when it
+does not match the model transcript/log on high-value fields such as opt-out,
+wrong number, email, callback intent, person reached, interest level, or final
+disposition.
+
+The shadow lane must not block the live call in the MVP. Early versions should
+store discrepancies for audit and human review. Later versions may use
+discrepancy scores as policy inputs for disposition confidence, CRM write-back
+confidence, or safety gates.
 
 ### Persona Modules
 
@@ -295,6 +360,8 @@ Example event types:
 - `provider_call_started`
 - `media_stream_connected`
 - `transcript_segment_received`
+- `shadow_transcript_segment_received`
+- `transcript_discrepancy_detected`
 - `persona_field_extracted`
 - `persona_disposition_selected`
 - `provider_call_ended`
@@ -465,6 +532,26 @@ Initial API endpoints:
 - `GET /healthz`
 - `GET /readyz`
 
+CRM command trigger endpoints:
+
+- `POST /v1/crm/dataverse/leads/{lead_id}/ai-call`
+- `POST /v1/crm/dataverse/campaigns/{campaign_id}/run`
+
+Admin onboarding/status endpoints:
+
+- `POST /v1/admin/accounts`
+- `GET /v1/admin/account`
+- `POST /v1/admin/microsoft/consent/start`
+- `POST /v1/admin/microsoft/consent/complete`
+- `GET /v1/admin/tenants/{tenant_id}/environments`
+- `GET /v1/admin/crm/environments/{environment_id}/status`
+- `POST /v1/admin/crm/environments/{environment_id}/verify`
+- `GET /v1/admin/crm/environments/{environment_id}/solution`
+- `GET /v1/admin/campaigns`
+- `POST /v1/admin/campaigns/{campaign_id}/pause`
+- `POST /v1/admin/campaigns/{campaign_id}/resume`
+- `GET /v1/admin/health`
+
 Internal API or service methods:
 
 - `claim_due_queue_items(campaign_id, limit)`
@@ -485,7 +572,9 @@ Call activity, Task, and queue-status update.
 Configuration should support:
 
 - CRM connection details.
+- Dynamics managed-solution environment variables.
 - Dataverse table, field, lookup, status, and owner/team mappings.
+- Microsoft tenant/account binding for the admin app.
 - SignalWire project, space, token, and phone number.
 - AI provider credentials.
 - Campaign to persona mapping.
@@ -589,17 +678,25 @@ Minimum metrics:
 - Average call duration.
 - Provider errors.
 - Runtime errors.
+- User-to-bot latency.
+- Realtime model TTFB.
+- Shadow STT discrepancy count.
 - CRM write-back failures.
 - Write-back retry count.
 
 ## Security and Privacy
 
 - Store secrets outside source control.
+- Use Microsoft tenant admin consent for cross-tenant onboarding.
+- Use a least-privilege Dataverse application user or equivalent integration
+  identity for server-side CRM access.
 - Encrypt sensitive data at rest where the deployment platform supports it.
 - Use TLS for webhook and media endpoints.
 - Restrict CRM credentials to the minimum required privileges.
 - Avoid logging raw PHI or full transcripts by default.
 - Support transcript redaction or external artifact storage.
+- Apply the same retention, redaction, and artifact policy to primary model
+  transcripts and shadow STT transcripts.
 - Record persona version, model provider, and model configuration for auditability.
 
 ## Extension Points
@@ -648,6 +745,11 @@ App voice/video transport:
 
 Doctor avatar rendering should be treated as a client and media-layer concern. The clinical persona should provide conversation state, spoken output, and nonverbal cues only through explicit interfaces. Clinical safety logic should live in persona policy and protocol components, not in avatar rendering.
 
+The first video-call spike should treat the avatar as a separate presentation
+worker fed by the agent's output audio. Managed avatar providers and
+browser-rendered synthetic avatars should be compared before selecting a default
+video stack.
+
 ## Implementation Order
 
 1. Define domain models and event types.
@@ -660,9 +762,22 @@ Doctor avatar rendering should be treated as a client and media-layer concern. T
 8. Prove Slice 2 with mock call plus real CRM.
 9. Add SignalWire outbound dialing and status callbacks.
 10. Add Pipecat runtime integration.
-11. Prove Slice 3 with real call plus real CRM.
-12. Add operational metrics and failure retry handling.
-13. Pilot with limited CRM records.
+11. Add direct real-time audio model path and non-blocking shadow STT logging.
+12. Prove Slice 3 with real call plus real CRM. This is Feature 003 and is
+    owned by `py-bench`; it must not include Flutter admin tasks.
+13. In parallel with the Slice 3 runtime work, start the Flutter admin feature
+    stream in `flutterBench`: app scaffold, generated Admin API client, mock
+    data layer, account/consent screens, environment selection, install
+    checklist, health dashboard, and campaign status controls.
+14. Add fixture-backed and then real Dataverse-backed `/v1/admin/*` runtime APIs
+    as separate `py-bench` features.
+15. Add operational metrics and failure retry handling.
+16. Pilot with limited CRM records.
+17. Package the Dynamics extension as a managed solution.
+18. Split `openCloser-dynamics365` and `openCloser-admin` into independent
+    release repositories when the `/v1` contracts and install flow are stable.
+19. Publish the installable Dynamics app through AppSource after pilot
+    packaging is stable.
 
 ## Open Architecture Decisions
 
@@ -673,4 +788,8 @@ Doctor avatar rendering should be treated as a client and media-layer concern. T
 - Whether LiveKit should be the default app voice/video transport.
 - Whether persona schemas should be YAML, Python classes, database records, or a hybrid.
 - Whether the first dev console should be read-only monitoring or include campaign controls.
+- Whether the first Flutter admin release target should be hosted web, packaged
+  mobile, or both from the same codebase.
+- Whether external pilots can use managed solution zip installs before the
+  AppSource package is certified.
 - How much clinical protocol logic belongs in persona configuration versus a separate clinical rules engine.

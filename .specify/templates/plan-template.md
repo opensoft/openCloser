@@ -6,6 +6,9 @@
 
 **Note**: This template is filled in by the `/speckit-plan` command. See `.specify/templates/plan-template.md` for the execution workflow.
 
+**Bench Owner**: [`py-bench` or `flutterBench`; must match spec.md and remain
+single-bench for all implementation tasks]
+
 ## Summary
 
 [Extract from feature spec: primary requirement + technical approach from research]
@@ -29,6 +32,9 @@
 **Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
 
 **Project Type**: [e.g., library/cli/web-service/mobile-app/compiler/desktop-app or NEEDS CLARIFICATION]
+
+**Bench Runtime**: [`py-bench` for Python runtime/API/CRM/telephony work, or
+`flutterBench` for Flutter admin app/client/UI work]
 
 **Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]
 
@@ -54,6 +60,9 @@ Document how this plan satisfies the openCloser Constitution:
   boundary, human callback/review task behavior]
 - **Verification**: [Unit, contract, integration, fixture, or manual demo checks
   required before completion]
+- **Bench ownership**: [Confirm every implementation task belongs to the same
+  bench. Cross-bench dependencies must be expressed as versioned contracts or
+  separate feature numbers.]
 
 If any item is violated, record it in Complexity Tracking with the reason and
 the simpler alternative that was rejected.
@@ -77,7 +86,9 @@ specs/[###-feature]/
   ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
   for this feature. Delete unused options and expand the chosen structure with
   real paths (e.g., apps/admin, packages/something). The delivered plan must
-  not include Option labels.
+  not include Option labels. Do not include both Python runtime paths and
+  Flutter app paths in the same feature unless one side is documentation or a
+  generated contract fixture consumed by this feature.
 -->
 
 ```text

@@ -1,0 +1,918 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$script_dir"
+env_file="${OPENCLOSER_TEST_ENV_FILE:-$repo_root/.env.opencloser-tests}"
+target_queue_item_guid="${DATAVERSE_TEST_QUEUE_ITEM_GUID:-7d8ef0d5-2e57-f111-bec6-000d3a5d4fc0}"
+
+export OPENCLOSER_TEST_ENV_FILE="$env_file"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./setup-openCloser
+  ./setup-openCloser --status
+  ./setup-openCloser --help
+
+Interactive setup and demo runner for openCloser Feature 002 test work.
+It loads repo-local test settings from `.env.opencloser-tests`; that file is
+ignored by git and does not modify the shared pyBench environment.
+USAGE
+}
+
+pause() {
+  printf '\nPress Enter to continue...'
+  read -r _ || true
+}
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+run_step() {
+  local label="$1"
+  shift
+  section "$label"
+  "$@"
+}
+
+load_env_if_present() {
+  if [[ ! -f "$env_file" ]]; then
+    return 0
+  fi
+
+  local had_allexport=0
+  case $- in
+    *a*) had_allexport=1 ;;
+  esac
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  if [[ "$had_allexport" -eq 0 ]]; then
+    set +a
+  fi
+
+  target_queue_item_guid="${DATAVERSE_TEST_QUEUE_ITEM_GUID:-$target_queue_item_guid}"
+}
+
+python_bin() {
+  if command -v python3 >/dev/null 2>&1; then
+    printf 'python3'
+  elif command -v python >/dev/null 2>&1; then
+    printf 'python'
+  else
+    return 1
+  fi
+}
+
+env_value_missing() {
+  local value="${1:-}"
+  [[ -z "$value" || "$value" == \<* || "$value" == *REPLACE_WITH* || "$value" == *app-registration-client-id* || "$value" == *client-secret* ]]
+}
+
+ensure_env_file() {
+  if [[ -f "$env_file" ]]; then
+    return 0
+  fi
+  "$repo_root/scripts/opencloser-tests-prep.sh" --init
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local tmp quoted
+
+  ensure_env_file
+  tmp="$(mktemp)"
+  quoted="$(printf '%q' "$value")"
+
+  awk -v key="$key" -v line="$key=$quoted" '
+    BEGIN { done = 0 }
+    $0 ~ "^[[:space:]]*" key "=" {
+      if (!done) {
+        print line
+        done = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print line
+      }
+    }
+  ' "$env_file" >"$tmp"
+
+  mv "$tmp" "$env_file"
+  chmod 600 "$env_file"
+}
+
+read_hidden() {
+  local prompt="$1"
+  local var_name="$2"
+  local value
+
+  read -r -s -p "$prompt" value
+  printf '\n'
+  printf -v "$var_name" '%s' "$value"
+}
+
+crm_url_from_input() {
+  local raw="$1"
+  local host
+
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  raw="${raw%/}"
+
+  if [[ "$raw" == https://* ]]; then
+    host="${raw#https://}"
+    host="${host%%/*}"
+  else
+    host="$raw"
+  fi
+
+  if [[ "$host" =~ ^[A-Za-z0-9-]+$ ]]; then
+    printf 'https://%s.crm.dynamics.com' "$host"
+    return 0
+  fi
+
+  if [[ "$host" =~ ^[A-Za-z0-9-]+\.crm[0-9]*\.dynamics\.com$ ]]; then
+    printf 'https://%s' "$host"
+    return 0
+  fi
+
+  return 1
+}
+
+azure_cli_signed_in() {
+  command -v az >/dev/null 2>&1 && az account show >/dev/null 2>&1
+}
+
+show_azure_status() {
+  if ! command -v az >/dev/null 2>&1; then
+    printf 'Azure CLI: missing\n'
+    return 0
+  fi
+
+  if az account show >/dev/null 2>&1; then
+    printf 'Azure CLI: signed in\n'
+  else
+    printf 'Azure CLI: not signed in\n'
+  fi
+}
+
+store_tenant_from_azure_cli() {
+  local crm_url="$1"
+  local tenant_id
+
+  if ! command -v az >/dev/null 2>&1; then
+    printf 'Azure CLI is not installed or not on PATH. Tenant was not changed.\n'
+    return 1
+  fi
+
+  if ! azure_cli_signed_in; then
+    printf 'Azure CLI is not signed in. Starting browser login now.\n'
+    az login --allow-no-subscriptions --output none
+  else
+    local answer
+    printf 'Azure CLI is already signed in. Use the current account tenant? [Y/n] '
+    read -r answer
+    case "$answer" in
+      n|N|no|NO)
+        az login --allow-no-subscriptions --output none
+        ;;
+    esac
+  fi
+
+  tenant_id="$(az account show --query tenantId -o tsv 2>/dev/null || true)"
+  if env_value_missing "$tenant_id"; then
+    printf 'Could not read tenant from Azure CLI. DATAVERSE_TENANT_ID was not changed.\n' >&2
+    return 1
+  fi
+
+  set_env_value DATAVERSE_TENANT_ID "$tenant_id"
+  printf 'DATAVERSE_TENANT_ID stored from Azure CLI tenant (value hidden).\n'
+
+  if az account get-access-token --resource "$crm_url" --query accessToken -o tsv >/dev/null 2>&1; then
+    printf 'Azure CLI access token check succeeded for the selected CRM resource. Token was not stored.\n'
+  else
+    printf 'Azure CLI could not get a token for the selected CRM resource. The env file was still updated; verify CRM access before discovery/write.\n'
+  fi
+}
+
+extract_env_assignment() {
+  local path="$1"
+  local key="$2"
+  local py
+
+  py="$(python_bin)" || return 1
+  "$py" - "$path" "$key" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+
+try:
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+except OSError:
+    raise SystemExit(1)
+
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith("export "):
+        stripped = stripped[7:].lstrip()
+    if not stripped.startswith(key + "="):
+        continue
+    value = stripped.split("=", 1)[1].strip()
+    if value and value[0] in {"'", '"'}:
+        try:
+            value = ast.literal_eval(value)
+        except Exception:
+            value = value[1:-1] if len(value) > 1 and value[-1] == value[0] else value
+    print(value)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+find_credential_candidates() {
+  local roots=()
+  local root path
+
+  for root in \
+    "$repo_root" \
+    "$(dirname "$repo_root")" \
+    "$HOME" \
+    "$HOME/.config" \
+    "$HOME/.secrets" \
+    "$HOME/projects" \
+    "/mnt/c/Users/Brett" \
+    "/mnt/c/Users/Brett/.config" \
+    "/mnt/c/Users/Brett/.secrets" \
+    "/mnt/c/Users/Brett/OneDrive - Opensoft Inc/config" \
+    "/mnt/c/Users/Brett/OneDrive - Opensoft Inc/projects"; do
+    [[ -d "$root" ]] || continue
+    case " ${roots[*]} " in
+      *" $root "*) ;;
+      *) roots+=("$root") ;;
+    esac
+  done
+
+  if [[ "${#roots[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  for root in "${roots[@]}"; do
+    while IFS= read -r -d '' path; do
+      if grep -Eq '^[[:space:]]*(export[[:space:]]+)?DATAVERSE_CLIENT_(ID|SECRET)=' "$path" 2>/dev/null; then
+        local candidate_client_id candidate_client_secret
+        candidate_client_id="$(extract_env_assignment "$path" DATAVERSE_CLIENT_ID || true)"
+        candidate_client_secret="$(extract_env_assignment "$path" DATAVERSE_CLIENT_SECRET || true)"
+        if ! env_value_missing "$candidate_client_id" && ! env_value_missing "$candidate_client_secret"; then
+          printf '%s\n' "$path"
+        fi
+      fi
+    done < <(
+      find "$root" -maxdepth 4 -type f -size -512k \
+        \( \
+          -name '.env' -o \
+          -name '.env.*' -o \
+          -iname '*.env' -o \
+          -iname '*.env.*' -o \
+          -iname '*opencloser*env*' -o \
+          -iname '*dataverse*env*' -o \
+          -iname '*crm*env*' -o \
+          -iname '*credential*' -o \
+          -iname '*secret*' \
+        \) \
+        -not -path '*/.git/*' \
+        -not -path '*/node_modules/*' \
+        -not -path '*/.venv/*' \
+        -not -path '*/__pycache__/*' \
+        -not -path '*/.claude/*' \
+        -not -path '*/.codex/*' \
+        -not -path '*/tests/*' \
+        -not -path '*/specs/*' \
+        -not -path '*/artifacts/*' \
+        -print0 2>/dev/null
+    )
+  done | sort -u | sed -n '1,50p'
+}
+
+import_credentials_from_file() {
+  local path="$1"
+  local client_id client_secret tenant_id
+
+  if [[ ! -f "$path" ]]; then
+    printf 'Credential file not found: %s\n' "$path" >&2
+    return 1
+  fi
+
+  client_id="$(extract_env_assignment "$path" DATAVERSE_CLIENT_ID || true)"
+  client_secret="$(extract_env_assignment "$path" DATAVERSE_CLIENT_SECRET || true)"
+  tenant_id="$(extract_env_assignment "$path" DATAVERSE_TENANT_ID || true)"
+
+  if env_value_missing "$client_id" || env_value_missing "$client_secret"; then
+    printf 'Selected file does not contain complete non-placeholder app credentials.\n' >&2
+    return 1
+  fi
+
+  set_env_value DATAVERSE_CLIENT_ID "$client_id"
+  set_env_value DATAVERSE_CLIENT_SECRET "$client_secret"
+  printf 'Imported DATAVERSE_CLIENT_ID and DATAVERSE_CLIENT_SECRET (values hidden).\n'
+
+  load_env_if_present
+  if env_value_missing "${DATAVERSE_TENANT_ID:-}" && ! env_value_missing "$tenant_id"; then
+    set_env_value DATAVERSE_TENANT_ID "$tenant_id"
+    printf 'Imported DATAVERSE_TENANT_ID from the same file (value hidden).\n'
+  fi
+}
+
+import_existing_app_credentials() {
+  local candidates=()
+  local path choice
+
+  mapfile -t candidates < <(find_credential_candidates)
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    printf 'No env-style Dataverse credential files were found in likely local locations.\n'
+    return 1
+  fi
+
+  printf 'Found possible local credential files. Secret values are not displayed.\n'
+  local i
+  for i in "${!candidates[@]}"; do
+    printf '  %d) %s\n' "$((i + 1))" "${candidates[$i]}"
+  done
+  printf '  q) Cancel\n'
+  printf '\nSelect file to import DATAVERSE_CLIENT_ID and DATAVERSE_CLIENT_SECRET from: '
+  read -r choice
+  case "$choice" in
+    q|Q|quit|exit) return 1 ;;
+  esac
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#candidates[@]} )); then
+    printf 'Invalid selection.\n' >&2
+    return 1
+  fi
+
+  path="${candidates[$((choice - 1))]}"
+  import_credentials_from_file "$path"
+}
+
+import_credentials_from_prompted_path() {
+  local path
+  printf 'Path to env-style credential file: '
+  read -r path
+  if [[ "$path" == "~/"* ]]; then
+    path="$HOME/${path#~/}"
+  fi
+  import_credentials_from_file "$path"
+}
+
+prompt_app_credentials() {
+  local client_id client_secret
+
+  cat <<'EOF'
+Paste the Entra app registration credentials for the openCloser Dataverse test app.
+Inputs are hidden and values will be stored only in the local ignored env file.
+EOF
+
+  read_hidden 'DATAVERSE_CLIENT_ID: ' client_id
+  read_hidden 'DATAVERSE_CLIENT_SECRET: ' client_secret
+
+  if env_value_missing "$client_id" || env_value_missing "$client_secret"; then
+    printf 'Client ID and client secret are required; no values were changed.\n' >&2
+    return 1
+  fi
+
+  set_env_value DATAVERSE_CLIENT_ID "$client_id"
+  set_env_value DATAVERSE_CLIENT_SECRET "$client_secret"
+  printf 'Stored DATAVERSE_CLIENT_ID and DATAVERSE_CLIENT_SECRET (values hidden).\n'
+}
+
+prompt_with_default() {
+  local prompt="$1"
+  local default_value="$2"
+  local var_name="$3"
+  local value
+
+  if [[ -n "$default_value" ]]; then
+    printf '%s [%s]: ' "$prompt" "$default_value"
+  else
+    printf '%s: ' "$prompt"
+  fi
+  read -r value
+  if [[ -z "$value" ]]; then
+    value="$default_value"
+  fi
+  printf -v "$var_name" '%s' "$value"
+}
+
+keyvault_secret_value() {
+  local vault_name="$1"
+  local secret_name="$2"
+
+  az keyvault secret show \
+    --vault-name "$vault_name" \
+    --name "$secret_name" \
+    --query value \
+    -o tsv 2>/dev/null
+}
+
+load_credentials_from_key_vault() {
+  local vault_name client_id_name client_secret_name tenant_id_name env_url_name
+  local client_id client_secret tenant_id env_url
+
+  if ! command -v az >/dev/null 2>&1; then
+    printf 'Azure CLI is required for Azure Key Vault retrieval and is not on PATH.\n' >&2
+    return 1
+  fi
+
+  if ! azure_cli_signed_in; then
+    printf 'Azure CLI is not signed in. Starting browser login now.\n'
+    az login --allow-no-subscriptions --output none
+  fi
+
+  cat <<'EOF'
+Azure Key Vault shared secret setup
+
+This uses your signed-in Entra account to read approved secrets from Key Vault.
+Secret values are not printed. They are copied only into the local ignored
+.env.opencloser-tests file for this repo.
+EOF
+
+  prompt_with_default 'Key Vault name' "${OPENCLOSER_KEYVAULT_NAME:-}" vault_name
+  if env_value_missing "$vault_name"; then
+    printf 'Key Vault name is required.\n' >&2
+    return 1
+  fi
+
+  prompt_with_default 'Client ID secret name' "${OPENCLOSER_KV_SECRET_CLIENT_ID:-opencloser-dataverse-client-id}" client_id_name
+  prompt_with_default 'Client secret secret name' "${OPENCLOSER_KV_SECRET_CLIENT_SECRET:-opencloser-dataverse-client-secret}" client_secret_name
+  prompt_with_default 'Tenant ID secret name' "${OPENCLOSER_KV_SECRET_TENANT_ID:-opencloser-dataverse-tenant-id}" tenant_id_name
+  prompt_with_default 'CRM URL secret name' "${OPENCLOSER_KV_SECRET_ENV_URL:-opencloser-dataverse-env-url}" env_url_name
+
+  printf 'Retrieving Key Vault secrets with current Azure CLI identity...\n'
+  client_id="$(keyvault_secret_value "$vault_name" "$client_id_name" || true)"
+  client_secret="$(keyvault_secret_value "$vault_name" "$client_secret_name" || true)"
+  tenant_id="$(keyvault_secret_value "$vault_name" "$tenant_id_name" || true)"
+  env_url="$(keyvault_secret_value "$vault_name" "$env_url_name" || true)"
+
+  if env_value_missing "$client_id" || env_value_missing "$client_secret"; then
+    printf 'Could not retrieve complete app credentials from Key Vault. Check vault name, secret names, and Key Vault Secrets User access.\n' >&2
+    return 1
+  fi
+
+  set_env_value DATAVERSE_CLIENT_ID "$client_id"
+  set_env_value DATAVERSE_CLIENT_SECRET "$client_secret"
+  printf 'Stored DATAVERSE_CLIENT_ID and DATAVERSE_CLIENT_SECRET from Key Vault (values hidden).\n'
+
+  if ! env_value_missing "$tenant_id"; then
+    set_env_value DATAVERSE_TENANT_ID "$tenant_id"
+    printf 'Stored DATAVERSE_TENANT_ID from Key Vault (value hidden).\n'
+  fi
+
+  if ! env_value_missing "$env_url"; then
+    set_env_value DATAVERSE_ENV_URL "$env_url"
+    printf 'Stored DATAVERSE_ENV_URL from Key Vault (value hidden).\n'
+  fi
+}
+
+show_app_credentials_help() {
+  cat <<'EOF'
+What this step needs:
+  DATAVERSE_CLIENT_ID is the Application (client) ID from the openCloser/Medx
+  Entra app registration.
+
+  DATAVERSE_CLIENT_SECRET is the secret value for that app registration. Entra
+  only shows a client secret value at creation time, so Azure CLI user login can
+  validate your CRM access but cannot recover an existing secret.
+
+Recommended order:
+  1. Use Azure Key Vault if the Medx/openCloser test app secrets are stored
+     there. Each tester logs in with their own Entra account, and Key Vault
+     decides whether they may read the secret. Secret values are not printed.
+
+  2. Search likely local locations. This only lists files that already
+     contain non-placeholder DATAVERSE_CLIENT_ID and DATAVERSE_CLIENT_SECRET.
+     Secret values are not printed.
+
+  3. If you know the file path, import that specific env file. Expected format:
+
+       DATAVERSE_CLIENT_ID=...
+       DATAVERSE_CLIENT_SECRET=...
+
+     DATAVERSE_TENANT_ID may also be included.
+
+  4. Paste credentials only if you are reading them from the approved secure
+     source, such as the password manager, Key Vault, or a newly created Entra
+     app registration secret. The input is hidden and written only to the local
+     ignored .env.opencloser-tests file.
+
+If none of those are available, skip for now and ask whoever owns the Medx
+openCloser app registration to provide or rotate the test app secret.
+EOF
+}
+
+configure_app_credentials() {
+  local answer
+
+  load_env_if_present
+  if ! env_value_missing "${DATAVERSE_CLIENT_ID:-}" && ! env_value_missing "${DATAVERSE_CLIENT_SECRET:-}"; then
+    printf 'App client credentials are already present in the local env file.\n'
+    printf 'Replace them? [y/N] '
+    read -r answer
+    case "$answer" in
+      y|Y|yes|YES) ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  cat <<'EOF'
+
+The shipped Feature 002 runtime uses client-credentials auth. Azure CLI user
+login can set the tenant and validate Dataverse access, but it cannot reveal an
+existing app client secret.
+
+Choose how to set DATAVERSE_CLIENT_ID and DATAVERSE_CLIENT_SECRET:
+  1) Retrieve from Azure Key Vault (recommended shared path)
+  2) Search likely local locations for an env-style credential file
+  3) Import from a specific env-style file path
+  4) Paste app registration client credentials now
+  h) Explain where these values come from
+  5) Skip for now
+EOF
+
+  printf '\nSelection: '
+  read -r answer
+  case "$answer" in
+    1) load_credentials_from_key_vault ;;
+    2) import_existing_app_credentials ;;
+    3) import_credentials_from_prompted_path ;;
+    4) prompt_app_credentials ;;
+    h|H|help|HELP)
+      show_app_credentials_help
+      configure_app_credentials
+      ;;
+    5|"") printf 'Skipped app credential setup.\n' ;;
+    *) printf 'Unknown selection.\n' >&2; return 1 ;;
+  esac
+}
+
+select_crm_and_configure_auth() {
+  local choice raw crm_url
+
+  ensure_env_file
+  cat <<'EOF'
+Select the Dataverse CRM environment:
+  1) medx
+  2) Enter another CRM name
+  q) Cancel
+
+For a CRM name like "medx", the setup writes the corresponding
+DATAVERSE_ENV_URL using the Dynamics CRM host pattern. The value is not printed.
+EOF
+
+  printf '\nSelection: '
+  read -r choice
+  case "$choice" in
+    1) raw="medx" ;;
+    2)
+      printf 'CRM name or host: '
+      read -r raw
+      ;;
+    q|Q|quit|exit) return 0 ;;
+    *) printf 'Unknown selection.\n' >&2; return 1 ;;
+  esac
+
+  crm_url="$(crm_url_from_input "$raw")" || {
+    printf 'Invalid CRM name/host. Use a short name like medx or a *.crm.dynamics.com host.\n' >&2
+    return 1
+  }
+
+  set_env_value DATAVERSE_ENV_URL "$crm_url"
+  printf 'DATAVERSE_ENV_URL stored for selected CRM (value hidden).\n'
+
+  store_tenant_from_azure_cli "$crm_url" || true
+  configure_app_credentials || true
+  printf '\nCRM/auth setup step complete. Run the env check next.\n'
+}
+
+show_target_lead() {
+  cat <<EOF
+Dedicated Feature 002 write target:
+  leadid/fallback queue id: $target_queue_item_guid
+  facility id: OC-TEST-001
+  name: OpenCloser Tester 001
+  company: OC Test ALF 001 - Clean With Email
+  phone: +19494176888
+EOF
+}
+
+show_env_status() {
+  if [[ -f "$env_file" ]]; then
+    printf 'env file: present (%s)\n' "$env_file"
+  else
+    printf 'env file: missing (%s)\n' "$env_file"
+  fi
+
+  if [[ -x "$repo_root/scripts/opencloser-tests-prep.sh" ]]; then
+    "$repo_root/scripts/opencloser-tests-prep.sh" --check || true
+  else
+    printf 'prep script: missing or not executable\n'
+  fi
+}
+
+show_mapping_status() {
+  local mapping="$repo_root/config/dataverse_mapping.json"
+  if [[ ! -f "$mapping" ]]; then
+    printf 'mapping: missing (%s)\n' "$mapping"
+    return 0
+  fi
+
+  local py
+  py="$(python_bin)" || {
+    printf 'mapping: present, approval unknown because python is unavailable\n'
+    return 0
+  }
+
+  "$py" - "$mapping" <<'PY' || true
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"mapping: present, unreadable JSON ({exc})")
+    raise SystemExit(0)
+
+approved = data.get("_meta", {}).get("approved") is True
+has_environment = bool(data.get("_meta", {}).get("environment_url") or data.get("_meta", {}).get("dataverse_env_url"))
+print(f"mapping: present, approved={str(approved).lower()}, environment_recorded={str(has_environment).lower()}")
+PY
+}
+
+show_slice2_status() {
+  local config="$repo_root/config/slice2.toml"
+  if [[ ! -f "$config" ]]; then
+    printf 'slice2 config: missing (%s)\n' "$config"
+    return 0
+  fi
+
+  local py
+  py="$(python_bin)" || {
+    printf 'slice2 config: present, details unknown because python is unavailable\n'
+    return 0
+  }
+
+  "$py" - "$config" <<'PY' || true
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    config = tomllib.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"slice2 config: unreadable TOML ({exc})")
+    raise SystemExit(0)
+
+run = config.get("run", {})
+dataverse = config.get("dataverse", {})
+owners = config.get("task_owners", {})
+redaction = config.get("redaction", {})
+guid_re = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+campaign = str(run.get("campaign", "")).strip()
+callable_status = str(dataverse.get("callable_status", "")).strip()
+callback = str(owners.get("callback", "")).strip()
+review = str(owners.get("review", "")).strip()
+callback_ok = bool(guid_re.fullmatch(callback))
+review_ok = bool(guid_re.fullmatch(review))
+policy = str(redaction.get("policy", "")).strip()
+retention = str(redaction.get("retention", "")).strip()
+
+print(f"slice2 campaign: {'present' if campaign else 'missing'}{f' ({campaign})' if campaign else ''}")
+print(f"slice2 callable_status: {'present' if callable_status else 'missing'}{f' ({callable_status})' if callable_status else ''}")
+print(f"slice2 task owner callback: {'present' if callback_ok else 'missing/placeholder'}")
+print(f"slice2 task owner review: {'present' if review_ok else 'missing/placeholder'}")
+print(f"slice2 redaction: policy={policy or 'missing'}, retention={retention or 'missing'}")
+PY
+}
+
+show_tool_status() {
+  if command -v uv >/dev/null 2>&1; then
+    printf 'uv: present\n'
+  else
+    printf 'uv: missing on PATH\n'
+  fi
+
+  if [[ -n "${container:-}" || -f /.dockerenv ]]; then
+    printf 'runtime: container shell\n'
+  else
+    printf 'runtime: host shell\n'
+  fi
+  show_azure_status
+}
+
+show_status() {
+  load_env_if_present
+  section "openCloser Setup Status"
+  printf 'repo: %s\n' "$repo_root"
+  show_tool_status
+  show_env_status
+  show_mapping_status
+  show_slice2_status
+  show_target_lead
+}
+
+init_env_file() {
+  "$repo_root/scripts/opencloser-tests-prep.sh" --init
+}
+
+edit_file() {
+  local path="$1"
+  local missing_message="${2:-file does not exist yet}"
+
+  if [[ ! -f "$path" ]]; then
+    printf '%s: %s\n' "$missing_message" "$path"
+    return 1
+  fi
+
+  local editor="${EDITOR:-}"
+  if [[ -z "$editor" ]]; then
+    for candidate in nano vim vi; do
+      if command -v "$candidate" >/dev/null 2>&1; then
+        editor="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$editor" ]]; then
+    printf 'No terminal editor found. Edit this file manually:\n%s\n' "$path"
+    return 1
+  fi
+
+  "$editor" "$path"
+}
+
+edit_env_file() {
+  edit_file "$env_file" "env file does not exist yet. Run option 1 first"
+}
+
+edit_slice2_config() {
+  edit_file "$repo_root/config/slice2.toml" "Slice 2 config is missing"
+}
+
+review_mapping_artifact() {
+  edit_file "$repo_root/config/dataverse_mapping.json" "CRM mapping is missing. Run CRM discovery first"
+}
+
+check_env() {
+  "$repo_root/scripts/opencloser-tests-prep.sh" --check
+}
+
+discover_crm() {
+  "$repo_root/scripts/opencloser-tests-prep.sh" -- uv run opencloser discover-crm
+  printf '\nReview config/dataverse_mapping.json before approving it for write tests.\n'
+}
+
+run_dry_run_demo() {
+  DATAVERSE_TEST_QUEUE_ITEM_GUID="$target_queue_item_guid" \
+    "$repo_root/scripts/feature_002_demo.sh"
+}
+
+run_write_demo() {
+  load_env_if_present
+  section "Write-Enabled Feature 002 Demo"
+  show_target_lead
+  cat <<'EOF'
+
+This path can mutate Dataverse. Before continuing, verify this lead in CRM and
+capture the pre-demo state needed for rollback.
+EOF
+
+  local confirm_guid captured_guid
+  printf '\nType the exact target GUID to confirm the dedicated test record: '
+  read -r confirm_guid
+  if [[ "$confirm_guid" != "$target_queue_item_guid" ]]; then
+    printf 'confirmation did not match target GUID; stopping before write\n' >&2
+    return 1
+  fi
+
+  printf 'Type the same GUID after confirming pre-demo CRM state is captured: '
+  read -r captured_guid
+  if [[ "$captured_guid" != "$target_queue_item_guid" ]]; then
+    printf 'pre-demo state confirmation did not match target GUID; stopping before write\n' >&2
+    return 1
+  fi
+
+  FEATURE_002_ENABLE_WRITE=1 \
+    FEATURE_002_TEST_RECORD_CONFIRMED="$target_queue_item_guid" \
+    FEATURE_002_PREDEMO_STATE_CAPTURED="$target_queue_item_guid" \
+    DATAVERSE_TEST_QUEUE_ITEM_GUID="$target_queue_item_guid" \
+    "$repo_root/scripts/feature_002_demo.sh"
+}
+
+print_next_steps() {
+  cat <<EOF
+Typical py-bench flow:
+
+  cd /workspace/projects/openCloser
+  ./setup-openCloser
+
+Start with:
+  1. Initialize local env file
+  2. Select CRM and configure auth
+  3. Check env
+  4. Discover CRM metadata
+  5. Review CRM mapping artifact
+  6. Edit Slice 2 config
+  7. Check full setup status
+  8. Run dry-run demo
+  9. Run write demo only after confirming the CRM lead
+
+The local secret file is:
+  $env_file
+
+The write target is:
+  $target_queue_item_guid
+EOF
+}
+
+menu() {
+  while true; do
+    load_env_if_present
+    clear 2>/dev/null || true
+    cat <<EOF
+openCloser setup
+Repo: $repo_root
+Env:  $env_file
+
+$(show_target_lead)
+
+Choose an option:
+  1) Initialize local test env file
+  2) Select CRM and configure auth
+  3) Edit local test env file
+  4) Check Dataverse env values
+  5) Discover CRM metadata
+  6) Review CRM mapping artifact
+  7) Edit Slice 2 config
+  8) Show full setup status
+  9) Run Feature 002 dry-run demo
+  10) Run Feature 002 write-enabled demo
+  n) Show next steps
+  q) Quit
+EOF
+
+    printf '\nSelection: '
+    read -r choice || return 0
+
+    case "$choice" in
+      1) run_step "Initialize Local Env File" init_env_file; pause ;;
+      2) run_step "Select CRM and Configure Auth" select_crm_and_configure_auth || true; pause ;;
+      3) run_step "Edit Local Env File" edit_env_file || true; pause ;;
+      4) run_step "Check Dataverse Env Values" check_env || true; pause ;;
+      5) run_step "Discover CRM Metadata" discover_crm || true; pause ;;
+      6) run_step "Review CRM Mapping Artifact" review_mapping_artifact || true; pause ;;
+      7) run_step "Edit Slice 2 Config" edit_slice2_config || true; pause ;;
+      8) show_status; pause ;;
+      9) run_step "Feature 002 Dry-Run Demo" run_dry_run_demo || true; pause ;;
+      10) run_write_demo || true; pause ;;
+      n|N) print_next_steps; pause ;;
+      q|Q|quit|exit) return 0 ;;
+      *) printf 'Unknown selection: %s\n' "$choice"; pause ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    ;;
+  --status)
+    show_status
+    ;;
+  "")
+    if [[ ! -t 0 ]]; then
+      usage >&2
+      exit 2
+    fi
+    menu
+    ;;
+  *)
+    printf 'error: unknown argument: %s\n' "$1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

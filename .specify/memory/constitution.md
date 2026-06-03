@@ -1,23 +1,18 @@
 <!--
 Sync Impact Report
-Version change: N/A -> 1.0.0
+Version change: 1.0.0 -> 1.1.0
 Modified principles:
-- Template Principle 1 -> I. CRM Is the Control Plane
-- Template Principle 2 -> II. Thin Slices Before Platform Surface
-- Template Principle 3 -> III. Core, Adapters, and Personas Stay Separate
-- Template Principle 4 -> IV. Automation Is Auditable and Idempotent
-- Template Principle 5 -> V. Safety, Privacy, and Human Handoff Are Required Paths
+- II. Thin Slices Before Platform Surface - permits a narrow admin install/status
+  app as a separate non-operator feature stream after Feature 002
 Added sections:
-- Architecture Constraints
-- Delivery Workflow
+- Bench Ownership and Parallel Workstreams
 Removed sections:
-- Placeholder Section 2
-- Placeholder Section 3
+- None
 Templates requiring updates:
 - .specify/templates/plan-template.md - updated
 - .specify/templates/spec-template.md - updated
 - .specify/templates/tasks-template.md - updated
-- .specify/templates/checklist-template.md - updated
+- .specify/templates/checklist-template.md - no change required
 - .specify/templates/commands/*.md - not present
 Runtime guidance requiring updates:
 - AGENTS.md - updated
@@ -60,6 +55,12 @@ not directly advance the queue, eligibility, call, persona, result, write-back,
 or human-follow-up loop. Custom UI, multi-provider support, generalized workflow
 engines, distributed job systems, and clinical personas are out of scope for the
 MVP unless a feature spec records a constitution-approved exception.
+
+A narrow admin install/status app is the approved exception after Feature 002.
+It MAY proceed in parallel with Feature 003 only when it stays outside the
+operator workflow, uses versioned runtime contracts, and remains limited to
+account setup, tenant consent, CRM environment selection, install verification,
+health, and basic campaign controls.
 
 Rationale: The core risk is whether one CRM-owned prospect can produce a useful
 disposition and follow-up task. Proving that loop matters more than breadth.
@@ -116,10 +117,13 @@ local artifacts for Slice 1, Dynamics 365 / Dataverse for Slices 2 and 3,
 first production telephony transport, Pipecat for the voice runtime, and a
 configured real-time AI provider for the first real-call path.
 
-The MVP MUST avoid Celery, Redis as a required dependency, Kubernetes, multiple
-CRM adapters, multiple telephony providers, frontend frameworks, analytics
-dashboards, transcript review consoles, opportunity creation, advanced retry
-orchestration, and custom product UI until the thin MVP loop is proven.
+The MVP runtime MUST avoid Celery, Redis as a required dependency, Kubernetes,
+multiple CRM adapters, multiple telephony providers, operator frontend
+frameworks, analytics dashboards, transcript review consoles, opportunity
+creation, advanced retry orchestration, and custom product UI until the thin MVP
+loop is proven. The approved Flutter admin app exception does not permit an
+operator campaign builder, transcript console, analytics dashboard, or CRM
+replacement.
 
 Secrets MUST come from environment variables or a secret manager. Logs MUST
 avoid secrets and MUST minimize sensitive data. Transcript retention MUST be
@@ -129,6 +133,21 @@ CRM schema and live Dataverse behavior MUST be verified before adding fields,
 picklist values, or bulk updates. CRM data updates MUST preserve existing
 high-confidence CRM values unless the feature explicitly requires and verifies
 an overwrite policy.
+
+## Bench Ownership and Parallel Workstreams
+
+Every feature MUST declare exactly one bench owner:
+
+- `py-bench` for Python runtime, API, worker, CRM, telephony, persona,
+  contract-test, and fixture-backed runtime work.
+- `flutterBench` for Flutter admin UI, generated Dart clients, mock adapters,
+  UI tests, mobile/web packaging, and admin-app release work.
+
+Feature 003 is reserved for the `py-bench` real-call/real-CRM runtime slice and
+MUST NOT contain Flutter implementation tasks. Flutter admin work starts at
+Feature 004 or later and MUST meet Python work only through versioned contracts,
+fixtures, or generated clients. If a capability needs both backend and Flutter
+changes, it MUST be split into separate feature numbers.
 
 ## Delivery Workflow
 
@@ -140,6 +159,7 @@ and mark parallel work only when write sets and dependencies do not conflict.
 Implementation plans MUST include:
 
 - Target MVP slice or post-MVP phase.
+- Bench owner and any cross-bench contract dependency.
 - Queue source and CRM/write-back target.
 - Mock or real call transport.
 - Persona and persona versioning impact.
@@ -174,4 +194,4 @@ All feature plans, task sets, and reviews MUST explicitly check constitution
 compliance. Any accepted violation MUST be recorded in the plan's Complexity
 Tracking section with the reason and the simpler alternative that was rejected.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-19 | **Last Amended**: 2026-05-19
+**Version**: 1.1.0 | **Ratified**: 2026-05-19 | **Last Amended**: 2026-05-25

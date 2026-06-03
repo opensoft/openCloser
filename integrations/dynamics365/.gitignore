@@ -1,0 +1,7 @@
+# Local deployment settings can contain environment-specific URLs or trigger secrets.
+solution/deployment-settings.local.json
+
+# Packaged solutions are build/release artifacts.
+solution/managed/*.zip
+solution/unmanaged/*.zip
+

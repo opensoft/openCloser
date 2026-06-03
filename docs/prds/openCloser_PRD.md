@@ -4,13 +4,18 @@ Status: Draft
 
 Owner: openCloser maintainers
 
-Last updated: 2026-05-19
+Last updated: 2026-05-25
 
 ## Summary
 
 openCloser is an open-source AI communication platform for healthcare-oriented outreach, scheduling, and virtual care conversations. The product starts with CRM-driven outbound calling for assisted living facility outreach, then expands into patient scheduling, nurse intake, follow-up, and AI-assisted virtual care over phone, app voice, and app video.
 
 The first release should prove that a small clinic or sales team can run compliant, auditable AI-assisted phone outreach directly from its CRM without buying a full contact-center stack or building one-off call automation.
+
+Client onboarding and the small admin/status surface are defined in
+[Client Onboarding and Admin App](../architecture/openCloser_Client_Onboarding_and_Admin_App.md).
+Release boundaries for the runtime, Dynamics solution, and admin app are defined
+in [Release and Repository Strategy](../architecture/openCloser_Release_and_Repo_Strategy.md).
 
 ## Problem
 
@@ -48,6 +53,10 @@ Medx needs to call assisted living facilities from Dynamics 365 Sales Hub. The A
 - Capture transcript, summary, disposition, extracted fields, and next actions.
 - Write durable outcomes back to CRM.
 - Create human follow-up tasks when the AI identifies interest, risk, uncertainty, or escalation.
+- Make client tenant onboarding and Dynamics extension installation practical
+  for non-developer administrators.
+- Provide a narrow admin/mobile status surface for install, health, active
+  campaign status, and pause/resume controls.
 - Make personas swappable without changing the interaction core.
 - Keep the first version deployable by a small team.
 - Establish architecture that can later support app voice, app video, and clinical personas.
@@ -56,6 +65,7 @@ Medx needs to call assisted living facilities from Dynamics 365 Sales Hub. The A
 
 - Building a general-purpose CRM in the first version.
 - Building a full campaign management UI in the first version.
+- Building a replacement CRM or broad operator dashboard in the first version.
 - Replacing licensed clinicians for diagnosis or treatment decisions.
 - Creating opportunities for every positive signal without qualification rules.
 - Supporting every telephony provider or CRM at launch.
@@ -170,14 +180,40 @@ Acceptance criteria:
 
 Priority: P0
 
-The system must connect call audio to a real-time AI conversation runtime.
+The system must connect call audio to a real-time AI conversation runtime. The
+first live-call path should use direct speech-to-speech model audio through the
+runtime adapter instead of making the live turn depend on a blocking STT to
+text LLM to TTS chain.
 
 Acceptance criteria:
 
 - Call audio is streamed to Pipecat.
+- The configured real-time model can receive caller audio and stream spoken
+  responses.
 - The configured persona receives session context and CRM fields.
 - The persona can emit structured events such as extracted email, interest level, callback request, and escalation request.
 - The system can terminate the session cleanly when the caller hangs up, the provider fails, or the persona reaches completion.
+
+### Shadow STT Verification
+
+Priority: P1
+
+The system should support a non-blocking shadow STT lane for Slice 3 and later
+live-call paths.
+
+Acceptance criteria:
+
+- The same caller audio can be sent to a configured STT provider without
+  blocking the realtime model response path.
+- The system stores a shadow transcript or transcript pointer under the same
+  session ID and retention policy.
+- The system compares the realtime model transcript/log against shadow STT for
+  opt-out, wrong-number, email, callback intent, person reached, interest
+  level, and final disposition.
+- Early versions record discrepancies and can route uncertain calls to human
+  review.
+- Shadow STT does not independently write CRM records or override final
+  dispositions in the MVP.
 
 ### Persona Configuration
 
@@ -231,6 +267,8 @@ Acceptance criteria:
 - Each queue item, session, provider call, and CRM write-back has a correlation ID.
 - Logs avoid storing secrets and follow PHI policy.
 - Metrics include attempted calls, connected calls, dispositions, provider errors, write-back failures, and average call duration.
+- Metrics include user-to-bot latency, realtime model TTFB when available, and
+  shadow STT discrepancy counts when shadow STT is enabled.
 - Failed write-backs can be retried idempotently.
 
 ### Admin and Developer Configuration
@@ -244,6 +282,36 @@ Acceptance criteria:
 - A deployment can configure CRM connection, provider credentials, call windows, attempt limits, persona, and write-back mappings.
 - A local developer can run a dry-run queue worker without placing calls.
 - Example config is included without secrets.
+
+### Client Onboarding and Admin App
+
+Priority: P1
+
+The product should provide a small Flutter admin app for tenant onboarding,
+Dynamics extension install guidance, and system status. The app should be
+mobile-first and tablet/web-ready from the same codebase. The admin app is not
+the operator campaign UI.
+
+Acceptance criteria:
+
+- A client admin can sign in with Microsoft and create or join an openCloser
+  account.
+- The admin can grant tenant consent to the openCloser Microsoft application.
+- The admin can select a Dataverse/Dynamics environment.
+- The app can detect whether the openCloser Dynamics managed solution is
+  installed and what version is present.
+- The app guides or automates required solution environment variables.
+- The app verifies Dataverse metadata access and write-back permissions.
+- The app verifies Lead and Campaign trigger buttons can reach openCloser.
+- The app shows runtime, CRM, telephony, model, campaign, and write-back health.
+- The app shows active campaigns, eligible counts, calls attempted, failures,
+  and human-review items.
+- The app supports pause/resume for campaign automation without replacing
+  Dynamics as the operator surface.
+- Before external client release, the admin app can move to `openCloser-admin`
+  and release independently against the runtime Admin API `v1`.
+- Flutter admin features are numbered separately from Python runtime features
+  after Feature 003 so both workstreams can run in parallel.
 
 ### App Voice and Video Transport
 
@@ -314,6 +382,9 @@ The MVP should support:
 - Extensibility: new personas should not require changes to the queue worker.
 - Cost control: MVP should run on small cloud instances for low call volume.
 - Latency: real-time calls should avoid delays that make conversation feel unnatural.
+- Runtime ownership: Dograh may be evaluated as a sidecar behind an explicit
+  runtime adapter, but it must not become the CRM source of truth, required
+  campaign UI, or core MVP runtime without a later architecture decision.
 
 ## Milestones
 
@@ -346,12 +417,29 @@ The MVP should support:
 - Real Dynamics campaign queue.
 - SignalWire outbound dialing.
 - SignalWire status callback handling.
-- Pipecat audio pipeline.
+- Pipecat audio pipeline with direct real-time audio model path.
+- Shadow STT discrepancy logging for live-call verification.
 - ALF outreach persona.
 - Limited call volume.
 - Human review of transcripts and tasks.
 - Campaign reporting.
 - Operational runbook.
+
+### M3.5: Client Onboarding and Dynamics Install
+
+- Dynamics managed solution packaging.
+- AppSource or managed-zip install path.
+- Flutter openCloser Admin account setup.
+- Microsoft tenant consent flow.
+- Dataverse environment selection and verification.
+- Integration identity/application user setup guidance.
+- Solution configuration and version detection.
+- Health/status overview.
+- Active campaign status and pause/resume controls.
+- Versioned `/v1` runtime contracts and compatibility matrix for the admin app
+  and Dynamics solution.
+- Repository split readiness for `openCloser-admin` and
+  `openCloser-dynamics365`.
 
 ### M4: Extensible Platform
 
@@ -371,3 +459,7 @@ The MVP should support:
 - What exact callback window should "tomorrow morning" mean for Medx?
 - Which provider should be the long-term app voice/video transport?
 - What clinical workflows are allowed before a licensed clinician enters the loop?
+- Should external pilots install from a managed solution zip first, or wait for
+  AppSource certification?
+- Should the first Flutter admin app ship first as hosted web, packaged mobile,
+  or both from the same codebase?

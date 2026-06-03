@@ -2,23 +2,29 @@
 
 A CRM-first AI communication platform for healthcare-oriented outreach.
 
-## Active feature
+## Feature Status
 
-**Slice 1 — Mock Call, Mock CRM**
+Current shipped runtime slices:
 
-The first end-to-end product loop on a single ALF prospect queue record, fixture-driven, with no real telephony, no real CRM, no UI. Proves the five module boundaries (Interaction Core, Eligibility, Mock Call Transport, Persona, Mock CRM Write-back) before swapping in real SignalWire (Slice 2) and Dataverse (Slice 2+).
+- Feature 001 — Slice 1: mock call, mock CRM.
+- Feature 002 — Slice 2: mock call, real CRM.
 
 See:
 
-- [Specification](specs/001-mock-call-mock-crm/spec.md) — what is built and why
-- [Plan](specs/001-mock-call-mock-crm/plan.md) — technical decisions and project structure
-- [Tasks](specs/001-mock-call-mock-crm/tasks.md) — ordered task list for implementation
-- [Quickstart](specs/001-mock-call-mock-crm/quickstart.md) — install, run, and inspect artifacts in 8 steps
+- [Feature inventory](specs/README.md) — feature numbering, bench ownership, and parallel Python/Flutter roadmap
+- [Slice 1 specification](specs/001-mock-call-mock-crm/spec.md) — mock call plus mock CRM
+- [Slice 2 specification](specs/002-mock-call-real-crm/spec.md) — mock call plus real CRM
+- [Slice 1 quickstart](specs/001-mock-call-mock-crm/quickstart.md) — local mock-loop walkthrough
 - [Constitution](.specify/memory/constitution.md) — binding project principles
+- [Client onboarding/admin app](docs/architecture/openCloser_Client_Onboarding_and_Admin_App.md) — tenant install, Dynamics managed solution, and admin status surface
+- [Release and repository strategy](docs/architecture/openCloser_Release_and_Repo_Strategy.md) — when to split admin and Dynamics packages into independently released repos
+- [Dynamics integration scaffold](integrations/dynamics365/README.md) — managed-solution source area and CRM command-bar trigger scaffold
 
 ## Status
 
-Slice 1 is complete — spec, plan, tasks, contracts, checklists, and the end-to-end implementation (all 75 tasks in `tasks.md`). Run the Bootstrap steps below to exercise the mock loop.
+Feature 003 is reserved for the `py-bench` real-call/real-CRM runtime slice.
+Flutter admin-app work starts at Feature 004+ and must stay in `flutterBench`
+features so Python runtime and Flutter admin work can proceed in parallel.
 
 ## Bootstrap (developers)
 

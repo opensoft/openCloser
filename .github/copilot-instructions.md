@@ -16,6 +16,20 @@ outreach. Read these project docs before creating or implementing specs:
 
 Spec Kit lives under `.specify/`. Feature work uses linked git worktrees.
 
+## Feature Bench Ownership
+
+Read `specs/README.md` before creating or renumbering features. Every Speckit
+feature must be fully owned by one bench:
+
+- `py-bench` for Python runtime, API, worker, CRM, telephony, persona, and
+  contract-test work.
+- `flutterBench` for Flutter admin app UI, generated clients, mock adapters,
+  UI tests, and mobile/web packaging.
+
+Feature 003 is reserved for the `py-bench` real-call/real-CRM runtime slice.
+Flutter admin work starts at Feature 004+ and must not be mixed into Python
+runtime feature tasks.
+
 <!-- OPENSPEC-SPECKIT-GLOBAL:START -->
 ## Shared OpenSpec/Speckit Protocol
 

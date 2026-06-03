@@ -1,0 +1,526 @@
+openapi: 3.1.0
+info:
+  title: openCloser Runtime API
+  version: 1.0.0-draft
+  description: >
+    Versioned API contract shared by the openCloser runtime, Dynamics 365
+    managed solution, and openCloser Admin app.
+servers:
+  - url: https://opencloser.example.com
+paths:
+  /v1/crm/dataverse/leads/{lead_id}/ai-call:
+    post:
+      operationId: triggerLeadAiCall
+      summary: Trigger one openCloser call attempt for one Dataverse Lead.
+      parameters:
+        - $ref: "#/components/parameters/LeadId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrmTriggerRequest"
+      responses:
+        "202":
+          description: Run accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriggerAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/crm/dataverse/campaigns/{campaign_id}/run:
+    post:
+      operationId: triggerCampaignRun
+      summary: Trigger openCloser processing for eligible Leads in one Campaign.
+      parameters:
+        - $ref: "#/components/parameters/CampaignId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrmTriggerRequest"
+      responses:
+        "202":
+          description: Run accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriggerAcceptedResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          $ref: "#/components/responses/Problem"
+        "403":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/admin/accounts:
+    post:
+      operationId: createAccount
+      summary: Create or join an openCloser customer account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: Account created or joined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+  /v1/admin/account:
+    get:
+      operationId: getAccount
+      summary: Get the current openCloser account.
+      responses:
+        "200":
+          description: Current account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountResponse"
+        "401":
+          $ref: "#/components/responses/Problem"
+  /v1/admin/microsoft/consent/start:
+    post:
+      operationId: startMicrosoftConsent
+      summary: Start the Microsoft tenant admin consent flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentStartRequest"
+      responses:
+        "200":
+          description: Consent URL generated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentStartResponse"
+  /v1/admin/microsoft/consent/complete:
+    post:
+      operationId: completeMicrosoftConsent
+      summary: Complete and verify the Microsoft tenant admin consent callback.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentCompleteRequest"
+      responses:
+        "200":
+          description: Consent verified.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantConsentStatus"
+        "400":
+          $ref: "#/components/responses/Problem"
+  /v1/admin/tenants/{tenant_id}/environments:
+    get:
+      operationId: listTenantEnvironments
+      summary: List Dataverse environments visible to the connected tenant.
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Environment list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [environments]
+                properties:
+                  environments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CrmEnvironment"
+  /v1/admin/crm/environments/{environment_id}/status:
+    get:
+      operationId: getCrmEnvironmentStatus
+      summary: Get install and health status for one CRM environment.
+      parameters:
+        - $ref: "#/components/parameters/EnvironmentId"
+      responses:
+        "200":
+          description: Environment status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrmEnvironmentStatus"
+  /v1/admin/crm/environments/{environment_id}/verify:
+    post:
+      operationId: verifyCrmEnvironment
+      summary: Run install, metadata, trigger, and write-back readiness checks.
+      parameters:
+        - $ref: "#/components/parameters/EnvironmentId"
+      responses:
+        "200":
+          description: Verification result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationReport"
+  /v1/admin/crm/environments/{environment_id}/solution:
+    get:
+      operationId: getCrmSolutionStatus
+      summary: Get installed openCloser Dynamics solution version/status.
+      parameters:
+        - $ref: "#/components/parameters/EnvironmentId"
+      responses:
+        "200":
+          description: Solution status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SolutionStatus"
+  /v1/admin/campaigns:
+    get:
+      operationId: listCampaigns
+      summary: List openCloser-enabled campaign status summaries.
+      responses:
+        "200":
+          description: Campaign summaries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [campaigns]
+                properties:
+                  campaigns:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CampaignSummary"
+  /v1/admin/campaigns/{campaign_id}/pause:
+    post:
+      operationId: pauseCampaign
+      summary: Pause openCloser automation for one campaign.
+      parameters:
+        - $ref: "#/components/parameters/CampaignId"
+      responses:
+        "200":
+          description: Campaign paused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignSummary"
+  /v1/admin/campaigns/{campaign_id}/resume:
+    post:
+      operationId: resumeCampaign
+      summary: Resume openCloser automation for one campaign.
+      parameters:
+        - $ref: "#/components/parameters/CampaignId"
+      responses:
+        "200":
+          description: Campaign resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignSummary"
+  /v1/admin/health:
+    get:
+      operationId: getAdminHealth
+      summary: Get overall openCloser account and integration health.
+      responses:
+        "200":
+          description: Health status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminHealth"
+components:
+  parameters:
+    LeadId:
+      name: lead_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CampaignId:
+      name: campaign_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TenantId:
+      name: tenant_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EnvironmentId:
+      name: environment_id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Problem:
+      description: User-safe error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    CrmTriggerRequest:
+      type: object
+      required: [source, action, record, crm, run]
+      properties:
+        source:
+          type: string
+          const: dynamics365-command-bar
+        action:
+          type: string
+          enum: [ai_call_lead, run_campaign]
+        record:
+          $ref: "#/components/schemas/CrmRecordRef"
+        crm:
+          $ref: "#/components/schemas/CrmContext"
+        run:
+          $ref: "#/components/schemas/RunOptions"
+    CrmRecordRef:
+      type: object
+      required: [entityName, id]
+      properties:
+        entityName:
+          type: string
+          enum: [lead, campaign]
+        id:
+          type: string
+          format: uuid
+    CrmContext:
+      type: object
+      required: [clientUrl, organizationId, userId]
+      properties:
+        clientUrl:
+          type: string
+          format: uri
+        organizationId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+    RunOptions:
+      type: object
+      required: [mode, testMode, maxCampaignBatchSize, requestedAt]
+      properties:
+        mode:
+          type: string
+          enum: [dry_run, write]
+        testMode:
+          type: boolean
+        maxCampaignBatchSize:
+          type: integer
+          minimum: 1
+        assignmentTag:
+          type: [string, "null"]
+        requestedAt:
+          type: string
+          format: date-time
+    TriggerAcceptedResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+        message:
+          type: string
+        runId:
+          type: [string, "null"]
+    CreateAccountRequest:
+      type: object
+      required: [tenantId, organizationName]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        organizationName:
+          type: string
+    AccountResponse:
+      type: object
+      required: [accountId, tenantId, status]
+      properties:
+        accountId:
+          type: string
+        tenantId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [active, billing_pending, suspended]
+    ConsentStartRequest:
+      type: object
+      required: [tenantId, redirectUri]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        redirectUri:
+          type: string
+          format: uri
+    ConsentStartResponse:
+      type: object
+      required: [consentUrl, state]
+      properties:
+        consentUrl:
+          type: string
+          format: uri
+        state:
+          type: string
+    ConsentCompleteRequest:
+      type: object
+      required: [tenantId, state]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        state:
+          type: string
+        adminConsent:
+          type: boolean
+    TenantConsentStatus:
+      type: object
+      required: [tenantId, status]
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [missing, granted, revoked]
+    CrmEnvironment:
+      type: object
+      required: [environmentId, displayName, url]
+      properties:
+        environmentId:
+          type: string
+        displayName:
+          type: string
+        url:
+          type: string
+          format: uri
+    CrmEnvironmentStatus:
+      type: object
+      required: [environmentId, dataverseAccess, solution, verification]
+      properties:
+        environmentId:
+          type: string
+        dataverseAccess:
+          type: string
+          enum: [connected, permission_gap, unavailable]
+        solution:
+          $ref: "#/components/schemas/SolutionStatus"
+        verification:
+          type: string
+          enum: [not_run, passing, failing]
+    SolutionStatus:
+      type: object
+      required: [installed, version]
+      properties:
+        installed:
+          type: boolean
+        version:
+          type: [string, "null"]
+        updateAvailable:
+          type: boolean
+          default: false
+    VerificationReport:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [passing, failing]
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/VerificationCheck"
+    VerificationCheck:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [passing, failing, warning, skipped]
+        message:
+          type: [string, "null"]
+    CampaignSummary:
+      type: object
+      required: [campaignId, name, status, eligibleLeads, callsAttemptedToday, failuresNeedingAttention]
+      properties:
+        campaignId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, paused, blocked, test_mode]
+        eligibleLeads:
+          type: integer
+          minimum: 0
+        callsAttemptedToday:
+          type: integer
+          minimum: 0
+        failuresNeedingAttention:
+          type: integer
+          minimum: 0
+    AdminHealth:
+      type: object
+      required: [account, tenantConsent, crmExtension, dataverseAccess, runtimeApi]
+      properties:
+        account:
+          type: string
+          enum: [active, billing_pending, suspended]
+        tenantConsent:
+          type: string
+          enum: [missing, granted, revoked]
+        crmExtension:
+          type: string
+          enum: [not_installed, installed, update_available]
+        dataverseAccess:
+          type: string
+          enum: [connected, permission_gap, unavailable]
+        runtimeApi:
+          type: string
+          enum: [healthy, degraded, unavailable]
+        telephony:
+          type: string
+          enum: [not_configured, ready, provider_error]
+        aiRuntime:
+          type: string
+          enum: [not_configured, ready, provider_error]
+        writeBack:
+          type: string
+          enum: [healthy, retrying, failed]
+    Problem:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+        correlationId:
+          type: string

@@ -8,6 +8,8 @@
 
 **Input**: User description: "$ARGUMENTS"
 
+**Bench Owner**: [`py-bench` or `flutterBench`; choose exactly one]
+
 ## Constitution Alignment *(mandatory)*
 
 - **CRM control plane**: [Describe how this feature reads from and/or writes to
@@ -20,6 +22,9 @@
   PHI/sensitive-data, escalation, and task-creation requirements]
 - **Auditability**: [State required session IDs, provider IDs, persona version,
   transcript/summary policy, and duplicate-event behavior]
+- **Bench ownership**: [Confirm this feature is fully owned by one bench. If
+  another bench is needed, name the separate feature/contract boundary instead
+  of adding cross-bench tasks here.]
 
 ## User Scenarios & Testing *(mandatory)*
 

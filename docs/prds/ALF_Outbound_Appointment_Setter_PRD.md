@@ -4,7 +4,7 @@ Status: Draft
 
 Parent PRD: [openCloser PRD](./openCloser_PRD.md)
 
-Last updated: 2026-05-19
+Last updated: 2026-05-24
 
 ## Summary
 
@@ -18,6 +18,12 @@ CRM queue -> compliance gate -> outbound call -> AI conversation -> structured d
 
 The MVP for this feature is defined in [openCloser MVP](./openCloser_MVP.md). The smallest useful slice is one campaign, one queued facility record at a time, one ALF appointment-setter persona, and one structured write-back path. Real CRM write-back is proven before real telephony because the CRM loop is expected to be easier and more useful to validate first.
 
+Client onboarding, Dynamics solution installation, and the small admin/status
+surface are defined in
+[Client Onboarding and Admin App](../architecture/openCloser_Client_Onboarding_and_Admin_App.md).
+Release boundaries are defined in
+[Release and Repository Strategy](../architecture/openCloser_Release_and_Repo_Strategy.md).
+
 Build slices:
 
 1. Mock call, mock CRM.
@@ -30,7 +36,8 @@ The MVP intentionally excludes multi-provider support, app voice/video, nurse an
 
 - Sales operator: prepares CRM lists and monitors campaign outcomes.
 - Human callback owner: receives callback tasks for interested facilities.
-- Admin/developer: configures provider credentials, queue mappings, and persona behavior.
+- Admin/developer: configures provider credentials, queue mappings, persona
+  behavior, the Dynamics managed solution, and system health checks.
 - Facility staff member: receives the call and answers basic interest and contact questions.
 
 ## Goals
@@ -66,6 +73,11 @@ This describes the final Slice 3 workflow. Slices 1 and 2 replace the SignalWire
 9. The system writes the outcome to Dynamics.
 10. The system creates a Task for a human callback when needed.
 11. The queue item is finalized or scheduled for retry.
+
+For Slice 3, the live conversation should use the configured real-time audio
+model path. Shadow STT may listen to the same caller audio for transcript
+verification, but it must not block the conversation or directly control CRM
+write-back in the MVP.
 
 ## Eligibility Rules
 
@@ -238,6 +250,27 @@ Required write-back:
 
 ## CRM Requirements
 
+### CRM Extension Install
+
+The installable Dynamics extension should be packaged as a managed solution and
+installed into the customer tenant's selected Dynamics/Dataverse environment.
+
+Required CRM extension surfaces:
+
+- Lead command bar button: `AI Call Lead`.
+- Campaign command bar button: `Run openCloser Campaign`.
+- Environment variables for openCloser API URL, trigger mode, default run mode,
+  test mode, batch size, and allowed campaign codes.
+- Optional Power Automate trigger flow when direct browser-to-runtime API calls
+  are not appropriate.
+- Least-privilege security role or documented application-user setup.
+
+The extension only triggers openCloser with CRM context. The openCloser runtime
+owns eligibility, persona behavior, call execution, and idempotent write-back.
+The extension must call versioned runtime endpoints such as
+`/v1/crm/dataverse/leads/{lead_id}/ai-call` so the Dynamics solution can release
+independently from the runtime after the contract is stable.
+
 ### Source Records
 
 The queue item should reference:
@@ -322,7 +355,13 @@ Minimum report fields:
 - No-answer and voicemail outcomes follow retry policy.
 - Duplicate SignalWire callbacks do not create duplicate CRM records.
 - The transcript, summary, extracted fields, and disposition are tied to one session ID.
+- Shadow STT discrepancies for opt-out, wrong number, email, callback intent,
+  interest level, or final disposition are recorded for audit or human review
+  when shadow STT is enabled.
 - The persona remains within non-clinical, appointment-setting scope.
+- A client admin can install or verify the Dynamics extension, confirm Lead and
+  Campaign trigger reachability, and see basic campaign health from openCloser
+  Admin.
 
 ## Risks
 
@@ -331,7 +370,13 @@ Minimum report fields:
 - CRM data may have missing time zones, invalid phone numbers, or stale contacts.
 - Real-time voice latency may reduce call quality.
 - Email extraction may be error-prone over audio and should be confirmed.
+- Primary model transcript and shadow STT may disagree on important fields;
+  early versions should record the discrepancy and favor human review over
+  automated correction.
 - The AI may classify ambiguous conversations incorrectly without human review.
+- Client installs may fail because of tenant permissions, missing Dynamics
+  dependencies, or unmanaged customizations in the target environment; the admin
+  app must expose clear install status and remediation steps.
 
 ## Open Questions
 
@@ -342,3 +387,5 @@ Minimum report fields:
 - Should not-interested outcomes suppress future campaigns or only this campaign?
 - Should email updates require human approval before writing to Contact or Account?
 - Should connected calls store full transcript, summary only, or both?
+- Should the first external ALF pilot use an AppSource install or a managed
+  solution zip with guided admin setup?

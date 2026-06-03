@@ -1,0 +1,34 @@
+{
+  "EnvironmentVariables": [
+    {
+      "SchemaName": "oc_OpenCloserApiBaseUrl",
+      "Value": "https://opencloser.example.com"
+    },
+    {
+      "SchemaName": "oc_OpenCloserTriggerMode",
+      "Value": "direct-api"
+    },
+    {
+      "SchemaName": "oc_OpenCloserPowerAutomateTriggerUrl",
+      "Value": ""
+    },
+    {
+      "SchemaName": "oc_OpenCloserDefaultRunMode",
+      "Value": "dry_run"
+    },
+    {
+      "SchemaName": "oc_OpenCloserTestModeEnabled",
+      "Value": "false"
+    },
+    {
+      "SchemaName": "oc_OpenCloserMaxCampaignBatchSize",
+      "Value": "10"
+    },
+    {
+      "SchemaName": "oc_OpenCloserAllowedCampaignCodes",
+      "Value": ""
+    }
+  ],
+  "ConnectionReferences": []
+}
+

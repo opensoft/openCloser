@@ -6,7 +6,13 @@ Parent PRD: [openCloser PRD](./openCloser_PRD.md)
 
 Related PRD: [ALF Outbound Appointment Setter PRD](./ALF_Outbound_Appointment_Setter_PRD.md)
 
-Last updated: 2026-05-22
+Related architecture:
+[Client Onboarding and Admin App](../architecture/openCloser_Client_Onboarding_and_Admin_App.md)
+
+Release boundary:
+[Release and Repository Strategy](../architecture/openCloser_Release_and_Repo_Strategy.md)
+
+Last updated: 2026-05-25
 
 ## MVP Definition
 
@@ -190,9 +196,10 @@ Required task fields:
 - Reason a human should follow up.
 - Owner or team assignment from configuration for Slice 2 and Slice 3.
 
-## UI Rails
+## UI and Admin Rails
 
-The MVP should not include a custom product UI. The product surface should be the smallest interface that proves the call loop.
+The MVP call loop should not include a custom operator product UI. The product
+surface should be the smallest interface that proves the call loop.
 
 ### Development UI
 
@@ -221,13 +228,41 @@ Required Dynamics surfaces:
 
 The pilot should make the workflow usable from CRM without requiring operators to learn a separate campaign tool.
 
+### Client Admin Surface
+
+A narrow openCloser Admin app is allowed as an install and health surface. It is
+not the operator UI and it must not replace Dynamics.
+
+Allowed admin scope:
+
+- Create or join an openCloser account.
+- Sign in with Microsoft.
+- Guide tenant admin consent.
+- Select the Dynamics/Dataverse environment.
+- Install or verify the Dynamics managed solution.
+- Configure CRM extension environment variables.
+- Verify Dataverse access, metadata, command buttons, and write-back readiness.
+- Show runtime/API/CRM/telephony/model health.
+- Show active campaign status, basic counts, and failures needing attention.
+- Pause or resume campaign automation.
+
+The first admin app should be a small Flutter app that is mobile-first and
+tablet/web-ready. Admin app work should not block the Slice 1-3 call-loop proof
+unless a pilot customer needs guided install before accepting the deployment.
+
+The admin app may be scaffolded in this repo under `apps/admin_flutter/` while
+contracts settle, but it should move to `openCloser-admin` before external
+client release. The Dynamics managed solution should similarly move to
+`openCloser-dynamics365` once the managed solution source and AppSource
+packaging need their own release cadence.
+
 ### Explicitly Not MVP UI
 
 Do not build these for MVP:
 
 - React dashboard.
 - Next.js app.
-- Admin SPA.
+- Broad Admin SPA beyond install/status/control.
 - Campaign builder.
 - Transcript review console.
 - Analytics dashboard.
@@ -253,6 +288,9 @@ Recommended stack:
 - Telephony: mock transport for Slices 1 and 2; SignalWire outbound calls and status callbacks for Slice 3.
 - Voice runtime: Pipecat for Slice 3.
 - First AI model path: OpenAI Realtime through the Pipecat pipeline.
+- Shadow STT: non-blocking verification transcript for Slice 3, used for
+  discrepancy logging and human-review confidence, not live call control in the
+  MVP.
 - Tests: pytest with mocked CRM adapter, Dataverse contract/integration tests, mocked SignalWire callbacks, and persona transcript fixtures.
 - Packaging and local development: `uv`.
 - Local services: Docker Compose only when needed.
@@ -264,8 +302,13 @@ Avoid these until the MVP loop is proven:
 - Kubernetes.
 - Multiple CRM adapters.
 - Multiple telephony providers.
-- A frontend framework.
+- A frontend framework for the operator workflow.
 - A generalized workflow engine.
+- Dograh as a required runtime, campaign system, or operator UI.
+
+A small Flutter admin app may use a frontend framework only for install, health,
+and basic campaign-control status. That exception does not change the
+no-custom-operator-UI rule.
 
 ### Minimal Implementation Shape
 
@@ -301,6 +344,7 @@ This structure is intentionally smaller than the long-term architecture. It shou
 
 - App voice.
 - App video.
+- Full admin console beyond onboarding, health, and basic campaign controls.
 - AI nurse persona.
 - AI doctor persona.
 - Avatar rendering.
@@ -396,7 +440,11 @@ Behavior:
 - Run eligibility checks.
 - Place a real SignalWire outbound call.
 - Stream audio through Pipecat and the configured AI provider.
+- Run the configured real-time audio model as the live conversation path.
+- Run shadow STT against the same caller audio when enabled.
 - Run the ALF persona.
+- Record transcript discrepancies for high-value fields and route uncertain
+  outcomes to human review.
 - Write Phone Call activity, Task, and queue status back to Dynamics.
 
 Done when:
@@ -407,6 +455,7 @@ Done when:
 - Duplicate provider callbacks do not create duplicate CRM records.
 - Connected, no-answer, failed, and voicemail paths produce sane outcomes.
 - The AI result includes disposition, summary, and extracted email or callback intent when available.
+- Shadow STT discrepancies are recorded without blocking the live call.
 
 ## Acceptance Criteria
 
@@ -422,6 +471,8 @@ Done when:
 - Duplicate provider callbacks do not duplicate tasks or activities.
 - The MVP can run locally without Dynamics for development.
 - The pilot path can write the essential records to Dynamics.
+- A client admin can install or verify the Dynamics extension and see basic
+  system health without using developer-only scripts.
 
 ## Key Product Risk
 
@@ -434,15 +485,26 @@ The MVP should optimize for proving that loop with the least surface area possib
 - The first persona is ALF appointment setter.
 - The first real telephony provider is SignalWire.
 - The first voice runtime path is Pipecat plus a configured real-time AI provider.
+- The first live-call model path is direct speech-to-speech real-time audio, not
+  a blocking STT to text LLM to TTS chain.
+- Shadow STT is a verification lane, not the primary live-call control path.
+- Dograh is a reference and optional sidecar experiment, not a core MVP
+  dependency.
 - The first CRM pilot target is Dynamics 365 / Dataverse.
 - The first local development path can use file or SQLite adapters.
 - The MVP proves real CRM write-back before real telephony.
 - Slice 1 is mock call plus mock CRM.
 - Slice 2 is mock call plus real CRM.
 - Slice 3 is real call plus real CRM.
+- Feature 003 is reserved for the `py-bench` Slice 3 runtime and has no Flutter
+  tasks.
+- Flutter admin work starts at Feature 004+ and must stay in `flutterBench`
+  feature slices.
 - The MVP has no custom product UI.
 - Development uses CLI commands and local artifacts.
 - The pilot operator UI is Dynamics.
+- A narrow openCloser Admin app is permitted for tenant onboarding, managed
+  solution install guidance, and system health.
 - Python, FastAPI, Pipecat, SignalWire, and the Dataverse Web API are the default implementation stack.
 - Opportunities are excluded from MVP.
 - Clinical workflows are excluded from MVP.

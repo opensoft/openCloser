@@ -1,8 +1,8 @@
 <!-- SPECKIT START -->
 Before changing this repository, read `.specify/memory/constitution.md` when present.
 For feature-specific technologies, project structure, shell commands, and
-other implementation details, read the current plan:
-`specs/002-mock-call-real-crm/plan.md` (Slice 2 — Mock Call, Real CRM).
+other implementation details, read the current plan and the feature inventory:
+`specs/README.md`.
 <!-- SPECKIT END -->
 
 # openCloser Agent Context
@@ -23,6 +23,20 @@ Run OpenSpec and Speckit shell commands from the `py-bench` container when it is
 available. In that bench, the root checkout is
 `/workspace/projects/openCloser` and linked feature worktrees live under
 `/workspace/projects/openCloser-worktrees`.
+
+## Feature Bench Ownership
+
+Read `specs/README.md` before creating or renumbering features. Every Speckit
+feature must be fully owned by one bench:
+
+- `py-bench` for Python runtime, API, worker, CRM, telephony, persona, and
+  contract-test work.
+- `flutterBench` for Flutter admin app UI, generated clients, mock adapters,
+  UI tests, and mobile/web packaging.
+
+Feature 003 is reserved for the `py-bench` real-call/real-CRM runtime slice.
+Flutter admin work starts at Feature 004+ and must not be mixed into Python
+runtime feature tasks.
 
 <!-- OPENSPEC-SPECKIT-GLOBAL:START -->
 ## Shared OpenSpec/Speckit Protocol
