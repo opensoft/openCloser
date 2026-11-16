@@ -20,9 +20,9 @@ Spec Kit lives under `.specify/`. Feature work uses linked git worktrees.
 ## OpenSpec/Speckit Bench Runtime
 
 Run OpenSpec and Speckit shell commands from the `py-bench` container when it is
-available. In that bench, the root checkout is
-`/workspace/projects/openCloser` and linked feature worktrees live under
-`/workspace/projects/openCloser-worktrees`.
+available. Resolve the checkout with `git rev-parse --show-toplevel`. Locate existing
+feature worktrees with `git worktree list --porcelain`, and use the configured
+`worktree_root` for new work. Do not assume a projects-root alias.
 
 ## Feature Bench Ownership
 
